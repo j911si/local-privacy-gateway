@@ -1,0 +1,24 @@
+Outage summary - checkout platform
+
+Ticket: TCK-88213
+Incident: INC-2026-0042
+Severity: high
+
+Reported by Mr Hallberg after the nightly deployment.
+
+Impact: card payments failed for eighteen minutes.
+
+Affected host: payments-edge-07.corp.example.com
+Internal address 10.42.7.19 forwarded traffic to 203.0.113.44.
+
+The failing call was
+https://api.corp.example.com/v1/checkout?order=9912&token=ab12cd34ef56gh78ij90
+and every retry returned HTTP 502.
+
+Root cause: a rotated credential was still cached by the worker pool.
+The old access key AKIAIOSFODNN7EXAMPLE had been revoked that morning.
+The cached bearer credential was
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MjAiLCJyb2xlIjoid29ya2VyIn0.7d3JpZ2h0c2lnbmF0dXJlX3Rlc3RfdmFsdWU
+
+Mitigation: the worker pool was restarted and the cache was flushed.
+Follow-up owner: Mr Hallberg.

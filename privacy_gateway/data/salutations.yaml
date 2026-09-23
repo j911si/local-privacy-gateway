@@ -1,0 +1,18 @@
+# Salutation word -> gender. null means the word carries no gender information.
+# This file is the ONLY source of the gender attribute; names never imply gender.
+Frau: female
+Herr: male
+Herrn: male
+Mrs: female
+Mrs.: female
+Ms: female
+Ms.: female
+Miss: female
+Mr: male
+Mr.: male
+Mx: null
+Mx.: null
+Dr: null
+Dr.: null
+Prof: null
+Prof.: null

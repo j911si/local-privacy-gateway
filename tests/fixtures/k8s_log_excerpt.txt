@@ -1,0 +1,24 @@
+2026-03-04T08:12:44Z level=info msg="reconcile started"
+namespace: payments-prod
+pod: checkout-worker-7d9f5c8b4-xk2lp
+container: checkout-worker
+cluster: eu-central-prod-01
+
+2026-03-04T08:12:45Z level=info msg="connecting"
+The worker used postgres://svc_checkout:Tr0ub4dorRelay@db-primary.internal:5432/orders_db
+and replayed two hundred pending events.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payments-db-credentials
+  namespace: payments-prod
+type: Opaque
+data:
+  db-password: VHIwdWI0ZG9yUmVsYXk=
+  api-token: c2stdGVzdC1hcGktdG9rZW4tMDAx
+---
+
+2026-03-04T08:13:02Z level=warn msg="retry budget exhausted"
+2026-03-04T08:13:07Z level=info msg="reconcile finished"

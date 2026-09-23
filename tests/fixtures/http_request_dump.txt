@@ -1,0 +1,19 @@
+POST /api/v2/payments HTTP/1.1
+Host: api.corp.example.com
+User-Agent: checkout-client/2.4.1
+Authorization: Bearer 9f2c4b7a1d6e8035ab19cd47ef2200aa
+Cookie: sessionid=8f14e45fceea167a; csrf=2c1743a391305fbf; theme=dark
+X-Tenant-Key: 9f8e7d6c5b4a
+Content-Type: application/json
+Content-Length: 268
+
+{
+  "reference": "PAY-2026-4471",
+  "email": "buchhaltung@fabrikam-nord.example",
+  "amount": "1249.00",
+  "password": "H1nterland-42",
+  "api_key": "pk_live_8Xq2Rm4Tn7Vz1Cb5",
+  "callback": "https://hooks.fabrikam-nord.example/v1/payment?state=abc123def456ghij"
+}
+
+HTTP/1.1 202 Accepted

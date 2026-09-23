@@ -1,0 +1,35 @@
+{
+  "id": "msg_01XyZResponse",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Die <CUSTOMER_NAME_001> erwartet einen Brief an <PERSON_FEMALE_001>.",
+      "signature": "ErUBCkYIBBgCIkDq3n1sSIGNATURESTUB=="
+    },
+    {
+      "type": "text",
+      "text": "Hallo Frau <PERSON_FEMALE_001>, die <CUSTOMER_NAME_001> nutzt <IBAN_001>."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_03WriteLetter",
+      "name": "Write",
+      "input": {
+        "file_path": "/tmp/brief.md",
+        "content": "Sehr geehrte Frau <PERSON_FEMALE_001>, Ihre IBAN <IBAN_001> liegt vor.",
+        "tags": ["<CUSTOMER_NAME_001>", 7, null],
+        "overwrite": true,
+        "retries": 2
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 1234,
+    "output_tokens": 56
+  }
+}

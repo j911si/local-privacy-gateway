@@ -1,0 +1,109 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 8192,
+  "stream": true,
+  "metadata": {
+    "user_id": "user_abc_account_def_session_0b1c2d3e-1111-2222-3333-444444444444"
+  },
+  "system": [
+    {
+      "type": "text",
+      "text": "You are Claude Code, Anthropic's official CLI for Claude."
+    },
+    {
+      "type": "text",
+      "text": "Arbeitsverzeichnis: /home/user/clients/Alpenbank AG",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "Read",
+      "description": "Reads a file from the local filesystem.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "The absolute path to the file to read"
+          }
+        },
+        "required": ["file_path"]
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Lies bitte die Notizen und schreibe den Brief."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Ich lese zuerst die Notizdatei und entscheide dann.",
+          "signature": "ErUBCkYIBBgCIkDq3n1sSIGNATURESTUB=="
+        },
+        {
+          "type": "text",
+          "text": "Ich lese die Notizen."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01ReadNotes",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/user/clients/Alpenbank AG/notes.md"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ReadNotes",
+          "content": [
+            {
+              "type": "text",
+              "text": "Sehr geehrte Frau Müller, IBAN DE89370400440532013000"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_02WriteLetter",
+          "name": "Write",
+          "input": {
+            "file_path": "/tmp/brief.md",
+            "content": "Kontakt: Frau Müller",
+            "overwrite": true,
+            "retries": 2
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+          }
+        }
+      ]
+    }
+  ]
+}

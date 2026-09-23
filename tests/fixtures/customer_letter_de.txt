@@ -1,0 +1,26 @@
+Musterbank AG
+Kundenbetreuung
+Lindenstraße 12, 40210 Düsseldorf
+
+Düsseldorf, 12.03.2026
+
+Sehr geehrte Frau Petersen,
+
+vielen Dank für Ihre Nachricht von gestern Abend.
+
+Ihre Kundennummer: 884512
+Ihr Konto 4711 bleibt unverändert bestehen.
+
+Die Gutschrift über 240,00 EUR haben wir auf die IBAN DE89370400440532013000
+angewiesen. Die Buchung erscheint in zwei Werktagen.
+
+Sie erreichen uns telefonisch unter Tel. +49 211 5559021 oder per Mail an
+betreuung@musterbank-beispiel.example.
+
+Für unsere Unterlagen: geboren am 04.07.1979 in Bremen.
+
+Bei Fragen zur Anlage wenden Sie sich bitte an Herrn Dr. Waldmann.
+
+Mit freundlichen Grüßen
+
+Anna Petersen
