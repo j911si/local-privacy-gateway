@@ -147,7 +147,9 @@ class GatewaySession:
     """One conversation: every value keeps the token it received on the first call.
 
     A cached result was leak-checked when it was first produced, so a repeat of the same
-    text is returned unchanged without re-running the pipeline or the leak check.
+    text is returned unchanged without re-running the pipeline or the leak check. The cache is
+    dropped whenever the set of known values changes, because an earlier result may then
+    still carry a value that is only known now.
     """
 
     def __init__(self, gateway: Gateway, session_id: str) -> None:
@@ -158,6 +160,7 @@ class GatewaySession:
         self._results: OrderedDict[str, tuple[str, list[FieldFinding]]] = OrderedDict()
         self._rescans: OrderedDict[str, list[Leak]] = OrderedDict()
         self._known_cache: dict[str, tuple[str, str]] | None = None
+        self._generation = 0
 
     def entries(self) -> Mapping[str, VaultEntry]:
         """Every token mapping this session knows."""
@@ -244,7 +247,15 @@ class GatewaySession:
 
     def pseudonymize_many(self, texts: list[str]) -> list[str]:
         """Pseudonymize several texts in order, sharing counters and known values."""
-        return [self.pseudonymize(text) for text in texts]
+        return [text for text, _ in self.pseudonymize_report_many(texts)]
+
+    def pseudonymize_report_many(self, texts: list[str]) -> list[tuple[str, list[FieldFinding]]]:
+        """Like `pseudonymize_report` per text, repeated until no text adds a known value."""
+        while True:
+            generation = self._generation
+            results = [self.pseudonymize_report(text) for text in texts]
+            if self._generation == generation:
+                return results
 
     def restore(self, text: str, mode: str | None = None) -> RestoreResult:
         """Map tokens back to the values recorded for this session."""
@@ -278,6 +289,13 @@ class GatewaySession:
         appended: list[tuple[str, list[str]]],
     ) -> None:
         if pseudonymized.assignments:
+            known = self._known()
+            if any(
+                text[span.start : span.end] not in known
+                for assignment in pseudonymized.assignments
+                for span in assignment.spans
+            ):
+                self._known_changed()
             self._known_cache = None
             self._rescans.clear()
         for assignment in pseudonymized.assignments:
@@ -312,6 +330,8 @@ class GatewaySession:
     ) -> None:
         self._known_cache = None
         self._rescans.clear()
+        if written or appended:
+            self._known_changed()
         self._gateway.vault.delete_tokens(self.session_id, written)
         for token in written:
             self._entries.pop(token, None)
@@ -322,6 +342,10 @@ class GatewaySession:
                 self.session_id, token, entry.data_class, entry.value, forms, entry.attributes
             )
         self._counters = counters
+
+    def _known_changed(self) -> None:
+        self._generation += 1
+        self._results.clear()
 
 
 def _ignored(registry: ClassRegistry, data_class: str) -> bool:
