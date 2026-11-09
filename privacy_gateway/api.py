@@ -16,7 +16,7 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
-from privacy_gateway.leakage import _ANY_TOKEN, check_leakage, numbered_tokens
+from privacy_gateway.leakage import _ANY_TOKEN, check_leakage, glued_to_token, numbered_tokens
 from privacy_gateway.model import (
     DetectionReport,
     FieldFinding,
@@ -245,6 +245,8 @@ class GatewaySession:
             if _ignored(registry, finding.data_class):
                 continue
             if any(token.contains(finding.span) for token in tokens):
+                continue
+            if glued_to_token(finding, tokens):
                 continue
             if is_public_reference(text[finding.span.start : finding.span.end]):
                 continue

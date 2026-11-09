@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.detect.dictionaries import allows_genitive
-from privacy_gateway.model import DetectionReport, Leak, LeakageError, Span, VaultEntry
+from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, Span, VaultEntry
 
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
 MIN_LENGTH_FOR_FUZZY_SEARCH = 4
@@ -15,6 +15,18 @@ MIN_LENGTH_FOR_FUZZY_SEARCH = 4
 _ANY_TOKEN = re.compile(r"<[A-Z][A-Z_]*?_(?:\d{3,}|REDACTED)>")
 _NUMBERED_TOKEN = re.compile(r"<[A-Z][A-Z_]*?_\d{3,}>")
 _WHITESPACE = re.compile(r"\s+")
+
+
+def glued_to_token(finding: Finding, tokens: list[Span]) -> bool:
+    """A handle that starts right after a token is the host part of `user@host`, not a handle."""
+    return finding.data_class == "SOCIAL_MEDIA_HANDLE" and any(
+        token.end == finding.span.start for token in tokens
+    )
+
+
+def _host_part(text: str, start: int, tokens: list[Span]) -> bool:
+    """True when a handle-shaped hit follows a word character or a token (`user@host`)."""
+    return start > 0 and (text[start - 1].isalnum() or any(t.end == start for t in tokens))
 
 
 def numbered_tokens(text: str) -> frozenset[str]:
@@ -159,6 +171,8 @@ def check_leakage(
             continue
         if any(token.contains(finding.span) for token in token_spans):
             continue
+        if glued_to_token(finding, token_spans):
+            continue
         leaks.append(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
         )
@@ -170,6 +184,8 @@ def check_leakage(
         for value in dict.fromkeys([entry.value, *entry.surface_forms]):
             hits |= _occurrences(views, value, genitive)
         for start, end in _merged(hits):
+            if entry.data_class == "SOCIAL_MEDIA_HANDLE" and _host_part(text, start, token_spans):
+                continue
             leaks.append(Leak("original_value", entry.data_class, start, end))
 
     for match in _NUMBERED_TOKEN.finditer(text):

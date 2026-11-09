@@ -136,6 +136,32 @@ def test_plural_of_a_non_name_value_is_not_a_leak(default_config: Config) -> Non
         check_leakage("the PATH is long", entries, _empty_scan, default_config.registry)
 
 
+def test_a_host_part_glued_to_a_token_is_not_a_handle_leak(default_config: Config) -> None:
+    entries = {"<PERSON_001>": _entry("Anna", "PERSON_FIRST_NAME")}
+    scan = _scan_for("@mac", "SOCIAL_MEDIA_HANDLE")
+
+    assert check_leakage("ssh <PERSON_001>@mac true", entries, scan, default_config.registry) is None
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage("write to @mac and <PERSON_001>", entries, scan, default_config.registry)
+    assert excinfo.value.leaks[0].kind == "residual_finding"
+
+
+def test_a_known_handle_behind_a_word_or_token_is_a_host_part_not_a_leak(
+    default_config: Config,
+) -> None:
+    entries = {
+        "<SOCIAL_MEDIA_HANDLE_001>": _entry("@mac", "SOCIAL_MEDIA_HANDLE"),
+        "<PERSON_001>": _entry("Anna", "PERSON_FIRST_NAME"),
+    }
+    registry = default_config.registry
+
+    assert check_leakage("ssh bob@mac true", entries, _empty_scan, registry) is None
+    assert check_leakage("ssh <PERSON_001>@mac true", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage("ping @mac now", entries, _empty_scan, registry)
+    assert excinfo.value.leaks[0].kind == "original_value"
+
+
 def test_numeric_value_inside_a_word_is_a_leak(default_config: Config) -> None:
     entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
 

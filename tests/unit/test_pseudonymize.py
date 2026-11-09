@@ -318,6 +318,32 @@ def test_a_value_learned_later_does_not_block_an_earlier_text_with_its_plural(
     assert "paths" in results[0][0]
 
 
+def test_a_known_user_name_before_a_host_does_not_create_a_handle_leak(
+    default_config: Config,
+) -> None:
+    texts = ["Pfad /Users/anna/Notes liegt dort.", "ssh -o BatchMode=yes anna@mac true"]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("host")
+        results = session.pseudonymize_report_many(texts)
+        assert "anna" not in results[1][0].lower().replace("<", "").replace(">", "")
+        assert session.rescan(results[1][0]) == []
+
+
+def test_a_known_handle_inside_user_at_host_does_not_block_the_text(
+    default_config: Config,
+) -> None:
+    texts = [
+        "Hallo @mac, schau mal.",
+        "Pfad /Users/anna/Notes liegt dort.",
+        'testen mit "ssh -o BatchMode=yes anna@mac true" im Skript',
+    ]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("hostpart")
+        results = session.pseudonymize_report_many(texts)
+
+    assert "anna" not in results[2][0].lower().replace("<", "").replace(">", "")
+
+
 def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
     default_config: Config,
 ) -> None:
