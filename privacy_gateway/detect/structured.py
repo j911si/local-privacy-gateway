@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from privacy_gateway.detect.runs import run_finditer
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ JWT_CONFIDENCE = 0.99
 
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://[^\s>\"')]+")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+EMAIL_RUN_RE = re.compile(r"[\w.+-]+")
 JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_.\-])"
 )
@@ -193,7 +195,7 @@ def _parse_urls(text: str, config: Config) -> list[Finding]:
 
 def _parse_emails(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in EMAIL_RE.finditer(text):
+    for match in run_finditer(EMAIL_RE, text, EMAIL_RUN_RE):
         local, _, domain = match.group(0).partition("@")
         domain_start = match.start() + len(local) + 1
         children = [

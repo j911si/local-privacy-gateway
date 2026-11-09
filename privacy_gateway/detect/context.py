@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from privacy_gateway.detect.dictionaries import DATA_PACKAGE, TrieMatcher
+from privacy_gateway.detect.runs import run_finditer
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -205,6 +206,9 @@ ORGANIZATION_RE = re.compile(
     r"(GmbH & Co\. KG|GmbH|AG|SE|KGaA|KG|OHG|e\.V\.|eG|Ltd\.?|LLC|Inc\.?|Corp\.?|PLC"
     r"|S\.A\.|B\.V\.|N\.V\.|S\.r\.l\.|Oy|AB|AS)(?![\w-])"
 )
+UPPER_START_RE = re.compile(r"[A-ZÄÖÜ]")
+ADDRESS_RUN_RE = re.compile(r"[\wäöüß.-]+")
+ORGANIZATION_RUN_RE = re.compile(r"[\wäöüß&.-]+")
 INITIALS_RE = re.compile(r"\b([A-ZÄÖÜ]\.\s?[A-ZÄÖÜ]\.)")
 HANDLE_RE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{3,30}\b")
 IDENTIFIER_PREFIX = r"(?<![-_./:\w])"
@@ -400,13 +404,13 @@ class ContextStage:
             self._emit(config, out, _group_span(text, match, 1), "DEPARTMENT", 0.8)
         for match in JOB_TITLE_RE.finditer(text):
             self._emit(config, out, _group_span(text, match, 1), "JOB_TITLE", 0.8)
-        for match in ORGANIZATION_RE.finditer(text):
+        for match in run_finditer(ORGANIZATION_RE, text, ORGANIZATION_RUN_RE, UPPER_START_RE):
             span = _trimmed_span(text, match.start(), match.end())
             self._emit(config, out, span, "ORGANIZATION_NAME", 0.85)
 
     def _addresses(self, text: str, config: Config, out: list[Finding]) -> None:
         components = ("STREET", "HOUSE_NUMBER", "POSTAL_CODE", "CITY")
-        for match in ADDRESS_RE.finditer(text):
+        for match in run_finditer(ADDRESS_RE, text, ADDRESS_RUN_RE, UPPER_START_RE):
             children = [
                 child
                 for index, name in enumerate(components, start=1)
