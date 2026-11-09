@@ -600,6 +600,19 @@ journalctl --user -u privacy-gateway.service -f
 
 `loginctl enable-linger $USER` keeps the unit running when you are not logged in.
 
+#### Hardened variant without `uv run`
+
+[`docs/systemd/privacy-gateway-proxy.service.example`](docs/systemd/privacy-gateway-proxy.service.example)
+starts `.venv/bin/pgw-proxy serve` directly after a one-time `uv sync --group proxy`, so nothing is
+resolved or downloaded when the service starts. It sets the data paths through `PGW_*` variables,
+uses `UMask=0077` and the sandboxing options a user manager allows (`NoNewPrivileges`,
+`PrivateTmp`, `RestrictNamespaces` and others), and restarts on failure. It binds to loopback.
+
+If another machine has to reach the proxy, bind it only to an address that nothing but trusted
+devices can reach, such as a private VPN interface, never to `0.0.0.0`. On a non-loopback address
+the `Host` header check is off (the proxy logs a warning at startup) and there is no auth token, so
+network reachability is the only access control.
+
 ### Pointing a client at it
 
 ```bash
