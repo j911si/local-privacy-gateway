@@ -12,9 +12,12 @@ free-form prose about a person are not detected. Because the process is reversib
 pseudonymization, not anonymization — secrets that must never come back use irreversible redaction
 (`<API_KEY_REDACTED>`).
 
-Tested on macOS. The library and the `pgw` CLI are plain Python and run on Linux as well; the
-bundled service installer is launchd-only, a systemd unit for Linux is documented below but must
-be installed by hand.
+Tested on macOS and Linux. The library and the `pgw` CLI are plain Python. The bundled service
+installer is launchd-only; a systemd user unit for Linux is documented below, including a hardened
+variant that binds to a private-network address so several machines can share one proxy. Every
+proxy request also writes an audit entry without any values. Per field it says what was replaced
+and what was forwarded unchecked, and it records whether a final rescan of the outgoing body found
+anything.
 
 ---
 
@@ -658,6 +661,14 @@ Never touched, forwarded unchanged and **not scanned**:
 - Server-side and MCP tool blocks: `server_tool_use`, `mcp_tool_use`, `search_result`.
 - `tools` definitions, `metadata`, `model`, and all headers.
 
+A user name inside a home-directory path is personal data too. `/Users/<name>/`, `/home/<name>/`
+and `C:\Users\<name>\` give a `PERSON_USERNAME` finding for the `<name>` part, so the path comes
+out as `/Users/<PERSON_002>/...` and is restored on the way back, including in tool calls. Claude
+Code puts such paths into every request (working directory, memory directory, instruction files).
+
+Fields that are never changed are still read: the rescan of the outgoing body covers `tools`,
+`metadata` and an unchanged system prompt, and the request log reports what it finds there.
+
 `GET` and every path outside `/v1/messages…` is proxied verbatim. A `POST` to a `/v1/messages…`
 path the proxy cannot transform — unparsable body, non-object body, a body with `Content-Encoding`,
 or a sub-path such as `/v1/messages/batches` — is refused with HTTP 422 and never reaches the
@@ -692,6 +703,11 @@ A session caches each pseudonymized text and drops that cache as soon as it lear
 All texts of one request are pseudonymized again until no text adds a value, so a name that is
 only recognized in a later field (`Frau Müller`) is also replaced where it stood alone earlier
 (`Bitte Müller zurückrufen.`), within the same request.
+
+The same holds inside one text. A value is only known to the session once it has been found, so
+`/Users/anna/Notes` is found first and `-Users-anna-Work`, `~anna` or `anna_notes.md` later in the
+same text would stay as they are. The pass therefore repeats while it learns new values (at most
+four passes) before the leak check gives its verdict.
 
 ### Placeholder notice
 
@@ -754,6 +770,40 @@ key can have that session's tokens restored. On a single-user machine bound to l
 acceptable; on a shared machine it is not.
 
 The proxy holds no credentials of its own: `x-api-key` and `Authorization` are forwarded untouched.
+
+### Sharing one proxy across machines
+
+One proxy can serve several machines on a private network such as Tailscale or WireGuard. Run it
+on one host, bind it to that host's address on the private network and point the
+`ANTHROPIC_BASE_URL` of every client at it. The unit
+[`docs/systemd/privacy-gateway-proxy.service.example`](docs/systemd/privacy-gateway-proxy.service.example)
+reads the Tailscale IPv4 address when it starts (`tailscale ip -4`), refuses to start when there is
+none and listens on that address only.
+
+```bash
+# on the proxy host
+uv run pgw-proxy serve --listen "$(tailscale ip -4 | head -n1):8787"
+
+# on every client
+export ANTHROPIC_BASE_URL=http://<proxy-host>:8787
+claude --model "sonnet[1m]"
+curl http://<proxy-host>:8787/health        # {"status":"ok"} when the proxy is reachable
+```
+
+Limits of this setup:
+
+- The host check is off for a non-loopback bind and the proxy has no token. The only protection is
+  that devices outside the private network cannot reach the address. Limit it further with the
+  network's access rules (Tailscale ACLs, a firewall) to your own devices. Never bind `0.0.0.0` on a
+  host with a public interface.
+- Between client and proxy the prompts travel as plain HTTP with real values. The private network
+  encrypts that hop, nothing else does.
+- A client without a connection to the private network gets a connection error. There is no
+  fallback to `api.anthropic.com`; going direct again is a decision you make by removing
+  `ANTHROPIC_BASE_URL`.
+- Vault, key file and audit log live on the proxy host and hold the mappings and the request
+  history of every client. Protect and back up that host accordingly.
+- All clients share one configuration and one set of dictionaries.
 
 ### Status codes the proxy produces itself
 
@@ -836,15 +886,19 @@ Each line lists every field of the request:
   in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
   only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
   `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by
-  definition and are not reported (`detect/public.py`). A blocked field also lists `leaks` with
-  `kind`, `cls` and offsets into the already replaced text of that field, never a value. With `verdict: blocked` the hash describes the body that was held back; after
-  a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
+  definition and are not reported (`detect/public.py`). With `verdict: blocked` the hash describes
+  the body that was held back; after a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
   with `status: skipped`, `reason: timeout` and `verdict: error`; nothing is sent. The budget is
   checked between strings, so one very long string can run past it before the request stops.
 - The base64 `data` of images and documents is not rescanned. Detection is linear on it (about
   1.5 s per MB of base64 on the development machine), but the scan cache is dropped whenever a
   session learns a new value, so every image in the history would be scanned again on such
   requests.
+- A checked field that failed the leak check carries `leaks`: a list of `kind`, `cls`, `start` and
+  `end`, with offsets into the already replaced text of that field and never a value. `kind` is
+  `original_value` (a value the session stored is still in the text), `residual_finding` (the
+  detection finds something that is not a token) or `unknown_token` (a token this session never
+  issued).
 - `verdict` is `ok`, `blocked` or `error` (upstream connection failed, rescan timeout, or the
   body was rejected).
 
@@ -854,6 +908,30 @@ error texts never appear.
 **`verdict: ok` only means the rules found nothing.** It is no proof that a request is free of
 personal data: forms the patterns, dictionaries and context rules do not know pass unnoticed, and
 unchecked fields go upstream as they are.
+
+#### Checking what was sent
+
+The daily files are plain JSON Lines, so `jq` answers most questions:
+
+```bash
+LOG=~/.local/state/privacy-gateway/audit/audit-$(date -u +%F).jsonl
+
+# requests per verdict
+jq -r .verdict "$LOG" | sort | uniq -c
+
+# blocked requests: which field, which kind of leak
+jq -c 'select(.verdict=="blocked") | {ts, fields: [.fields[] | select(.leaks) | {path, leaks}]}' "$LOG"
+
+# classes seen in fields that were forwarded unchanged
+jq -r '.fields[] | select(.status=="unchecked") | .observed[]? | .cls' "$LOG" | sort | uniq -c | sort -rn
+
+# requests whose final rescan found something, with the field paths
+jq -c 'select(.outgoing.rescan.status=="findings") | {ts, paths: [.outgoing.rescan.findings[].path]}' "$LOG"
+```
+
+`rescan.status: clean` means the rules found nothing in any string of the body, checked or not.
+A Claude Code request always carries unchecked fields (`tools`, `metadata`, and the system prompt
+with an OAuth login). For those the log shows what the rules saw, not that it is harmless.
 
 ---
 
@@ -1036,6 +1114,18 @@ Supporting properties:
   break restoration in a stream.
 - **No proxy auth token**, and the proxy serves exactly one vault and one configuration per
   process.
+- **Unchecked fields go out as they are.** `tools` definitions, `metadata`, an unchanged system
+  prompt (OAuth login) and signed blocks are forwarded byte for byte. They are rescanned and
+  reported, not repaired. Tool definitions of connected services often contain example addresses
+  and handles.
+- **Case after restore.** If a first name and a user name in a path are the same word
+  (`Anna`, `/Users/anna/`), both share one token and the restored text uses the spelling of
+  the first occurrence. A name at the start of a sentence can come back in lower case. Paths are
+  restored exactly.
+- **Prompt caching.** A new known value changes older messages of the same conversation, which
+  invalidates Anthropic's prompt cache for that one request.
+- **Rescan budget.** `PGW_PROXY_RESCAN_BUDGET` is checked between strings; one very long string can
+  run past it. A custom `FQDN` pattern in your YAML falls back to the slower regex scan.
 - **Out of scope:** ML/NER models, OCR, binary documents, multi-user vaults, key rotation.
 
 ### Further reading
@@ -1059,12 +1149,14 @@ Supporting properties:
 This is the fail-closed path doing its job: something in the request still looked sensitive after
 pseudonymization. The request was not sent upstream.
 
-1. Look at the audit log for the `proxy_request` line with `"leakage": "failed"` — it gives you the
-   session key, the path and the timestamp.
-2. Turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
+1. Open today's file in `PGW_AUDIT_LOG_DIR` and find the line with `"verdict": "blocked"`. The
+   field with `leaks` names the field path, the kind of leak and the class, for example
+   `original_value PERSON_USERNAME`. The older `audit.jsonl` has the session key and the timestamp.
+2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two
-   spellings and only one was tokenized, or a rule matched a fragment of a longer value.
+   spellings and only one was tokenized (a user name as `/Users/anna/` and as `-Users-anna-`, a
+   name with a genitive `s`), or a rule matched a fragment of a longer value.
 4. **Sharpen the rule, do not weaken the leak check.** Add the value to a dictionary, add a
    `context_word`, or add a pattern that covers the full value instead of a fragment. Lowering
    `min_confidence` or disabling a class to make the error go away removes protection instead of
@@ -1078,7 +1170,16 @@ body was not transformable at all (see the status table above).
 The `Host` header is not loopback. Use `http://127.0.0.1:8787` or `http://localhost:8787` in
 `ANTHROPIC_BASE_URL`, not a LAN address or a hostname that resolves elsewhere. If you really need
 to bind to a non-loopback address, the check turns itself off — and so does your only access
-control, which the startup log warns about.
+control, which the startup log warns about. For several machines use the private-network setup in
+[Sharing one proxy across machines](#sharing-one-proxy-across-machines).
+
+### Claude Code reports a connection error with a shared proxy
+
+The client cannot reach the proxy host. Check that the private network is connected on the client,
+then `curl http://<proxy-host>:8787/health`. If that fails, check on the proxy host that the service
+runs (`systemctl --user status privacy-gateway-proxy`) and that it listens on the private address
+(`ss -ltn | grep 8787`). The unit exits when the host has no private-network address yet and tries
+again every ten seconds.
 
 ### HTTP 429 with an empty body and no rate-limit headers
 
@@ -1133,6 +1234,11 @@ with a short explanation of what it does and what to check afterwards, lives in
 
 Read it before you run it — it installs a background service and appends a shell function to your
 shell profile.
+
+[`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md) holds two more prompts. Prompt B installs one
+shared proxy on a server that only your Tailscale network can reach. Prompt C connects another
+machine's Claude Code to it. Both are described in
+[Sharing one proxy across machines](#sharing-one-proxy-across-machines).
 
 ```text
 You are installing the Local Privacy Gateway (https://github.com/j911si/local-privacy-gateway) on
@@ -1267,6 +1373,9 @@ STEPS:
    c) `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8787/v1/messages \
          -H 'Host: evil.example' -H 'content-type: application/json' -d '{}'`
       Expected: 403
+   d) `ls -l ~/.local/state/privacy-gateway/audit/` must list a file `audit-<today, UTC>.jsonl`
+      with mode -rw-------, and `wc -l` on it must be at least 1. The file holds field paths,
+      classes and counts, never content.
    If a code differs, report the actual code and the response body; do not change the code to make
    it match.
 
@@ -1287,13 +1396,15 @@ STEPS:
     - Whether PGW_PROXY_TRANSFORM_SYSTEM=0 was set, and the one-sentence reason.
     - The result of every smoke test with its actual status code.
     - How to use it: open a new shell and run `claude-private`.
-    - Where the audit log is and how to watch it
-      (`tail -f ~/.local/share/privacy-gateway/audit.jsonl`).
+    - Where the audit logs are: `~/.local/share/privacy-gateway/audit.jsonl` (events, watch it with
+      `tail -f`) and `~/.local/state/privacy-gateway/audit/` (one file per UTC day with the
+      field-by-field request log; `jq` recipes are in the README section "Checking what was
+      sent").
     - Uninstall instructions: macOS `uv run pgw-proxy uninstall-launchd`; Linux
       `systemctl --user disable --now privacy-gateway.service` and delete the unit file; then
       remove the block between the shell markers, delete the install directory, and — only if the
-      user wants to discard every stored mapping — delete ~/.local/share/privacy-gateway and
-      ~/.config/privacy-gateway.
+      user wants to discard every stored mapping, delete ~/.local/share/privacy-gateway,
+      ~/.local/state/privacy-gateway and ~/.config/privacy-gateway.
     - Anything you skipped or that failed, stated plainly.
 ```
 
