@@ -35,6 +35,7 @@ PSEUDONYMIZE_STAGE = "pseudonymize"
 SESSION_STAGE = "session_pseudonymize"
 RESULT_CACHE_SIZE = 256
 RESCAN_CACHE_SIZE = 1024
+MAX_PASSES = 4
 REDACTED_SUFFIX = "_REDACTED>"
 
 
@@ -181,23 +182,31 @@ class GatewaySession:
                 self.session_id, 0, 0, "ok", _elapsed_ms(started)
             )
             return cached[0], list(cached[1])
-        known = self._known()
         counters = dict(self._counters)
         written: list[str] = []
         appended: list[tuple[str, list[str]]] = []
         pipeline = self._gateway._pipeline
         try:
-            report = pipeline.run(text, known)
-            pseudonymized = pseudonymize_text(
-                text, report, self._gateway.config, counters=self._counters
-            )
-            self._write(text, pseudonymized, written, appended)
-            check_leakage(
-                pseudonymized.text,
-                self._entries,
-                lambda candidate: pipeline.run(candidate, known),
-                self._gateway.config.registry,
-            )
+            for attempt in range(MAX_PASSES):
+                generation = self._generation
+                known = self._known()
+                report = pipeline.run(text, known)
+                pseudonymized = pseudonymize_text(
+                    text, report, self._gateway.config, counters=self._counters
+                )
+                self._write(text, pseudonymized, written, appended)
+                try:
+                    check_leakage(
+                        pseudonymized.text,
+                        self._entries,
+                        lambda candidate, known=known: pipeline.run(candidate, known),
+                        self._gateway.config.registry,
+                    )
+                except LeakageError:
+                    if attempt + 1 < MAX_PASSES and self._generation != generation:
+                        continue
+                    raise
+                break
         except LeakageError:
             self._rollback(written, appended, counters)
             self._gateway.audit.session_pseudonymize(
@@ -341,8 +350,10 @@ class GatewaySession:
         self._gateway.vault.delete_tokens(self.session_id, written)
         for token in written:
             self._entries.pop(token, None)
-        for token, forms in appended:
-            entry = self._entries[token]
+        for token, forms in reversed(appended):
+            entry = self._entries.get(token)
+            if entry is None:
+                continue
             entry.surface_forms = list(forms)
             self._gateway.vault.store(
                 self.session_id, token, entry.data_class, entry.value, forms, entry.attributes

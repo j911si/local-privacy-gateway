@@ -292,3 +292,17 @@ def test_home_directory_user_matching_a_known_name_passes_the_leak_check(
     assert "/Users/anna/" not in result.text
     assert "/home/anna/" not in result.text
     assert "anna" not in result.text.lower()
+
+
+def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
+    default_config: Config,
+) -> None:
+    text = (
+        "Brief an Anna Müller. Pfad /Users/anna/Notes, Memory-Ordner /Users/anna/.claude/"
+        "projects/-Users-anna-Work/x, Home ~anna/docs, Datei anna_notes.md."
+    )
+    with Gateway(default_config) as gateway:
+        session = gateway.session("spelling")
+        output = session.pseudonymize(text)
+        assert "anna" not in output.lower().replace("<", "").replace(">", "")
+        assert session.restore(output, "strict").text == text
