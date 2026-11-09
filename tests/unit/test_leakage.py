@@ -125,6 +125,17 @@ def test_genitive_form_of_a_value_is_a_leak(default_config: Config) -> None:
         check_leakage("Nikkis Quelle", entries, _empty_scan, default_config.registry)
 
 
+def test_plural_of_a_non_name_value_is_not_a_leak(default_config: Config) -> None:
+    entries = {"<ENVIRONMENT_NAME_001>": _entry("PATH", "ENVIRONMENT_NAME")}
+
+    assert (
+        check_leakage("all the paths are long", entries, _empty_scan, default_config.registry)
+        is None
+    )
+    with pytest.raises(LeakageError):
+        check_leakage("the PATH is long", entries, _empty_scan, default_config.registry)
+
+
 def test_numeric_value_inside_a_word_is_a_leak(default_config: Config) -> None:
     entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
 

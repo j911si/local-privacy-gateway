@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
+from privacy_gateway.detect.dictionaries import allows_genitive
 from privacy_gateway.model import DetectionReport, Leak, LeakageError, Span, VaultEntry
 
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
@@ -48,22 +49,23 @@ def _digits_only(text: str) -> tuple[str, list[int]]:
     return "".join(chars), offsets
 
 
-def _needle_pattern(needle: str, *, bounded: bool) -> re.Pattern[str]:
+def _needle_pattern(needle: str, *, bounded: bool, genitive: bool = True) -> re.Pattern[str]:
     body = re.escape(needle)
     if not bounded:
         return re.compile(body, re.IGNORECASE)
     prefix = r"(?<![^\W_])" if needle[:1].isalnum() else ""
-    suffix = r"s?(?![^\W_])" if needle[-1:].isalnum() else ""
+    ending = "s?" if genitive else ""
+    suffix = ending + r"(?![^\W_])" if needle[-1:].isalnum() else ""
     return re.compile(prefix + body + suffix, re.IGNORECASE)
 
 
 def _projected_hits(
-    projection: str, offsets: list[int], needle: str, *, bounded: bool
+    projection: str, offsets: list[int], needle: str, *, bounded: bool, genitive: bool = True
 ) -> set[tuple[int, int]]:
     if not needle:
         return set()
     hits: set[tuple[int, int]] = set()
-    for match in _needle_pattern(needle, bounded=bounded).finditer(projection):
+    for match in _needle_pattern(needle, bounded=bounded, genitive=genitive).finditer(projection):
         if match.end() == match.start():
             continue
         hits.add((offsets[match.start()], offsets[match.end() - 1] + 1))
@@ -96,7 +98,9 @@ class _Projections:
         return self._digits
 
 
-def _occurrences(views: _Projections, value: str) -> set[tuple[int, int]]:
+def _occurrences(
+    views: _Projections, value: str, genitive: bool = True
+) -> set[tuple[int, int]]:
     if not value:
         return set()
     text = views.text
@@ -106,11 +110,13 @@ def _occurrences(views: _Projections, value: str) -> set[tuple[int, int]]:
         return {(m.start(), m.end()) for m in re.finditer(pattern, text)}
     digits = "".join(char for char in value if char.isdigit())
     bounded = not digits
-    for match in _needle_pattern(value, bounded=bounded).finditer(text):
+    for match in _needle_pattern(value, bounded=bounded, genitive=genitive).finditer(text):
         hits.add((match.start(), match.end()))
     projection, offsets = views.collapsed
     collapsed_value = _WHITESPACE.sub(" ", value).strip()
-    hits |= _projected_hits(projection, offsets, collapsed_value, bounded=bounded)
+    hits |= _projected_hits(
+        projection, offsets, collapsed_value, bounded=bounded, genitive=genitive
+    )
     if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH:
         projection, offsets = views.digits()
         hits |= _projected_hits(projection, offsets, digits, bounded=False)
@@ -159,9 +165,10 @@ def check_leakage(
 
     views = _Projections(text)
     for entry in entries.values():
+        genitive = allows_genitive(registry, entry.data_class)
         hits: set[tuple[int, int]] = set()
         for value in dict.fromkeys([entry.value, *entry.surface_forms]):
-            hits |= _occurrences(views, value)
+            hits |= _occurrences(views, value, genitive)
         for start, end in _merged(hits):
             leaks.append(Leak("original_value", entry.data_class, start, end))
 

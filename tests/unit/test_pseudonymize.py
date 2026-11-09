@@ -306,6 +306,18 @@ def test_session_text_that_quotes_a_token_literally_is_not_blocked(
     assert findings == []
 
 
+def test_a_value_learned_later_does_not_block_an_earlier_text_with_its_plural(
+    default_config: Config,
+) -> None:
+    texts = ["We fixed the paths and the shell PATH here.", "Environment=PATH is set."]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("later")
+        results = session.pseudonymize_report_many(texts)
+
+    assert "PATH" not in results[0][0]
+    assert "paths" in results[0][0]
+
+
 def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
     default_config: Config,
 ) -> None:
