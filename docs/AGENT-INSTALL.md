@@ -108,7 +108,8 @@ STEPS:
      Expected output: "installed /Users/<you>/Library/LaunchAgents/com.privacy-gateway.proxy.plist",
      a list of the PGW_* variables taken over, the log directory, and a line
      "export ANTHROPIC_BASE_URL=http://127.0.0.1:8787".
-   Linux: write ~/.config/systemd/user/privacy-gateway.service with this content, substituting the
+   Linux: run `mkdir -p ~/.config/systemd/user`, then write
+   ~/.config/systemd/user/privacy-gateway.service with this content, substituting the
    real home directory and the absolute path of uv from `command -v uv`:
 
        [Unit]
@@ -334,14 +335,17 @@ STEPS:
 5. Create ~/.config/privacy-gateway and ~/.local/state/privacy-gateway with mode 700.
 
 6. First run, which creates the vault key, from the install directory with
-   `PGW_VAULT_DB=$HOME/.local/state/privacy-gateway/vault.db`:
+   `PGW_VAULT_DB=$HOME/.local/state/privacy-gateway/vault.db` and
+   `PGW_AUDIT_LOG=$HOME/.local/state/privacy-gateway/audit.jsonl` set (the values the service
+   unit uses):
    `uv run pgw pseudonymize tests/fixtures/customer_letter_de.txt`
    Expected: tokens such as <IBAN_001> on stdout, exit code 0. Check with
    `ls -l ~/.config/privacy-gateway/vault.key` that the key file has mode -rw-------. Do not print
    its content.
 
 7. Install the service unit.
-   - Copy docs/systemd/privacy-gateway-proxy.service.example to
+   - Run `mkdir -p ~/.config/systemd/user`, then copy
+     docs/systemd/privacy-gateway-proxy.service.example to
      ~/.config/systemd/user/privacy-gateway-proxy.service.
    - Replace the install directory in WorkingDirectory and ExecStart if it is not
      ~/local-privacy-gateway.

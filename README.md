@@ -13,9 +13,8 @@ pseudonymization, not anonymization — secrets that must never come back use ir
 (`<API_KEY_REDACTED>`).
 
 Tested on macOS and Linux. The library and the `pgw` CLI are plain Python. The bundled service
-installer is launchd-only; a systemd user unit for Linux is documented below, including a hardened
-variant that binds to a private-network address so several machines can share one proxy. Every
-proxy request also writes an audit entry without any values. Per field it says what was replaced
+installer is launchd-only; a systemd user unit for Linux is documented below, with a Tailscale variant that binds to a private-network address so several machines can share one proxy. Every
+request to `/v1/messages` also writes an audit entry without any values. Per field it says what was replaced
 and what was forwarded unchecked, and it records whether a final rescan of the outgoing body found
 anything.
 
@@ -775,10 +774,12 @@ The proxy holds no credentials of its own: `x-api-key` and `Authorization` are f
 
 One proxy can serve several machines on a private network such as Tailscale or WireGuard. Run it
 on one host, bind it to that host's address on the private network and point the
-`ANTHROPIC_BASE_URL` of every client at it. The unit
+`ANTHROPIC_BASE_URL` of every client at it. The example unit
 [`docs/systemd/privacy-gateway-proxy.service.example`](docs/systemd/privacy-gateway-proxy.service.example)
-reads the Tailscale IPv4 address when it starts (`tailscale ip -4`), refuses to start when there is
-none and listens on that address only.
+ships with a loopback bind. Its commented Tailscale variant reads the Tailscale IPv4 address when
+the service starts (`tailscale ip -4`), refuses to start when there is none and listens on that
+address only. Prompt B in [`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md) switches the unit to
+that variant for you, and Prompt C connects a client.
 
 ```bash
 # on the proxy host
@@ -919,8 +920,8 @@ LOG=~/.local/state/privacy-gateway/audit/audit-$(date -u +%F).jsonl
 # requests per verdict
 jq -r .verdict "$LOG" | sort | uniq -c
 
-# blocked requests: which field, which kind of leak
-jq -c 'select(.verdict=="blocked") | {ts, fields: [.fields[] | select(.leaks) | {path, leaks}]}' "$LOG"
+# blocked requests: where the leak check or the rescan found something
+jq -c 'select(.verdict=="blocked") | {ts, leakage: .outgoing.leakage, leaks: [.fields[] | select(.leaks) | {path, leaks}], rescan: [.outgoing.rescan.findings[] | {path, cls}]}' "$LOG"
 
 # classes seen in fields that were forwarded unchanged
 jq -r '.fields[] | select(.status=="unchecked") | .observed[]? | .cls' "$LOG" | sort | uniq -c | sort -rn
@@ -1149,9 +1150,11 @@ Supporting properties:
 This is the fail-closed path doing its job: something in the request still looked sensitive after
 pseudonymization. The request was not sent upstream.
 
-1. Open today's file in `PGW_AUDIT_LOG_DIR` and find the line with `"verdict": "blocked"`. The
-   field with `leaks` names the field path, the kind of leak and the class, for example
-   `original_value PERSON_USERNAME`. The older `audit.jsonl` has the session key and the timestamp.
+1. Open today's file in `PGW_AUDIT_LOG_DIR` and find the line with `"verdict": "blocked"`. If
+   `outgoing.leakage` is `fail`, the leak check stopped it and the field with `leaks` names the
+   field path, the kind of leak and the class, for example `original_value PERSON_USERNAME`. If
+   it is `ok`, the final rescan stopped it and `outgoing.rescan.findings` lists path, class and
+   offsets. The older `audit.jsonl` has the session key and the timestamp.
 2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two
@@ -1327,7 +1330,8 @@ STEPS:
      Expected output: "installed /Users/<you>/Library/LaunchAgents/com.privacy-gateway.proxy.plist",
      a list of the PGW_* variables taken over, the log directory, and a line
      "export ANTHROPIC_BASE_URL=http://127.0.0.1:8787".
-   Linux: write ~/.config/systemd/user/privacy-gateway.service with this content, substituting the
+   Linux: run `mkdir -p ~/.config/systemd/user`, then write
+   ~/.config/systemd/user/privacy-gateway.service with this content, substituting the
    real home directory and the absolute path of uv from `command -v uv`:
 
        [Unit]
