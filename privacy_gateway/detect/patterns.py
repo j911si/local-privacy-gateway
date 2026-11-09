@@ -8,6 +8,7 @@ from functools import cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
+from privacy_gateway.detect.runs import FQDN_PATTERN, fqdn_finditer
 from privacy_gateway.detect.validators import VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
 
@@ -22,6 +23,7 @@ MAX_CONFIDENCE = 0.99
 IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
+LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
         "ISO", "IEC", "RFC", "IEEE", "DIN", "EN", "SHA", "MD", "UTF", "HTTP", "TLS", "SSL",
@@ -92,7 +94,9 @@ class PatternStage:
                 continue
             validator = _validator_for(data_class)
             for regex in _compile(data_class.patterns):
-                for match in regex.finditer(text):
+                finder = LINEAR_FINDERS.get(regex.pattern)
+                matches = finder(regex, text) if finder else regex.finditer(text)
+                for match in matches:
                     new.extend(self._for_match(text, match, data_class, validator, config))
         new.sort(key=lambda f: (f.span.start, f.span.end, f.data_class))
         return new

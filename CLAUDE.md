@@ -66,7 +66,9 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - `GatewaySession` drops its result cache whenever the set of known values changes, and
   `pseudonymize_report_many` repeats the pass over a request's texts until no text adds a value.
 - `detect/runs.py` scans `ADDRESS_RE`, `ORGANIZATION_RE` and `EMAIL_RE` with one start per
-  character run (linear instead of quadratic); `tests/unit/test_runs.py` proves equal matches.
+  character run, and the default `FQDN` pattern with a memoized label-chain pre-check (linear
+  instead of quadratic; `patterns.LINEAR_FINDERS` matches the exact pattern string, so a
+  changed pattern falls back to `finditer`). `tests/unit/test_runs.py` proves equal matches.
 - One gateway session per conversation, keyed by the `session_<uuid>` in `metadata.user_id`;
   `server.py` caches the `GatewaySession` instances so a conversation reuses one in-memory mapping.
 

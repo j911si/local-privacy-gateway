@@ -14,7 +14,7 @@ import pytest
 from privacy_gateway.config import Config
 from privacy_gateway.detect import Pipeline, structured
 from privacy_gateway.detect import context as ctx
-from privacy_gateway.detect.runs import run_finditer
+from privacy_gateway.detect.runs import FQDN_PATTERN, fqdn_finditer, run_finditer
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 CASES = [
@@ -65,4 +65,48 @@ def test_base64_like_text_is_scanned_in_linear_time(default_config: Config) -> N
     text = "iVBORw0KGgo" * 10_000
     started = time.perf_counter()
     Pipeline(default_config).run(text)
+    assert time.perf_counter() - started < 5
+
+
+DOTTED = (
+    "example.com", "a.b.de", "foo-bar.example.org", "x" * 62 + ".de", "x" * 63 + ".de",
+    "x" * 64 + ".de", "-a.de", "a-.de", "A.", "de", "com1", "co.ukä", "_a.de", "a.de_",
+    "sub.domain.co.uk.", "1.2.3.4", "a..b.de", "www.Example.COM", "x.y", "ä.de", "a.dä",
+)
+
+
+def _dotted_corpus() -> list[str]:
+    texts = _corpus()
+    rng = random.Random(815)
+    alphabet = "aAzZ09-._äé/@ \n:abcdefghij"
+    for _ in range(300):
+        texts.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 300))))
+        separator = rng.choice(["", " ", ".", "-", "/"])
+        texts.append(separator.join(rng.choice(DOTTED) for _ in range(rng.randint(1, 40))))
+        labels = [
+            "".join(rng.choice("abAB09-") for _ in range(rng.randint(1, 66)))
+            for _ in range(rng.randint(1, 12))
+        ]
+        texts.append(".".join(labels) + rng.choice(["", ".", " ", "-", "ä", "1"]))
+    texts.extend(["A." * 3000, "a.de." + "A." * 2000, "a-" * 2000 + ".de"])
+    return texts
+
+
+def test_fqdn_finditer_equals_finditer() -> None:
+    pattern = re.compile(FQDN_PATTERN, re.MULTILINE)
+    matched = 0
+    for text in _dotted_corpus():
+        expected = [match.span() for match in pattern.finditer(text)]
+        assert [match.span() for match in fqdn_finditer(pattern, text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+def test_the_default_fqdn_pattern_takes_the_linear_path(default_config: Config) -> None:
+    assert default_config.registry.get("FQDN").patterns == (FQDN_PATTERN,)
+
+
+def test_dotted_text_is_scanned_in_linear_time(default_config: Config) -> None:
+    started = time.perf_counter()
+    Pipeline(default_config).run("A." * 55_000)
     assert time.perf_counter() - started < 5
