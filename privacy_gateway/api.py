@@ -16,7 +16,7 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
-from privacy_gateway.leakage import _ANY_TOKEN, check_leakage
+from privacy_gateway.leakage import _ANY_TOKEN, check_leakage, numbered_tokens
 from privacy_gateway.model import (
     DetectionReport,
     FieldFinding,
@@ -187,6 +187,7 @@ class GatewaySession:
         written: list[str] = []
         appended: list[tuple[str, list[str]]] = []
         pipeline = self._gateway._pipeline
+        literal_tokens = numbered_tokens(text)
         try:
             for attempt in range(MAX_PASSES):
                 generation = self._generation
@@ -202,6 +203,7 @@ class GatewaySession:
                         self._entries,
                         lambda candidate, known=known: pipeline.run(candidate, known),
                         self._gateway.config.registry,
+                        literal_tokens,
                     )
                 except LeakageError:
                     if attempt + 1 < MAX_PASSES and self._generation != generation:

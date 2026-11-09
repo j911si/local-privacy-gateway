@@ -16,6 +16,11 @@ _NUMBERED_TOKEN = re.compile(r"<[A-Z][A-Z_]*?_\d{3,}>")
 _WHITESPACE = re.compile(r"\s+")
 
 
+def numbered_tokens(text: str) -> frozenset[str]:
+    """Every numbered token-shaped string in `text`."""
+    return frozenset(match.group(0) for match in _NUMBERED_TOKEN.finditer(text))
+
+
 def _collapsed(text: str) -> tuple[str, list[int]]:
     chars: list[str] = []
     offsets: list[int] = []
@@ -134,8 +139,12 @@ def check_leakage(
     entries: Mapping[str, VaultEntry],
     scan: Callable[[str], DetectionReport],
     registry: ClassRegistry,
+    literal_tokens: frozenset[str] = frozenset(),
 ) -> None:
-    """Raise `LeakageError` when the pseudonymized text still exposes data."""
+    """Raise `LeakageError` when the pseudonymized text still exposes data.
+
+    `literal_tokens` are token-shaped strings that were already in the input text.
+    """
     leaks: list[Leak] = []
     token_spans = [Span(match.start(), match.end()) for match in _ANY_TOKEN.finditer(text)]
 
@@ -157,7 +166,7 @@ def check_leakage(
             leaks.append(Leak("original_value", entry.data_class, start, end))
 
     for match in _NUMBERED_TOKEN.finditer(text):
-        if match.group(0) not in entries:
+        if match.group(0) not in entries and match.group(0) not in literal_tokens:
             leaks.append(Leak("unknown_token", "", match.start(), match.end()))
 
     if leaks:

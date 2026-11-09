@@ -1123,6 +1123,10 @@ Supporting properties:
   (`Anna`, `/Users/anna/`), both share one token and the restored text uses the spelling of
   the first occurrence. A name at the start of a sentence can come back in lower case. Paths are
   restored exactly.
+- **Token-shaped text in your own input.** Text that already contains something like `<IBAN_001>`
+  (docs about this gateway, for example) passes the leak check as literal text. If a later real
+  value gets the same token, a restored answer can show that value where the model quoted the
+  literal. Nothing leaves your machine through this.
 - **Prompt caching.** A new known value changes older messages of the same conversation, which
   invalidates Anthropic's prompt cache for that one request.
 - **Rescan budget.** `PGW_PROXY_RESCAN_BUDGET` is checked between strings; one very long string can

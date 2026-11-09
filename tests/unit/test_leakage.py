@@ -185,6 +185,26 @@ def test_unknown_token_is_a_leak(default_config: Config) -> None:
     assert leak.data_class == ""
 
 
+def test_a_token_listed_as_literal_input_is_not_a_leak(default_config: Config) -> None:
+    literal = frozenset({"<FOO_009>"})
+
+    assert (
+        check_leakage(
+            "see <FOO_009> here", {}, _empty_scan, default_config.registry, literal_tokens=literal
+        )
+        is None
+    )
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage(
+            "see <FOO_009> and <BAR_001>",
+            {},
+            _empty_scan,
+            default_config.registry,
+            literal_tokens=literal,
+        )
+    assert [leak.kind for leak in excinfo.value.leaks] == ["unknown_token"]
+
+
 def test_redacted_token_is_not_an_unknown_token(default_config: Config) -> None:
     assert check_leakage("see <JWT_REDACTED>", {}, _empty_scan, default_config.registry) is None
 

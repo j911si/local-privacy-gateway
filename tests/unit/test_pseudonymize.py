@@ -294,6 +294,18 @@ def test_home_directory_user_matching_a_known_name_passes_the_leak_check(
     assert "anna" not in result.text.lower()
 
 
+def test_session_text_that_quotes_a_token_literally_is_not_blocked(
+    default_config: Config,
+) -> None:
+    text = "Die Doku zeigt <IBAN_007> und <EMAIL_003> als Beispiele."
+    with Gateway(default_config) as gateway:
+        session = gateway.session("literal")
+        output, findings = session.pseudonymize_report(text)
+
+    assert output == text
+    assert findings == []
+
+
 def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
     default_config: Config,
 ) -> None:
