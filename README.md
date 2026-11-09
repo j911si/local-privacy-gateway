@@ -834,7 +834,10 @@ Each line lists every field of the request:
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
   `leakage` and a `rescan`: the full detection runs again over every string of that body. A hit
   in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
-  only reported. With `verdict: blocked` the hash describes the body that was held back; after
+  only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
+  `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by
+  definition and are not reported (`detect/public.py`). A blocked field also lists `leaks` with
+  `kind`, `cls` and offsets into the already replaced text of that field, never a value. With `verdict: blocked` the hash describes the body that was held back; after
   a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
   with `status: skipped`, `reason: timeout` and `verdict: error`; nothing is sent. The budget is
   checked between strings, so one very long string can run past it before the request stops.

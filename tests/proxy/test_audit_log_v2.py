@@ -24,8 +24,8 @@ UPSTREAM = "https://upstream.test"
 CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
 NAME = "Müller"
 IBAN = "DE89370400440532013000"
-EMAIL = "anna.mueller@example.org"
-URL = "https://intranet.example.com/akte/42"
+EMAIL = "anna.mueller@kunde-beispiel.example"
+URL = "https://intranet.kunde-beispiel.example/akte/42"
 KEY_PREFIX = "sk" + "-ant-"
 KEY_REST = "api03" + "-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd"
 API_KEY = KEY_PREFIX + KEY_REST
@@ -33,7 +33,7 @@ CANARIES = (NAME, IBAN, EMAIL, URL, API_KEY)
 LETTER = (
     f"Sehr geehrte Frau {NAME}, IBAN {IBAN}, Mail {EMAIL}, siehe {URL} Key {API_KEY}"
 )
-TOOL_URL = "https://docs.example.com/tool-hilfe"
+TOOL_URL = "https://docs.kunde-beispiel.example/tool-hilfe"
 TOP_KEYS = [
     "v", "event", "ts", "request_id", "session", "path", "streaming", "duration_ms",
     "verdict", "coverage", "fields", "outgoing",
@@ -226,7 +226,7 @@ async def test_unchecked_fields_are_listed_with_observed_and_left_unchanged(
     assert entry["coverage"]["unchecked_fields"] == 4
     rescan = entry["outgoing"]["rescan"]
     assert rescan["status"] == "findings"
-    assert {"path": "tools[0].description", "cls": "URL", "start": 12, "end": 47} in (
+    assert {"path": "tools[0].description", "cls": "URL", "start": 12, "end": 58} in (
         rescan["findings"]
     )
     assert "docs.example" not in log_text(audit_dir)
