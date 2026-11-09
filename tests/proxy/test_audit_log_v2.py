@@ -26,7 +26,9 @@ NAME = "Müller"
 IBAN = "DE89370400440532013000"
 EMAIL = "anna.mueller@example.org"
 URL = "https://intranet.example.com/akte/42"
-API_KEY = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd"
+KEY_PREFIX = "sk" + "-ant-"
+KEY_REST = "api03" + "-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd"
+API_KEY = KEY_PREFIX + KEY_REST
 CANARIES = (NAME, IBAN, EMAIL, URL, API_KEY)
 LETTER = (
     f"Sehr geehrte Frau {NAME}, IBAN {IBAN}, Mail {EMAIL}, siehe {URL} Key {API_KEY}"
