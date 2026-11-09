@@ -1276,6 +1276,8 @@ STEPS:
 1. Check prerequisites.
    - `git --version` must succeed. If git is missing, install it (macOS: `xcode-select --install`
      or `brew install git`; Linux: the distribution package manager) and re-check.
+   - The uv installer needs `curl` and, on a minimal Linux, `ca-certificates`. If `curl --version`
+     fails, install both with the distribution package manager first.
    - `uv --version` must succeed. If uv is missing, install it with
      `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv` on macOS if brew is
      present), then make sure the uv binary is on PATH for this session

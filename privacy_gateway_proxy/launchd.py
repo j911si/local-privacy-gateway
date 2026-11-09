@@ -75,7 +75,10 @@ def uninstall(label: str) -> Path:
 
 def status(label: str, host: str, port: int) -> ProxyStatus:
     """Report whether the job is loaded and whether the port accepts connections."""
-    loaded = _run(["launchctl", "print", f"gui/{os.getuid()}/{label}"]).returncode == 0
+    try:
+        loaded = _run(["launchctl", "print", f"gui/{os.getuid()}/{label}"]).returncode == 0
+    except FileNotFoundError:
+        loaded = False
     return ProxyStatus(
         label=label,
         loaded=loaded,

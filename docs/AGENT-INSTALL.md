@@ -54,6 +54,8 @@ STEPS:
 1. Check prerequisites.
    - `git --version` must succeed. If git is missing, install it (macOS: `xcode-select --install`
      or `brew install git`; Linux: the distribution package manager) and re-check.
+   - The uv installer needs `curl` and, on a minimal Linux, `ca-certificates`. If `curl --version`
+     fails, install both with the distribution package manager first.
    - `uv --version` must succeed. If uv is missing, install it with
      `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv` on macOS if brew is
      present), then make sure the uv binary is on PATH for this session
@@ -300,6 +302,7 @@ ASSUMPTIONS AND DEFAULTS (use these, do not ask):
   never 127.0.0.1 (the clients could not reach it), never a public address.
 - Only Linux with a systemd user manager is supported by this prompt. Anything else: stop and
   report.
+- If LOGIN_TYPE was not filled in, use oauth.
 - LOGIN_TYPE = oauth means PGW_PROXY_TRANSFORM_SYSTEM=0, because Anthropic answers OAuth requests
   with a modified system prompt with HTTP 429. LOGIN_TYPE = api-key means leave it unset.
 - Config directory ~/.config/privacy-gateway, vault data ~/.local/state/privacy-gateway, request
@@ -353,12 +356,13 @@ STEPS:
      `Environment=PGW_PROXY_LISTEN=127.0.0.1:8787` line and replace the ExecStart line with the
      commented `/bin/sh -c` line, adjusted to the real path of the `pgw-proxy` console script in the
      install directory's .venv and the real path of the tailscale binary (`command -v tailscale`).
+     Keep every `$$` and `%h` exactly as written: systemd expands them, the shell does not.
    - If LOGIN_TYPE = oauth, uncomment `Environment=PGW_PROXY_TRANSFORM_SYSTEM=0`.
    - Run `systemctl --user daemon-reload` and
      `systemctl --user enable --now privacy-gateway-proxy.service`.
 
 8. Check the service. `systemctl --user status privacy-gateway-proxy.service` must say active.
-   `ss -ltn | grep 8787` must show exactly one listener, on this host's Tailscale address. If it
+   `ss -ltn | grep 8787` (`ss` comes with the iproute2 package) must show exactly one listener, on this host's Tailscale address. If it
    shows 0.0.0.0, `*` or 127.0.0.1, run `systemctl --user stop privacy-gateway-proxy.service` and
    report. If the service does not start, read `journalctl --user -u privacy-gateway-proxy -n 50`
    and report.
