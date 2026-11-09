@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from privacy_gateway_proxy.transform import (
 SESSION_HASH_CHARS = 12
 REDACT_POLICY = "redact"
 BASE64_TYPE = "base64"
+TIMEOUT = "timeout"
 
 
 @dataclass(frozen=True)
@@ -42,15 +44,12 @@ class Recorder:
 
     def pseudonymize_many(self, texts: list[str]) -> list[str]:
         """Pseudonymize like the session, remembering each text's findings."""
-        detailed = getattr(self._session, "pseudonymize_report", None)
+        detailed = getattr(self._session, "pseudonymize_report_many", None)
         if detailed is None:
             return self._session.pseudonymize_many(texts)
-        results: list[str] = []
-        for text in texts:
-            replaced, findings = detailed(text)
-            self.findings.append(findings)
-            results.append(replaced)
-        return results
+        results = detailed(texts)
+        self.findings = [findings for _, findings in results]
+        return [text for text, _ in results]
 
     def restore_text(self, text: str) -> str:
         """Restore like the session."""
@@ -64,13 +63,22 @@ class Rescan:
     status: str
     hits: list[Hit] = field(default_factory=list)
     blocking: list[Hit] = field(default_factory=list)
+    reason: str | None = None
 
 
-def rescan_body(session: Any, sent: dict, checked: list[TextRef]) -> Rescan:
-    """Scan every string of the sent body; hits in a checked field block the request."""
-    hits = scan(session, scannable_strings(sent))
+def rescan_body(
+    session: Any, sent: dict, checked: list[TextRef], budget_s: float | None = None
+) -> Rescan:
+    """Scan every string of the sent body; hits in a checked field block the request.
+
+    Past `budget_s` seconds the scan stops after the current string with reason `timeout`.
+    """
+    deadline = None if budget_s is None else time.perf_counter() + budget_s
+    hits = scan(session, scannable_strings(sent), deadline)
     if hits is None:
         return Rescan("skipped")
+    if deadline is not None and time.perf_counter() > deadline:
+        return Rescan("skipped", hits, reason=TIMEOUT)
     checked_paths = {ref.path for ref in checked}
     blocking = [hit for hit in hits if hit.path in checked_paths]
     return Rescan("findings" if hits else "clean", hits, blocking)
@@ -138,6 +146,7 @@ def entry(
             "leakage": leakage,
             "rescan": {
                 "status": rescan.status,
+                **({"reason": rescan.reason} if rescan.reason is not None else {}),
                 "findings": [
                     {
                         "path": format_path(hit.path),
@@ -178,13 +187,17 @@ def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
     return collect_strings(value, path)
 
 
-def scan(session: Any, leaves: list[TextRef]) -> list[Hit] | None:
+def scan(
+    session: Any, leaves: list[TextRef], deadline: float | None = None
+) -> list[Hit] | None:
     """Scan each leaf with the session's full detection; None when it cannot scan."""
     rescan = getattr(session, "rescan", None)
     if rescan is None:
         return None
     hits: list[Hit] = []
     for leaf in leaves:
+        if deadline is not None and time.perf_counter() > deadline:
+            break
         for leak in rescan(leaf.text):
             hits.append(Hit(leaf.path, leak.data_class, leak.start, leak.end))
     return hits

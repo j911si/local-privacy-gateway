@@ -267,6 +267,7 @@ stored token is lost.
 | `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
 | `PGW_PROXY_PLACEHOLDER_NOTICE` | `1` | `0`/`false`/`no`/`off` suppresses the short notice that explains the placeholder format to the model. |
 | `PGW_PROXY_DEBUG_DIR` | unset | Directory for one JSON dump per transformed request (mode `0600` in a `0700` directory). Contains the **pseudonymized** body. |
+| `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take. Past it the request fails with 503 and nothing is sent. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
 
 ---
@@ -687,6 +688,11 @@ The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 40
 the 64 most recently used `GatewaySession` objects in memory; a conversation that falls out is
 reloaded from the vault.
 
+A session caches each pseudonymized text and drops that cache as soon as it learns a new value.
+All texts of one request are pseudonymized again until no text adds a value, so a name that is
+only recognized in a later field (`Frau Müller`) is also replaced where it stood alone earlier
+(`Bitte Müller zurückrufen.`), within the same request.
+
 ### Placeholder notice
 
 A model that sees `<IBAN_001>` tends to answer with an invented IBAN instead of the placeholder.
@@ -759,6 +765,7 @@ The proxy holds no credentials of its own: `x-api-key` and `Authorization` are f
 | 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: unparsable body, non-object body, `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Nothing is sent upstream. |
 | 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
+| 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |
 
 Upstream status codes and error bodies are passed through unchanged.
 
@@ -821,14 +828,22 @@ Each line lists every field of the request:
   repeats can be counted without storing the value. Secret classes (policy `redact`), `PIN` and
   `PASSWORD` get no `hmac`.
 - `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
-  `image`, `signature`, `other`). `observed` lists classes and counts from a read-only scan.
+  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from a read-only
+  scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
+  block) is such a field with `reason: system`.
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
   `leakage` and a `rescan`: the full detection runs again over every string of that body. A hit
   in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
-  only reported. The base64 `data` of images and documents is not rescanned. With
-  `verdict: blocked` the hash describes the body that was held back; after a failed leak check
-  `sha256` is `null`.
-- `verdict` is `ok`, `blocked` or `error` (upstream connection failed, or the body was rejected).
+  only reported. With `verdict: blocked` the hash describes the body that was held back; after
+  a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
+  with `status: skipped`, `reason: timeout` and `verdict: error`; nothing is sent. The budget is
+  checked between strings, so one very long string can run past it before the request stops.
+- The base64 `data` of images and documents is not rescanned. Detection is linear on it (about
+  1.5 s per MB of base64 on the development machine), but the scan cache is dropped whenever a
+  session learns a new value, so every image in the history would be scanned again on such
+  requests.
+- `verdict` is `ok`, `blocked` or `error` (upstream connection failed, rescan timeout, or the
+  body was rejected).
 
 `session` is the first 12 hex characters of `sha256(session_key)`. Values, parts of values and
 error texts never appear.

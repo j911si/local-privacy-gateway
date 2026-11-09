@@ -57,9 +57,12 @@ def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway
 
 
 def build(
-    gateway: Gateway, audit_dir: Path, handler: Callable[[httpx.Request], httpx.Response]
+    gateway: Gateway,
+    audit_dir: Path,
+    handler: Callable[[httpx.Request], httpx.Response],
+    **overrides: Any,
 ) -> httpx.AsyncClient:
-    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir)
+    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir, **overrides)
     upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     app = server.create_app(settings, gateway, client=upstream)
     return httpx.AsyncClient(
@@ -386,3 +389,95 @@ def test_unchecked_collection_never_overlaps_checked_texts() -> None:
         ("messages[0].content[2].source", "other"),
         ("messages[0].content[3]", "other"),
     }
+
+
+@pytest.mark.asyncio
+async def test_a_value_found_in_a_later_field_is_hidden_in_earlier_fields(
+    gateway: Gateway, audit_dir: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    body = body_with("Bitte Müller zurückrufen.")
+    body["messages"].append(
+        {"role": "user", "content": "Sehr geehrte Frau Müller, danke für Ihren Brief."}
+    )
+    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+        first = await client.post("/v1/messages", json=body)
+        second = await client.post("/v1/messages", json=body)
+
+    assert first.status_code == second.status_code == 200
+    assert len(seen) == 2
+    for request in seen:
+        assert NAME not in request.content.decode("utf-8")
+        assert json.dumps(NAME)[1:-1] not in request.content.decode("utf-8")
+    assert seen[0].content == seen[1].content
+    first_entry, _ = entries(audit_dir)
+    callback = field(first_entry, "messages[0].content[1].text")
+    assert [item["cls"] for item in callback["findings"]] == ["PERSON_LAST_NAME"]
+    assert first_entry["verdict"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_rescan_over_its_budget_is_an_error_and_nothing_goes_upstream(
+    gateway: Gateway, audit_dir: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    async with build(gateway, audit_dir, ok_handler(seen), rescan_budget_s=0.0) as client:
+        response = await client.post("/v1/messages", json=body_with("Hallo Welt"))
+
+    assert response.status_code == 503
+    assert response.json()["error"]["type"] == "privacy_gateway_timeout"
+    assert seen == []
+    (entry,) = entries(audit_dir)
+    assert entry["verdict"] == "error"
+    assert entry["outgoing"]["rescan"]["status"] == "skipped"
+    assert entry["outgoing"]["rescan"]["reason"] == "timeout"
+
+
+SYSTEM_PROMPT = f"Du arbeitest im Ordner /srv/kunden/akte-42. Rückfragen an {EMAIL}."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("system", "path"),
+    [
+        (SYSTEM_PROMPT, "system"),
+        ([{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+         "system[0]"),
+    ],
+)
+async def test_an_untransformed_system_prompt_is_unchecked_with_observed(
+    gateway: Gateway, audit_dir: Path, system: Any, path: str
+) -> None:
+    seen: list[httpx.Request] = []
+    body = body_with("Hallo", system=system)
+    async with build(gateway, audit_dir, ok_handler(seen), transform_system=False) as client:
+        response = await client.post("/v1/messages", json=body)
+
+    assert response.status_code == 200
+    assert json.loads(seen[0].content)["system"] == system
+    (entry,) = entries(audit_dir)
+    assert entry["verdict"] == "ok"
+    prompt = field(entry, path)
+    assert prompt["status"] == "unchecked"
+    assert prompt["reason"] == "system"
+    assert {"cls": "EMAIL", "count": 1} in prompt["observed"]
+    assert all(set(item) == {"cls", "count"} for item in prompt["observed"])
+    assert entry["coverage"]["unchecked_fields"] == 2
+    text = log_text(audit_dir)
+    for value in (EMAIL, "anna", "/srv/kunden", "akte-42"):
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_a_transformed_system_prompt_stays_checked(gateway: Gateway, audit_dir: Path) -> None:
+    seen: list[httpx.Request] = []
+    body = body_with("Hallo", system=SYSTEM_PROMPT)
+    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+        await client.post("/v1/messages", json=body)
+
+    assert EMAIL not in seen[0].content.decode("utf-8")
+    (entry,) = entries(audit_dir)
+    prompt = field(entry, "system")
+    assert prompt["status"] == "checked"
+    assert "EMAIL" in {item["cls"] for item in prompt["findings"]}
+    assert all(item["reason"] != "system" for item in entry["fields"] if "reason" in item)

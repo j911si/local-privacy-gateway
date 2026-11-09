@@ -147,10 +147,14 @@ async def _transformed(
 
     payload = json.dumps(new_body).encode("utf-8")
     unchecked = audit_trail.unchecked_refs(_transform, new_body, include_system)
-    rescan = audit_trail.rescan_body(session, new_body, checked)
+    rescan = audit_trail.rescan_body(session, new_body, checked, settings.rescan_budget_s)
     outcome = {
         "unchecked": unchecked, "observed": rescan.hits, "payload": payload, "rescan": rescan
     }
+    if rescan.reason == audit_trail.TIMEOUT:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        record("error", "ok", **outcome)
+        return _error("privacy_gateway_timeout", "rescan exceeded its time budget", 503)
     if rescan.blocking:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("blocked", "ok", **outcome)

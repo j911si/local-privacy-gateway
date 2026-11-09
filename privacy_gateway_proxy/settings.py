@@ -36,6 +36,7 @@ class ProxySettings:
     placeholder_notice: bool = True
     debug_originals: bool = False
     audit_dir: Path | None = None
+    rescan_budget_s: float = 10.0
 
 
 def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
@@ -100,6 +101,12 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     debug_originals = environment.get("PGW_PROXY_DEBUG_ORIGINALS")
     if debug_originals is not None:
         values["debug_originals"] = debug_originals.strip().lower() in TRUTHY_VALUES
+    rescan_budget = environment.get("PGW_PROXY_RESCAN_BUDGET")
+    if rescan_budget is not None:
+        try:
+            values["rescan_budget_s"] = float(rescan_budget)
+        except ValueError:
+            raise ConfigError(f"invalid rescan budget: {rescan_budget!r}") from None
     audit_dir = environment.get(AUDIT_DIR_ENV)
     if audit_dir:
         values["audit_dir"] = Path(audit_dir)

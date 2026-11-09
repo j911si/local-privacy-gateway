@@ -91,6 +91,11 @@ def collect_unchecked(body: dict, *, include_system: bool = True) -> list[Unchec
                     _unchecked_block(block, ("system", index), refs)
             elif not isinstance(value, str):
                 _add_unchecked(refs, ("system",), "other", value)
+        elif key == "system" and isinstance(value, list):
+            for index, block in enumerate(value):
+                _add_unchecked(refs, ("system", index), "system", block)
+        elif key == "system":
+            _add_unchecked(refs, ("system",), "system", value)
         elif key == "tools" and isinstance(value, list):
             for index, tool in enumerate(value):
                 _add_unchecked(refs, ("tools", index), "tools", tool)
