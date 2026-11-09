@@ -19,6 +19,9 @@ classes:
     category: PERSON
     policy: tokenize
     token_label: PERSON
+    patterns:
+      - '(?<![\w.:-])/(?:Users|home)/([^/\s\x60\x27\x22<>:*?|\\,;()\[\]]{1,64})'
+      - '[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/:*?\x22<>|\r\n]{1,64})'
   PERSON_INITIALS:
     category: PERSON
     policy: tokenize

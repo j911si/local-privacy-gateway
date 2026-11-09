@@ -253,7 +253,13 @@ class GatewaySession:
         """Like `pseudonymize_report` per text, repeated until no text adds a known value."""
         while True:
             generation = self._generation
-            results = [self.pseudonymize_report(text) for text in texts]
+            results = []
+            for index, text in enumerate(texts):
+                try:
+                    results.append(self.pseudonymize_report(text))
+                except LeakageError as exc:
+                    exc.text_index = index
+                    raise
             if self._generation == generation:
                 return results
 

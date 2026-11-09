@@ -434,6 +434,8 @@ def _record(
         leakage=leakage,
         payload=payload,
         rescan=rescan if rescan is not None else audit_trail.Rescan("skipped"),
+        failed_index=recorder.failed_index if recorder is not None else None,
+        failed_leaks=recorder.failed_leaks if recorder is not None else None,
     )
     trail.write("proxy_request", fields)
 

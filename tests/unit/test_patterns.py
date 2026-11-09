@@ -304,3 +304,22 @@ def test_quoted_password_covers_the_whole_quoted_value(default_config: Config) -
     text = 'password="a b c"'
     finding = only(run_stage(text, default_config), "PASSWORD")
     assert value_of(text, finding) == "a b c"
+
+
+@pytest.mark.parametrize(
+    ("text", "user"),
+    [
+        ("Vault: /Users/anna.beispiel/Obsidian/Notes/", "anna.beispiel"),
+        ("cd /home/bwagner/projekte && ls", "bwagner"),
+        ("C:\\Users\\Beispiel Anna\\Documents\\x.txt", "Beispiel Anna"),
+        ("c:/Users/abeispiel/AppData", "abeispiel"),
+    ],
+)
+def test_home_directory_user_is_a_username(default_config: Config, text: str, user: str) -> None:
+    finding = only(run_stage(text, default_config), "PERSON_USERNAME")
+    assert value_of(text, finding) == user
+
+
+def test_home_directory_pattern_ignores_other_paths(default_config: Config) -> None:
+    text = "Pfade /usr/home/x, /var/Users und /Users selbst, /homework/a"
+    assert "PERSON_USERNAME" not in classes_of(run_stage(text, default_config))

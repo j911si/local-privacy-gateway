@@ -36,6 +36,7 @@ class LeakageError(PrivacyGatewayError):
 
     def __init__(self, leaks: list[Leak]) -> None:
         self.leaks: list[Leak] = leaks
+        self.text_index: int | None = None
         super().__init__(self._describe(leaks))
 
     @staticmethod

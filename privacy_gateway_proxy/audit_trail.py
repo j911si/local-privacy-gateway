@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
-from privacy_gateway.model import FieldFinding, Leak
+from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.transform import (
     Path,
     TextRef,
@@ -41,13 +41,19 @@ class Recorder:
     def __init__(self, session: Any) -> None:
         self._session = session
         self.findings: list[list[FieldFinding]] = []
+        self.failed_index: int | None = None
+        self.failed_leaks: list[Leak] = []
 
     def pseudonymize_many(self, texts: list[str]) -> list[str]:
         """Pseudonymize like the session, remembering each text's findings."""
         detailed = getattr(self._session, "pseudonymize_report_many", None)
         if detailed is None:
             return self._session.pseudonymize_many(texts)
-        results = detailed(texts)
+        try:
+            results = detailed(texts)
+        except LeakageError as exc:
+            self.failed_index, self.failed_leaks = exc.text_index, list(exc.leaks)
+            raise
         self.findings = [findings for _, findings in results]
         return [text for text, _ in results]
 
@@ -116,19 +122,25 @@ def entry(
     leakage: str,
     payload: bytes | None,
     rescan: Rescan,
+    failed_index: int | None = None,
+    failed_leaks: list[Leak] | None = None,
 ) -> dict[str, object]:
     """The `proxy_request` v2 fields (without `v`, `event`, `ts`); never carries a value."""
     fields: list[dict[str, object]] = []
     for index, ref in enumerate(checked):
         field_findings = findings[index] if index < len(findings) else []
-        fields.append(
-            {
-                "path": format_path(ref.path),
-                "status": "checked",
-                "chars": len(ref.text),
-                "findings": [_finding(log, ref.text, item) for item in field_findings],
-            }
-        )
+        item: dict[str, object] = {
+            "path": format_path(ref.path),
+            "status": "checked",
+            "chars": len(ref.text),
+            "findings": [_finding(log, ref.text, found) for found in field_findings],
+        }
+        if index == failed_index and failed_leaks:
+            item["leaks"] = [
+                {"kind": leak.kind, "cls": leak.data_class, "start": leak.start, "end": leak.end}
+                for leak in failed_leaks
+            ]
+        fields.append(item)
     for ref in unchecked:
         fields.append(_unchecked(ref, observed or []))
     return {

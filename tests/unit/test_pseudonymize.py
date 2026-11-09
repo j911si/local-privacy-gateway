@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from privacy_gateway.api import Gateway
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config
 from privacy_gateway.model import DetectionReport, Entity, Finding, Span
@@ -280,3 +281,14 @@ def test_gendered_token_literal_reserves_the_person_counter(default_config: Conf
     result = pseudonymize_text(text, report, default_config)
 
     assert result.text == "<PERSON_FEMALE_001> schrieb an <PERSON_FEMALE_002>"
+
+
+def test_home_directory_user_matching_a_known_name_passes_the_leak_check(
+    default_config: Config,
+) -> None:
+    text = "Brief an Anna Müller, Vault /Users/anna/Notes, Backup /home/anna/b, Frau Müller dankt."
+    with Gateway(default_config) as gateway:
+        result = gateway.pseudonymize(text)
+    assert "/Users/anna/" not in result.text
+    assert "/home/anna/" not in result.text
+    assert "anna" not in result.text.lower()

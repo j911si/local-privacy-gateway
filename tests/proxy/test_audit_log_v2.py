@@ -300,6 +300,12 @@ async def test_a_leak_check_failure_is_logged_as_blocked(
     assert entry["outgoing"]["rescan"]["status"] == "skipped"
     for canary in CANARIES:
         assert canary not in log_text(audit_dir)
+    leaking_fields = [f for f in entry["fields"] if f.get("leaks")]
+    assert [f["path"] for f in leaking_fields] == ["messages[0].content[1].text"]
+    leaks = leaking_fields[0]["leaks"]
+    assert {leak["kind"] for leak in leaks} <= {"residual_finding", "original_value"}
+    assert all(set(leak) == {"kind", "cls", "start", "end"} for leak in leaks)
+    assert all(leak["end"] > leak["start"] >= 0 for leak in leaks)
 
 
 @pytest.mark.asyncio
