@@ -19,6 +19,17 @@ NOTICE_TEXT = (
     "example values, and never remove them.\n"
     "</privacy-gateway>"
 )
+CONFIG_KEYS = frozenset(
+    {"model", "max_tokens", "stream", "temperature", "top_p", "top_k", "thinking", "tool_choice"}
+)
+SKIPPED_BLOCK_KEYS = frozenset({"type", "id", "name", "tool_use_id", "cache_control", "is_error"})
+CHECKED_BLOCK_KEYS = {
+    "text": frozenset({"text"}),
+    "tool_use": frozenset({"input"}),
+    "tool_result": frozenset({"content"}),
+    "document": frozenset({"source"}),
+}
+WHOLE_BLOCK_REASONS = {"thinking": "thinking", "redacted_thinking": "thinking", "image": "image"}
 
 
 @runtime_checkable
@@ -51,16 +62,70 @@ def collect_request_texts(body: dict, *, include_system: bool = True) -> list[Te
     return refs
 
 
+@dataclass(frozen=True)
+class UncheckedRef:
+    """A part of the request the proxy forwards unchanged, with the reason why."""
+
+    path: Path
+    reason: str
+    value: Any
+
+
+def request_refs(
+    body: dict, *, include_system: bool = True, notice: bool = False
+) -> list[TextRef]:
+    """The texts `pseudonymize_request` rewrites, with their paths in the sent body."""
+    return _prepared(body, include_system, notice)[1]
+
+
+def collect_unchecked(body: dict, *, include_system: bool = True) -> list[UncheckedRef]:
+    """Every part with string content the proxy does not transform, in document order."""
+    refs: list[UncheckedRef] = []
+    for key, value in body.items():
+        if key == "messages" and isinstance(value, list):
+            for index, message in enumerate(value):
+                _unchecked_message(message, ("messages", index), refs)
+        elif key == "system" and include_system:
+            if isinstance(value, list):
+                for index, block in enumerate(value):
+                    _unchecked_block(block, ("system", index), refs)
+            elif not isinstance(value, str):
+                _add_unchecked(refs, ("system",), "other", value)
+        elif key == "tools" and isinstance(value, list):
+            for index, tool in enumerate(value):
+                _add_unchecked(refs, ("tools", index), "tools", tool)
+        elif key == "metadata":
+            _add_unchecked(refs, (key,), "metadata", value)
+        elif key not in CONFIG_KEYS:
+            _add_unchecked(refs, (key,), "other", value)
+    return refs
+
+
+def collect_strings(value: Any, path: Path = ()) -> list[TextRef]:
+    """Every non-empty string leaf below `value`, with its path."""
+    refs: list[TextRef] = []
+    _collect_strings(value, path, refs)
+    return refs
+
+
+def format_path(path: Path) -> str:
+    """Render a path as `messages[0].content[1].text`."""
+    rendered = ""
+    for part in path:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        else:
+            rendered += f".{part}" if rendered else str(part)
+    return rendered
+
+
 def pseudonymize_request(
     body: dict, sess: TextSession, *, include_system: bool = True, notice: bool = False
 ) -> tuple[dict, int]:
     """Return a copy of the request with all transformable texts pseudonymized."""
-    new_body = copy.deepcopy(body)
-    refs = collect_request_texts(new_body, include_system=include_system)
+    new_body, refs = _prepared(body, include_system, notice)
     if not refs:
         return new_body, 0
-    if notice and _insert_notice(new_body):
-        refs = collect_request_texts(new_body, include_system=include_system)
     replaced = sess.pseudonymize_many([ref.text for ref in refs])
     for ref, text in zip(refs, replaced, strict=True):
         _set_at(new_body, ref.path, text)
@@ -92,6 +157,81 @@ def restore_json(value: Any, restore: Callable[[str], str]) -> Any:
     if isinstance(value, list):
         return [restore_json(item, restore) for item in value]
     return value
+
+
+def _prepared(body: dict, include_system: bool, notice: bool) -> tuple[dict, list[TextRef]]:
+    new_body = copy.deepcopy(body)
+    refs = collect_request_texts(new_body, include_system=include_system)
+    if refs and notice and _insert_notice(new_body):
+        refs = collect_request_texts(new_body, include_system=include_system)
+    return new_body, refs
+
+
+def _unchecked_message(message: Any, path: Path, refs: list[UncheckedRef]) -> None:
+    if not isinstance(message, dict):
+        _add_unchecked(refs, path, "other", message)
+        return
+    for key, value in message.items():
+        if key == "role":
+            continue
+        if key != "content":
+            _add_unchecked(refs, (*path, key), "other", value)
+        elif isinstance(value, list):
+            for index, block in enumerate(value):
+                _unchecked_block(block, (*path, key, index), refs)
+        elif not isinstance(value, str):
+            _add_unchecked(refs, (*path, key), "other", value)
+
+
+def _unchecked_block(block: Any, path: Path, refs: list[UncheckedRef]) -> None:
+    if not isinstance(block, dict):
+        _add_unchecked(refs, path, "other", block)
+        return
+    block_type = block.get("type")
+    reason = WHOLE_BLOCK_REASONS.get(str(block_type))
+    if reason is not None:
+        _add_unchecked(refs, path, reason, block)
+        return
+    checked = CHECKED_BLOCK_KEYS.get(str(block_type))
+    if checked is None:
+        _add_unchecked(refs, path, "other", block)
+        return
+    for key, value in block.items():
+        if key in SKIPPED_BLOCK_KEYS:
+            continue
+        if key not in checked:
+            label = "signature" if key == "signature" else "other"
+            _add_unchecked(refs, (*path, key), label, value)
+        elif block_type == "tool_result" and isinstance(value, list):
+            for index, item in enumerate(value):
+                _unchecked_result_item(item, (*path, key, index), refs)
+        elif not _checked_value(str(block_type), value):
+            _add_unchecked(refs, (*path, key), "other", value)
+
+
+def _unchecked_result_item(item: Any, path: Path, refs: list[UncheckedRef]) -> None:
+    if isinstance(item, dict) and item.get("type") == "text":
+        _unchecked_block(item, path, refs)
+        return
+    block_type = item.get("type") if isinstance(item, dict) else None
+    _add_unchecked(refs, path, WHOLE_BLOCK_REASONS.get(str(block_type), "other"), item)
+
+
+def _checked_value(block_type: str, value: Any) -> bool:
+    if block_type == "tool_result":
+        return isinstance(value, str)
+    if block_type == "document":
+        return _text_source(value)
+    return True
+
+
+def _text_source(source: Any) -> bool:
+    return isinstance(source, dict) and source.get("type") == "text"
+
+
+def _add_unchecked(refs: list[UncheckedRef], path: Path, reason: str, value: Any) -> None:
+    if collect_strings(value):
+        refs.append(UncheckedRef(path, reason, value))
 
 
 def _insert_notice(body: dict) -> bool:

@@ -1,0 +1,214 @@
+"""Builds the value-free `proxy_request` v2 entry of the daily audit log."""
+
+from __future__ import annotations
+
+import hashlib
+import uuid
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any
+
+from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
+from privacy_gateway.model import FieldFinding, Leak
+from privacy_gateway_proxy.transform import (
+    Path,
+    TextRef,
+    UncheckedRef,
+    collect_strings,
+    format_path,
+)
+
+SESSION_HASH_CHARS = 12
+REDACT_POLICY = "redact"
+BASE64_TYPE = "base64"
+
+
+@dataclass(frozen=True)
+class Hit:
+    """One rescan finding at a string leaf of the body."""
+
+    path: Path
+    data_class: str
+    start: int
+    end: int
+
+
+class Recorder:
+    """Wraps a session and keeps the findings of every text in call order."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        self.findings: list[list[FieldFinding]] = []
+
+    def pseudonymize_many(self, texts: list[str]) -> list[str]:
+        """Pseudonymize like the session, remembering each text's findings."""
+        detailed = getattr(self._session, "pseudonymize_report", None)
+        if detailed is None:
+            return self._session.pseudonymize_many(texts)
+        results: list[str] = []
+        for text in texts:
+            replaced, findings = detailed(text)
+            self.findings.append(findings)
+            results.append(replaced)
+        return results
+
+    def restore_text(self, text: str) -> str:
+        """Restore like the session."""
+        return self._session.restore_text(text)
+
+
+@dataclass
+class Rescan:
+    """Outcome of scanning every string about to be sent."""
+
+    status: str
+    hits: list[Hit] = field(default_factory=list)
+    blocking: list[Hit] = field(default_factory=list)
+
+
+def rescan_body(session: Any, sent: dict, checked: list[TextRef]) -> Rescan:
+    """Scan every string of the sent body; hits in a checked field block the request."""
+    hits = scan(session, scannable_strings(sent))
+    if hits is None:
+        return Rescan("skipped")
+    checked_paths = {ref.path for ref in checked}
+    blocking = [hit for hit in hits if hit.path in checked_paths]
+    return Rescan("findings" if hits else "clean", hits, blocking)
+
+
+def as_leaks(hits: list[Hit]) -> list[Leak]:
+    """Rescan hits as value-free leaks for the fail-closed response."""
+    return [Leak("rescan", hit.data_class, hit.start, hit.end) for hit in hits]
+
+
+def checked_refs(transform: Any, body: dict, include_system: bool, notice: bool) -> list[TextRef]:
+    """The checked fields of the sent body, or none when the transform cannot list them."""
+    refs = getattr(transform, "request_refs", None)
+    return refs(body, include_system=include_system, notice=notice) if refs else []
+
+
+def unchecked_refs(transform: Any, body: dict, include_system: bool) -> list[UncheckedRef]:
+    """The unchecked fields, or none when the transform cannot list them."""
+    refs = getattr(transform, "collect_unchecked", None)
+    return refs(body, include_system=include_system) if refs else []
+
+
+def entry(
+    log: RequestAuditLog,
+    *,
+    session_key: str,
+    path: str,
+    streaming: bool,
+    duration_ms: int,
+    verdict: str,
+    checked: list[TextRef],
+    findings: list[list[FieldFinding]],
+    unchecked: list[UncheckedRef],
+    observed: list[Hit] | None,
+    leakage: str,
+    payload: bytes | None,
+    rescan: Rescan,
+) -> dict[str, object]:
+    """The `proxy_request` v2 fields (without `v`, `event`, `ts`); never carries a value."""
+    fields: list[dict[str, object]] = []
+    for index, ref in enumerate(checked):
+        field_findings = findings[index] if index < len(findings) else []
+        fields.append(
+            {
+                "path": format_path(ref.path),
+                "status": "checked",
+                "chars": len(ref.text),
+                "findings": [_finding(log, ref.text, item) for item in field_findings],
+            }
+        )
+    for ref in unchecked:
+        fields.append(_unchecked(ref, observed or []))
+    return {
+        "request_id": str(uuid.uuid4()),
+        "session": hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:SESSION_HASH_CHARS],
+        "path": path,
+        "streaming": streaming,
+        "duration_ms": duration_ms,
+        "verdict": verdict,
+        "coverage": {"checked_fields": len(checked), "unchecked_fields": len(unchecked)},
+        "fields": fields,
+        "outgoing": {
+            "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
+            "bytes": len(payload) if payload is not None else 0,
+            "leakage": leakage,
+            "rescan": {
+                "status": rescan.status,
+                "findings": [
+                    {
+                        "path": format_path(hit.path),
+                        "cls": hit.data_class,
+                        "start": hit.start,
+                        "end": hit.end,
+                    }
+                    for hit in rescan.hits
+                ],
+            },
+        },
+    }
+
+
+def unchecked_leaves(unchecked: list[UncheckedRef]) -> list[TextRef]:
+    """Every scannable string leaf of the unchecked fields, with full paths."""
+    leaves: list[TextRef] = []
+    for ref in unchecked:
+        leaves.extend(scannable_strings(ref.value, ref.path))
+    return leaves
+
+
+def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
+    """String leaves except the `data` of a base64 source, which detection cannot scan fast."""
+    if isinstance(value, dict):
+        leaves: list[TextRef] = []
+        for key, item in value.items():
+            if key == "data" and value.get("type") == BASE64_TYPE:
+                continue
+            leaves.extend(scannable_strings(item, (*path, key)))
+        return leaves
+    if isinstance(value, list):
+        return [
+            leaf
+            for index, item in enumerate(value)
+            for leaf in scannable_strings(item, (*path, index))
+        ]
+    return collect_strings(value, path)
+
+
+def scan(session: Any, leaves: list[TextRef]) -> list[Hit] | None:
+    """Scan each leaf with the session's full detection; None when it cannot scan."""
+    rescan = getattr(session, "rescan", None)
+    if rescan is None:
+        return None
+    hits: list[Hit] = []
+    for leaf in leaves:
+        for leak in rescan(leaf.text):
+            hits.append(Hit(leaf.path, leak.data_class, leak.start, leak.end))
+    return hits
+
+
+def _finding(log: RequestAuditLog, text: str, item: FieldFinding) -> dict[str, object]:
+    record: dict[str, object] = {"cls": item.data_class, "start": item.start, "end": item.end}
+    if item.token is not None:
+        record["token"] = item.token
+    record["policy"] = item.policy
+    record["confidence"] = round(item.confidence, 4)
+    record["stage"] = item.stage
+    if item.policy != REDACT_POLICY and item.data_class not in NO_HMAC_CLASSES:
+        record["hmac"] = log.value_hmac(text[item.start : item.end])
+    return record
+
+
+def _unchecked(ref: UncheckedRef, observed: list[Hit]) -> dict[str, object]:
+    width = len(ref.path)
+    counts = Counter(hit.data_class for hit in observed if hit.path[:width] == ref.path)
+    return {
+        "path": format_path(ref.path),
+        "status": "unchecked",
+        "reason": ref.reason,
+        "chars": sum(len(leaf.text) for leaf in collect_strings(ref.value)),
+        "observed": [{"cls": cls, "count": count} for cls, count in sorted(counts.items())],
+    }

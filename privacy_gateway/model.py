@@ -73,6 +73,19 @@ class Finding:
     children: list[Finding] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FieldFinding:
+    """One finding of a request field as the audit log records it; carries no value."""
+
+    data_class: str
+    start: int
+    end: int
+    token: str | None
+    policy: str
+    confidence: float
+    stage: str
+
+
 @dataclass
 class Entity:
     """A real-world subject that several findings refer to."""

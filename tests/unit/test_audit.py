@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+import re
+import stat
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from privacy_gateway import Gateway
-from privacy_gateway.audit import AuditLog
+from privacy_gateway.audit import AuditLog, RequestAuditLog, load_salt, rotate
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -172,3 +174,96 @@ def test_no_stored_value_appears_in_the_log(
     for entry in entries.values():
         for value in [entry.value, *entry.surface_forms]:
             assert value not in content, value
+
+
+NOW = datetime(2026, 11, 9, 7, 0, tzinfo=UTC)
+
+
+def _daily(directory: Path, day: str) -> Path:
+    path = directory / f"audit-{day}.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
+def test_request_log_writes_a_v2_line_into_the_utc_day_file(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    log = RequestAuditLog(directory, clock=lambda: NOW)
+    path = log.write("proxy_request", {"verdict": "ok"})
+    assert path == directory / "audit-2026-11-09.jsonl"
+    (record,) = _read(path)
+    assert list(record)[:3] == ["v", "event", "ts"]
+    assert record["v"] == 2
+    assert record["event"] == "proxy_request"
+    assert record["ts"] == "2026-11-09T07:00:00+00:00"
+    assert record["verdict"] == "ok"
+    assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_request_log_appends(tmp_path: Path) -> None:
+    log = RequestAuditLog(tmp_path / "audit", clock=lambda: NOW)
+    log.write("proxy_request", {"n": 1})
+    path = log.write("proxy_request", {"n": 2})
+    assert [record["n"] for record in _read(path)] == [1, 2]
+
+
+def test_salt_is_created_once_beside_the_directory(tmp_path: Path) -> None:
+    first = RequestAuditLog(tmp_path / "audit").value_hmac("DE89370400440532013000")
+    salt_path = tmp_path / "audit.salt"
+    assert len(salt_path.read_bytes()) == 32
+    assert stat.S_IMODE(os.stat(salt_path).st_mode) == 0o600
+    second = RequestAuditLog(tmp_path / "audit").value_hmac("DE89370400440532013000")
+    assert first == second
+    assert re.fullmatch(r"[0-9a-f]{16}", first)
+    assert first != RequestAuditLog(tmp_path / "audit").value_hmac("DE00000000000000000000")
+
+
+def test_a_damaged_salt_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "audit.salt").write_bytes(b"short")
+    with pytest.raises(ValueError, match="unexpected size"):
+        load_salt(tmp_path / "audit.salt")
+
+
+def test_hmac_differs_between_installations(tmp_path: Path) -> None:
+    one = RequestAuditLog(tmp_path / "a" / "audit").value_hmac("Müller")
+    two = RequestAuditLog(tmp_path / "b" / "audit").value_hmac("Müller")
+    assert one != two
+
+
+def test_rotation_deletes_180_days_and_keeps_179_and_foreign_files(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    directory.mkdir()
+    today = NOW.date()
+    old = _daily(directory, (today - timedelta(days=180)).isoformat())
+    older = _daily(directory, (today - timedelta(days=400)).isoformat())
+    kept = _daily(directory, (today - timedelta(days=179)).isoformat())
+    foreign = directory / "notes.jsonl"
+    foreign.write_text("x", encoding="utf-8")
+    lookalike = directory / "audit-2020-01-01.jsonl.bak"
+    lookalike.write_text("x", encoding="utf-8")
+    RequestAuditLog(directory, clock=lambda: NOW).write("proxy_request", {})
+    assert not old.exists()
+    assert not older.exists()
+    assert kept.exists()
+    assert foreign.exists()
+    assert lookalike.exists()
+    assert (directory / "audit-2026-11-09.jsonl").exists()
+
+
+def test_rotation_runs_once_per_day_and_process(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    clock = [NOW]
+    log = RequestAuditLog(directory, clock=lambda: clock[0])
+    log.write("proxy_request", {})
+    stale = _daily(directory, (NOW.date() - timedelta(days=200)).isoformat())
+    log.write("proxy_request", {})
+    assert stale.exists()
+    clock[0] = NOW + timedelta(days=1)
+    log.write("proxy_request", {})
+    assert not stale.exists()
+
+
+def test_rotate_returns_what_it_removed(tmp_path: Path) -> None:
+    old = _daily(tmp_path, "2026-01-01")
+    _daily(tmp_path, "2026-11-01")
+    assert rotate(tmp_path, date(2026, 11, 9)) == [old]

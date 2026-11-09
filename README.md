@@ -243,6 +243,7 @@ literal paths, not `XDG_*`-derived, but they follow the XDG layout:
 | Vault database | `~/.local/share/privacy-gateway/vault.db` | `vault.db_path`, `PGW_VAULT_DB` |
 | Vault key (32 random bytes, mode `0600`) | `~/.config/privacy-gateway/vault.key` | `vault.key_file`, `PGW_VAULT_KEY_FILE` |
 | Audit log (JSON Lines, mode `0600`) | `~/.local/share/privacy-gateway/audit.jsonl` | `audit.path`, `PGW_AUDIT_LOG` |
+| Proxy request log (one file per UTC day, kept 180 days) | `~/.local/state/privacy-gateway/audit/` | `PGW_AUDIT_LOG_DIR` |
 | User configuration | `~/.config/privacy-gateway/config.yaml` | `--config` / `PGW_CONFIG` add another layer |
 
 Both parent directories are created with mode `0700`. The key file is created on first use; back
@@ -256,6 +257,7 @@ stored token is lost.
 | `PGW_VAULT_DB` | `~/.local/share/privacy-gateway/vault.db` | Path of the encrypted SQLite vault. |
 | `PGW_VAULT_KEY_FILE` | `~/.config/privacy-gateway/vault.key` | Path of the 32-byte AES key file. |
 | `PGW_AUDIT_LOG` | `~/.local/share/privacy-gateway/audit.jsonl` | Path of the JSONL audit log. Set `audit.path: null` in YAML to disable auditing. |
+| `PGW_AUDIT_LOG_DIR` | `~/.local/state/privacy-gateway/audit/` | Directory of the proxy's daily `proxy_request` v2 log, see [Request log](#request-log-v2). |
 | `PGW_RESTORE_MODE` | `strict` | Default restore mode, `strict` or `lenient`. |
 | `PGW_CONFIG` | unset | Extra configuration file, applied after the user config. |
 | `PGW_SKIP_USER_CONFIG` | unset | `1`/`true`/`yes` ignores `~/.config/privacy-gateway/config.yaml`. Useful for reproducible runs and tests. |
@@ -742,7 +744,7 @@ The proxy holds no credentials of its own: `x-api-key` and `Authorization` are f
 | 403 | `privacy_gateway_forbidden` | `Host` header is not loopback while bound to loopback. |
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
 | 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: unparsable body, non-object body, `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Nothing is sent upstream. |
-| 422 | `privacy_gateway_leak` | The leak check found residue in the transformed request. Nothing is sent upstream. The message lists class names and a count, never values. |
+| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 
 Upstream status codes and error bodies are passed through unchanged.
@@ -789,6 +791,38 @@ sequence for one non-streaming request:
 `fields` is the number of transformed strings, `tokens` the number of mappings the session holds,
 `leakage` is `ok`, `failed`, `rejected` or `upstream_error`. Follow it live with
 `tail -f ~/.local/share/privacy-gateway/audit.jsonl`.
+
+### Request log (v2)
+
+In addition, the proxy writes one `proxy_request` line with `"v": 2` per `/v1/messages` request
+into `PGW_AUDIT_LOG_DIR` (default `~/.local/state/privacy-gateway/audit/`, mode `0700`). Files are
+named `audit-YYYY-MM-DD.jsonl` (UTC day, mode `0600`, append only). Once per process and day the
+proxy deletes files of that name pattern dated 180 or more days back; other files stay.
+
+Each line lists every field of the request:
+
+- `status: checked` fields were pseudonymized. Each finding has class, offsets in the original
+  field text, token, policy, confidence, stage and `hmac`: the first 16 hex characters of
+  HMAC-SHA256 over the value with a per-installation salt (`audit.salt` next to the directory,
+  32 random bytes, mode `0600`). The same value gives the same `hmac` in one installation, so
+  repeats can be counted without storing the value. Secret classes (policy `redact`), `PIN` and
+  `PASSWORD` get no `hmac`.
+- `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
+  `image`, `signature`, `other`). `observed` lists classes and counts from a read-only scan.
+- `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
+  `leakage` and a `rescan`: the full detection runs again over every string of that body. A hit
+  in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
+  only reported. The base64 `data` of images and documents is not rescanned. With
+  `verdict: blocked` the hash describes the body that was held back; after a failed leak check
+  `sha256` is `null`.
+- `verdict` is `ok`, `blocked` or `error` (upstream connection failed, or the body was rejected).
+
+`session` is the first 12 hex characters of `sha256(session_key)`. Values, parts of values and
+error texts never appear.
+
+**`verdict: ok` only means the rules found nothing.** It is no proof that a request is free of
+personal data: forms the patterns, dictionaries and context rules do not know pass unnoticed, and
+unchecked fields go upstream as they are.
 
 ---
 
