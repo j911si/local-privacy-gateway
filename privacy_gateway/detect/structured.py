@@ -19,6 +19,7 @@ CONFIDENCE = 0.98
 JWT_CONFIDENCE = 0.99
 
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://[^\s>\"')]+")
+URL_TRAILING_PUNCTUATION = ".,;:!?"
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 EMAIL_RUN_RE = re.compile(r"[\w.+-]+")
 JWT_RE = re.compile(
@@ -169,11 +170,14 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
 def _parse_urls(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in URL_RE.finditer(text):
-        raw = match.group(0)
+        raw = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
+        end = match.start() + len(raw)
+        if not raw.partition("://")[2]:
+            continue
         try:
             parts = urlsplit(raw)
         except ValueError:
-            findings.append(_finding(match.start(), match.end(), "URL"))
+            findings.append(_finding(match.start(), end, "URL"))
             continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         host = parts.hostname or ""
@@ -191,7 +195,7 @@ def _parse_urls(text: str, config: Config) -> list[Finding]:
             if override is not None:
                 data_class = override
         children.sort(key=lambda child: child.span.start)
-        findings.append(_finding(match.start(), match.end(), data_class, children))
+        findings.append(_finding(match.start(), end, data_class, children))
     return findings
 
 

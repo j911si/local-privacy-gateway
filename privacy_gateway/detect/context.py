@@ -185,7 +185,8 @@ MARKER_TAIL = (
 MARKER_SUFFIX = r"(?:[-\s]?(?:nummer|nr\.?|number|no\.?|id))?(?!\w)"
 MARKER_TRAILING = ".,;:)]\"'"
 DEPARTMENT_RE = re.compile(
-    r"(?i)\b(?:Abteilung|Department|Dept\.?)\s*[:=]?\s*([A-ZÄÖÜ][\w&/ -]{2,40})"
+    r"\b(?i:(?:Abteilung|Department)\b|Dept\b\.?)(?:\s*[:=]\s*|\s+)"
+    r"([A-ZÄÖÜ]\w+(?:[&/-]\w+)*(?:(?: [&/])? [A-ZÄÖÜ]\w*(?:[&/-]\w+)*){0,2})"
 )
 JOB_TITLE_RE = re.compile(
     r"\b(CEO|CTO|CFO|CISO|Geschäftsführer(?:in)?|Leiter(?:in)?|Head of [A-Z][a-z]+"

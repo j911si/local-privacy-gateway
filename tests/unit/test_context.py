@@ -271,6 +271,43 @@ def test_department_marker(default_config: Config) -> None:
     assert [value_of(text, f) for f in department] == ["IT-Security"]
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Abteilung: Einkauf. Bitte melden.", "Einkauf"),
+        ("Bitte an Department Finance weiterleiten.", "Finance"),
+        ("Zuständig ist Dept. Legal, danke.", "Legal"),
+        ("Die Abteilung Qualitätssicherung Ost prüft das.", "Qualitätssicherung Ost"),
+        ("department = Research & Development", "Research & Development"),
+        ("Abteilung Forschung/Entwicklung hat zugestimmt.", "Forschung/Entwicklung"),
+        ("Abteilung: Human-Resources Team Süd Nord West", "Human-Resources Team Süd"),
+    ],
+)
+def test_department_value_stays_bounded(
+    default_config: Config, text: str, expected: str
+) -> None:
+    # The generic marker path may add the first word on its own; the regex span is the longest.
+    values = [value_of(text, f) for f in of_class(detect(text, default_config), "DEPARTMENT")]
+    assert max(values, key=len) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Wir sprechen mit der Abteilung über das Budget.",
+        "Die Abteilung hat zugestimmt.",
+        "Das departmentweite Budget steigt.",
+        "Die Abteilungsleitung ist informiert.",
+        "Das ist eine Department-level Entscheidung.",
+        "Raum in Abteilung 42 ist frei.",
+        "SELECT * WHERE department_id = row",
+        "Die Abteilung, die zuständig ist, meldet sich.",
+    ],
+)
+def test_department_rejects_non_values(default_config: Config, text: str) -> None:
+    assert of_class(detect(text, default_config), "DEPARTMENT") == []
+
+
 def test_job_title(default_config: Config) -> None:
     text = "Sie ist Geschäftsführerin der GmbH."
     titles = of_class(detect(text, default_config), "JOB_TITLE")
