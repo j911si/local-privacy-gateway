@@ -29,6 +29,11 @@ def _host_part(text: str, start: int, tokens: list[Span]) -> bool:
     return start > 0 and (text[start - 1].isalnum() or any(t.end == start for t in tokens))
 
 
+def _inside_longer_number(text: str, start: int, end: int) -> bool:
+    """True when a short number hit is only a fragment of a longer run of digits."""
+    return (start > 0 and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())
+
+
 def numbered_tokens(text: str) -> frozenset[str]:
     """Every numbered token-shaped string in `text`."""
     return frozenset(match.group(0) for match in _NUMBERED_TOKEN.finditer(text))
@@ -183,7 +188,10 @@ def check_leakage(
         hits: set[tuple[int, int]] = set()
         for value in dict.fromkeys([entry.value, *entry.surface_forms]):
             hits |= _occurrences(views, value, genitive)
+        short_number = entry.value.isdigit() and len(entry.value) < MIN_DIGITS_FOR_DIGIT_SEARCH
         for start, end in _merged(hits):
+            if short_number and _inside_longer_number(text, start, end):
+                continue
             if entry.data_class == "SOCIAL_MEDIA_HANDLE" and _host_part(text, start, token_spans):
                 continue
             leaks.append(Leak("original_value", entry.data_class, start, end))

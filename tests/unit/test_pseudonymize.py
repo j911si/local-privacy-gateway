@@ -356,3 +356,14 @@ def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
         output = session.pseudonymize(text)
         assert "anna" not in output.lower().replace("<", "").replace(">", "")
         assert session.restore(output, "strict").text == text
+
+
+def test_a_known_short_number_inside_a_word_is_replaced_and_restored(
+    default_config: Config,
+) -> None:
+    text = 'Konto 4711 ist offen.\ncheck("AB4711CD").'
+    with Gateway(default_config) as gateway:
+        session = gateway.session("numinword")
+        output = session.pseudonymize(text)
+        assert "4711" not in output
+        assert session.restore(output, "strict").text == text

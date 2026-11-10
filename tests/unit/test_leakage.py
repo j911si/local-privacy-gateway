@@ -291,3 +291,12 @@ def test_finding_inside_a_four_digit_token_is_not_a_leak(default_config: Config)
     scan = _scan_for("1000", "ACCOUNT_ID")
 
     assert check_leakage("v <ACCOUNT_ID_1000> x", entries, scan, default_config.registry) is None
+
+
+def test_a_short_number_inside_a_longer_number_is_no_leak(default_config: Config) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
+    registry = default_config.registry
+
+    assert check_leakage("id 14711 und 47112", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage("id 4711 und AB4711", entries, _empty_scan, registry)

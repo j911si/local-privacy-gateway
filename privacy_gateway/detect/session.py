@@ -15,14 +15,15 @@ if TYPE_CHECKING:
 
 SESSION_CONFIDENCE = 1.0
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
+MIN_DIGITS_FOR_PLAIN_NUMBER = 4
 
 
 def _value_span(text: str, start: int, end: int) -> Span | None:
-    """Widen a run of digits to the word it belongs to, or None when it is a fragment."""
+    """Widen a run of digits to its word; None inside a longer number, bare digits before a letter."""
     if start and text[start - 1].isdigit():
         return None
     if end < len(text) and text[end].isalnum():
-        return None
+        return Span(start, end)
     while start and text[start - 1].isalnum():
         start -= 1
     return Span(start, end)
@@ -40,7 +41,8 @@ class SessionStage:
         self._by_digits: dict[str, tuple[str, str]] = {}
         for form, value in self._known.items():
             digits = "".join(char for char in form if char.isdigit())
-            if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH:
+            plain = digits == form and len(digits) >= MIN_DIGITS_FOR_PLAIN_NUMBER
+            if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH or plain:
                 self._by_digits.setdefault(digits, value)
         self._matcher: TrieMatcher | None = None
 
