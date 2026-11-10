@@ -323,3 +323,10 @@ def test_home_directory_user_is_a_username(default_config: Config, text: str, us
 def test_home_directory_pattern_ignores_other_paths(default_config: Config) -> None:
     text = "Pfade /usr/home/x, /var/Users und /Users selbst, /homework/a"
     assert "PERSON_USERNAME" not in classes_of(run_stage(text, default_config))
+
+
+def test_azure_secret_needs_a_digit_so_a_long_identifier_next_to_azure_is_no_secret(
+    default_config: Config,
+) -> None:
+    text = "AZURE_CLIENT_SECRET is set\n\ndef test_anthropic_api_key_is_detected(): pass"
+    assert "AZURE_SECRET" not in classes_of(run_stage(text, default_config))

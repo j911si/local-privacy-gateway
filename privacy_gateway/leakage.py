@@ -197,6 +197,8 @@ def check_leakage(
         for start, end in _merged(hits):
             if short_number and _inside_longer_number(text, start, end):
                 continue
+            if mostly_digits(entry.value) and end < len(text) and text[end].isdigit():
+                continue
             if entry.data_class == "SOCIAL_MEDIA_HANDLE" and _host_part(text, start, token_spans):
                 continue
             leaks.append(Leak("original_value", entry.data_class, start, end))

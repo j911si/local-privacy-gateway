@@ -389,3 +389,26 @@ def test_the_digits_of_a_known_url_scattered_over_other_words_are_no_match(
         session = gateway.session()
         session.pseudonymize(intro)
         assert session.pseudonymize(later) == later
+
+
+def test_a_known_name_is_replaced_whatever_the_whitespace_between_its_words(
+    default_config: Config,
+) -> None:
+    intro = "Brief an Frau Anna  Müller."
+    later = "Zeile: anna müller, ANNA   MÜLLER und Anna\nMüller."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        output = session.pseudonymize(later)
+        assert "müller" not in output.lower().replace("<", "").replace(">", "")
+
+
+def test_a_longer_number_that_starts_like_a_known_phone_is_another_number(
+    default_config: Config,
+) -> None:
+    intro = "Tel. +49 211 1234567"
+    later = 'assert phone_valid("+49 211 12345678901234") is False'
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        assert session.pseudonymize(later) == later

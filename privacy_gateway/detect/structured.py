@@ -154,9 +154,7 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
             children.append(_finding(offset, offset + len(user), "PERSON_USERNAME"))
         if separator and password:
             password_start = offset + len(user) + 1
-            children.append(
-                _finding(password_start, password_start + len(password), "PASSWORD")
-            )
+            children.append(_finding(password_start, password_start + len(password), "PASSWORD"))
     host = host_part
     if host.startswith("["):
         host = host[: host.find("]") + 1] if "]" in host else host
@@ -172,7 +170,11 @@ def _parse_urls(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in URL_RE.finditer(text):
         raw = match.group(0)
-        parts = urlsplit(raw)
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), match.end(), "URL"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         host = parts.hostname or ""
         children = _netloc_children(
@@ -245,7 +247,11 @@ def _parse_connection_strings(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in DB_URI_RE.finditer(text):
         raw = match.group(0)
-        parts = urlsplit(raw)
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), match.end(), "DATABASE_CONNECTION_STRING"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         children = _netloc_children(parts.netloc, netloc_offset, config, "DATABASE_HOST")
         children = [
@@ -330,9 +336,7 @@ def _parse_headers(text: str, config: Config) -> list[Finding]:
             credential = AUTH_RE.match(value)
             if credential is not None:
                 start = value_offset + credential.start(1)
-                findings.append(
-                    _finding(start, start + len(credential.group(1)), "ACCESS_TOKEN")
-                )
+                findings.append(_finding(start, start + len(credential.group(1)), "ACCESS_TOKEN"))
         elif name in ("cookie", "set-cookie"):
             children = _cookie_children(value, value_offset, name == "set-cookie")
             if children:

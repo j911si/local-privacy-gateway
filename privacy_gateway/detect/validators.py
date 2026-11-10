@@ -250,6 +250,11 @@ def _de_ssn_check(compact: str) -> bool:
     return total % 10 == int(compact[11])
 
 
+def secret_has_digit(s: str) -> bool:
+    """A random secret of this length carries a digit; a long identifier usually does not."""
+    return any(char.isdigit() for char in s)
+
+
 VALIDATORS: dict[str, Callable[[str], bool]] = {
     "luhn": luhn_valid,
     "iban": iban_valid,
@@ -262,4 +267,5 @@ VALIDATORS: dict[str, Callable[[str], bool]] = {
     "tax_id": tax_id_valid,
     "ssn": ssn_valid,
     "fqdn": fqdn_valid,
+    "secret_digit": secret_has_digit,
 }

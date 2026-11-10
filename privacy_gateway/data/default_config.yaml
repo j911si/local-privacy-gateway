@@ -541,6 +541,7 @@ classes:
     category: SECRET
     policy: redact
     patterns: ['\b[A-Za-z0-9~._-]{34,40}\b']
+    validator: secret_digit
     context_words: ['client_secret', 'azure']
     context_required: true
   GCP_CREDENTIAL:

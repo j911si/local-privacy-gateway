@@ -23,6 +23,8 @@ def _value_span(text: str, start: int, end: int, long_value: bool) -> Span | Non
 
     A short number inside a longer number is no match (None).
     """
+    if end < len(text) and text[end].isdigit():
+        return None
     if start and text[start - 1].isdigit():
         return Span(start, end) if long_value else None
     if end < len(text) and text[end].isalnum():
@@ -49,6 +51,24 @@ class SessionStage:
             if long_number or plain:
                 self._by_digits.setdefault(digits, value)
         self._matcher: TrieMatcher | None = None
+        self._spaced: list[tuple[re.Pattern[str], tuple[str, str]]] | None = None
+
+    def _spaced_for(self, config: Config) -> list[tuple[re.Pattern[str], tuple[str, str]]]:
+        """Multi-word forms as patterns that accept any whitespace between the words."""
+        if self._spaced is None:
+            self._spaced = []
+            seen: set[str] = set()
+            for form, value in self._known.items():
+                words = form.split()
+                key = " ".join(words).lower()
+                if len(words) < 2 or key in seen:
+                    continue
+                seen.add(key)
+                ending = "s?" if allows_genitive(config.registry, value[0]) else ""
+                body = r"\s+".join(re.escape(word) for word in words)
+                pattern = re.compile(rf"(?<![^\W_]){body}{ending}(?![^\W_])", re.IGNORECASE)
+                self._spaced.append((pattern, value))
+        return self._spaced
 
     def _matcher_for(self, config: Config) -> TrieMatcher:
         if self._matcher is None:
@@ -70,6 +90,13 @@ class SessionStage:
         for span, form in self._matcher_for(config).find(text):
             taken.append(span)
             result.append(self._finding(span, self._known[form]))
+        for pattern, value in self._spaced_for(config):
+            for match in pattern.finditer(text):
+                span = Span(match.start(), match.end())
+                if any(span.overlaps(other) for other in taken):
+                    continue
+                taken.append(span)
+                result.append(self._finding(span, value))
         result.extend(self._digit_findings(text, taken))
         return result
 
