@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.detect.dictionaries import allows_genitive
+from privacy_gateway.detect.spans import compact_digit_run, mostly_digits
 from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, Span, VaultEntry
 
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
@@ -134,9 +135,13 @@ def _occurrences(
     hits |= _projected_hits(
         projection, offsets, collapsed_value, bounded=bounded, genitive=genitive
     )
-    if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH:
+    if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH and mostly_digits(value):
         projection, offsets = views.digits()
-        hits |= _projected_hits(projection, offsets, digits, bounded=False)
+        hits |= {
+            hit
+            for hit in _projected_hits(projection, offsets, digits, bounded=False)
+            if compact_digit_run(text, *hit)
+        }
     return hits
 
 

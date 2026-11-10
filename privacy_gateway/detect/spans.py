@@ -19,6 +19,17 @@ STAGE_ORDER: dict[str, int] = {
 }
 
 
+def mostly_digits(value: str) -> bool:
+    """True when at least half of a value's letters and digits are digits."""
+    chars = [char for char in value if char.isalnum()]
+    return bool(chars) and sum(char.isdigit() for char in chars) * 2 >= len(chars)
+
+
+def compact_digit_run(text: str, start: int, end: int) -> bool:
+    """True when only digits and separators sit between the ends of a digit-only match."""
+    return not any(char.isalpha() for char in text[start:end])
+
+
 def _order(finding: Finding) -> tuple[int, int]:
     return (finding.span.start, -len(finding.span))
 

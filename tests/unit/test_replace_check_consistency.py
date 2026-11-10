@@ -107,7 +107,7 @@ def test_a_known_value_in_any_spelling_never_blocks_a_later_text(
     intro, _ = SEEDS[seed]
     later = frame.format(v=variant)
     with Gateway(default_config) as gateway:
-        session = gateway.session("consistency")
+        session = gateway.session()
         session.pseudonymize(intro)
         try:
             session.pseudonymize(later)

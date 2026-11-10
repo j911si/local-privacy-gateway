@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from privacy_gateway.detect.dictionaries import TrieMatcher, allows_genitive
-from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
+from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, compact_digit_run, mostly_digits
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -45,7 +45,8 @@ class SessionStage:
         for form, value in self._known.items():
             digits = "".join(char for char in form if char.isdigit())
             plain = digits == form and len(digits) >= MIN_DIGITS_FOR_PLAIN_NUMBER
-            if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH or plain:
+            long_number = len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH and mostly_digits(form)
+            if long_number or plain:
                 self._by_digits.setdefault(digits, value)
         self._matcher: TrieMatcher | None = None
 
@@ -81,13 +82,13 @@ class SessionStage:
         result: list[Finding] = []
         for digits, value in self._by_digits.items():
             for match in re.finditer(re.escape(digits), projection):
-                span = _value_span(
-                    text,
-                    offsets[match.start()],
-                    offsets[match.end() - 1] + 1,
-                    len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH,
-                )
-                if span is None or any(span.overlaps(other) for other in taken):
+                first, last = offsets[match.start()], offsets[match.end() - 1] + 1
+                if not compact_digit_run(text, first, last):
+                    continue
+                span = _value_span(text, first, last, len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH)
+                if span is None:
+                    continue
+                if any(span.overlaps(other) for other in taken):
                     continue
                 taken.append(span)
                 result.append(self._finding(span, value))

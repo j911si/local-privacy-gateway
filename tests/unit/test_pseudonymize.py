@@ -363,7 +363,7 @@ def test_a_known_short_number_inside_a_word_is_replaced_and_restored(
 ) -> None:
     text = 'Konto 4711 ist offen.\ncheck("AB4711CD").'
     with Gateway(default_config) as gateway:
-        session = gateway.session("numinword")
+        session = gateway.session()
         output = session.pseudonymize(text)
         assert "4711" not in output
         assert session.restore(output, "strict").text == text
@@ -374,7 +374,18 @@ def test_a_known_phone_number_with_a_00_country_prefix_is_replaced_and_restored(
 ) -> None:
     text = "Tel. +49 30 12345678 und im Skript 0049 30 12345678 sowie 004930 12345678."
     with Gateway(default_config) as gateway:
-        session = gateway.session("phone00")
+        session = gateway.session()
         output = session.pseudonymize(text)
         assert "12345678" not in output
         assert session.restore(output, "strict").text.count("12345678") == 3
+
+
+def test_the_digits_of_a_known_url_scattered_over_other_words_are_no_match(
+    default_config: Config,
+) -> None:
+    intro = "Siehe https://git.beispiel-firma.de/r1?id=ab123cd456 fuer Details."
+    later = "Zeile 1 und Seite 1, dann Kapitel 2 mit 3 Punkten, 4 oder 5 und Stufe 6."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        assert session.pseudonymize(later) == later
