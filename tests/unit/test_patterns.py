@@ -330,3 +330,8 @@ def test_azure_secret_needs_a_digit_so_a_long_identifier_next_to_azure_is_no_sec
 ) -> None:
     text = "AZURE_CLIENT_SECRET is set\n\ndef test_anthropic_api_key_is_detected(): pass"
     assert "AZURE_SECRET" not in classes_of(run_stage(text, default_config))
+
+
+def test_a_token_name_is_not_a_context_word(default_config: Config) -> None:
+    findings = run_stage("<CVV_001>\n   456\t)", default_config)
+    assert "CVV" not in classes_of(findings)

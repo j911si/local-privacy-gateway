@@ -7,6 +7,7 @@ import os
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -205,8 +206,13 @@ class GatewaySession:
                         self._gateway.config.registry,
                         literal_tokens,
                     )
-                except LeakageError:
-                    if attempt + 1 < MAX_PASSES and self._generation != generation:
+                except LeakageError as exc:
+                    if attempt + 1 < MAX_PASSES and (
+                        self._generation != generation
+                        or self._learn_residue(
+                            pseudonymized.text, exc.leaks, known, written, appended
+                        )
+                    ):
                         continue
                     raise
                 break
@@ -343,6 +349,42 @@ class GatewaySession:
             appended.append((assignment.token, list(entry.surface_forms)))
             self._gateway.vault.append_surface_forms(self.session_id, assignment.token, forms)
             entry.surface_forms.extend(forms)
+
+    def _learn_residue(
+        self,
+        output: str,
+        leaks: list[Leak],
+        known: dict[str, tuple[str, str]],
+        written: list[str],
+        appended: list[tuple[str, list[str]]],
+    ) -> bool:
+        """Make values the output check found a known value, so the next pass replaces them.
+
+        Replacing shortens text, so a context word can come into range of a value that the
+        original text had out of range.
+        """
+        spans = {
+            (leak.start, leak.end, leak.data_class)
+            for leak in leaks
+            if leak.kind == "residual_finding"
+        }
+        if not spans:
+            return False
+        report = self._gateway._pipeline.run(output, known)
+        kept = [
+            finding
+            for finding in report.findings
+            if (finding.span.start, finding.span.end, finding.data_class) in spans
+            and "<" not in output[finding.span.start : finding.span.end]
+        ]
+        if not kept:
+            return False
+        generation = self._generation
+        learned = pseudonymize_text(
+            output, replace(report, findings=kept), self._gateway.config, counters=self._counters
+        )
+        self._write(output, learned, written, appended)
+        return self._generation != generation
 
     def _rollback(
         self,

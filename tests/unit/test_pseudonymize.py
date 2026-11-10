@@ -412,3 +412,39 @@ def test_a_longer_number_that_starts_like_a_known_phone_is_another_number(
         session = gateway.session()
         session.pseudonymize(intro)
         assert session.pseudonymize(later) == later
+
+
+def test_a_token_name_is_no_context_word_for_the_numbers_next_to_it(
+    default_config: Config,
+) -> None:
+    text = "Karte, CVV 123." + "\nZeile ohne Bedeutung" * 3 + "\n  123\t)\n  456\tx"
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "123" not in output
+        assert "456" in output
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_context_word_that_comes_into_range_after_replacing_does_not_block(
+    default_config: Config,
+) -> None:
+    long_phone = "+49 171 2345 6789 01"
+    text = f"Phone: {long_phone}; {'x' * 15} 5551234"
+    assert text.index("5551234") - text.index("Phone") > 40
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "5551234" not in output
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_short_name_glued_to_a_number_does_not_block_once_the_number_is_a_token(
+    default_config: Config,
+) -> None:
+    text = "Konto 4711, Herr Li.\nKennung 4711Li und id_4711Li."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "4711" not in output
+        assert session.restore(output, "strict").text == text

@@ -300,3 +300,26 @@ def test_a_short_number_inside_a_longer_number_is_no_leak(default_config: Config
     assert check_leakage("id 14711 und 47112", entries, _empty_scan, registry) is None
     with pytest.raises(LeakageError):
         check_leakage("id 4711 und AB4711", entries, _empty_scan, registry)
+
+
+def test_a_short_mixed_value_inside_a_longer_word_is_no_leak(default_config: Config) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("B2C4", "ACCOUNT_ID")}
+    registry = default_config.registry
+
+    assert check_leakage("id XB2C4D6 und B2C4D", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage("id B2C4 und XB2C4D6", entries, _empty_scan, registry)
+
+
+def test_a_short_value_glued_to_a_token_is_no_leak(default_config: Config) -> None:
+    entries = {
+        "<PERSON_001>": _entry("Li", "PERSON_LAST_NAME"),
+        "<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID"),
+    }
+    registry = default_config.registry
+
+    glued = "id <ACCOUNT_ID_001>Li, <ACCOUNT_ID_001>"
+    assert check_leakage(glued, entries, _empty_scan, registry) is None
+    assert check_leakage("id Li<ACCOUNT_ID_001>", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage("id <ACCOUNT_ID_001> Li", entries, _empty_scan, registry)

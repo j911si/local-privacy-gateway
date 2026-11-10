@@ -64,10 +64,13 @@ def _context_re(words: tuple[str, ...]) -> re.Pattern[str]:
     )
 
 
+TOKEN_NAME_RE = re.compile(r"<[A-Z][A-Z0-9_]*_\d{3,}>")
+
+
 def _has_context(text: str, start: int, words: tuple[str, ...]) -> bool:
     if not words:
         return False
-    window = text[max(0, start - CONTEXT_WINDOW) : start]
+    window = TOKEN_NAME_RE.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
     return _context_re(words).search(window) is not None
 
 

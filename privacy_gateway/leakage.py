@@ -35,6 +35,28 @@ def _inside_longer_number(text: str, start: int, end: int) -> bool:
     return (start > 0 and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())
 
 
+def _inside_longer_word(text: str, start: int, end: int) -> bool:
+    """True when a hit is only a fragment of a longer run of letters and digits."""
+    return (start > 0 and text[start - 1].isalnum()) or (end < len(text) and text[end].isalnum())
+
+
+def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
+    """A short hit right next to a token was part of a longer word before the token went in."""
+    return end - start < MIN_LENGTH_FOR_FUZZY_SEARCH and any(
+        token.end == start or token.start == end for token in tokens
+    )
+
+
+def _is_short_mixed(value: str) -> bool:
+    """A short value of letters and digits, which says nothing when it sits inside a word."""
+    return (
+        len(value) < MIN_DIGITS_FOR_DIGIT_SEARCH
+        and value.isalnum()
+        and any(char.isdigit() for char in value)
+        and any(char.isalpha() for char in value)
+    )
+
+
 def numbered_tokens(text: str) -> frozenset[str]:
     """Every numbered token-shaped string in `text`."""
     return frozenset(match.group(0) for match in _NUMBERED_TOKEN.finditer(text))
@@ -183,6 +205,8 @@ def check_leakage(
             continue
         if glued_to_token(finding, token_spans):
             continue
+        if _short_touching_token(finding.span.start, finding.span.end, token_spans):
+            continue
         leaks.append(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
         )
@@ -194,8 +218,13 @@ def check_leakage(
         for value in dict.fromkeys([entry.value, *entry.surface_forms]):
             hits |= _occurrences(views, value, genitive)
         short_number = entry.value.isdigit() and len(entry.value) < MIN_DIGITS_FOR_DIGIT_SEARCH
+        short_mixed = _is_short_mixed(entry.value)
         for start, end in _merged(hits):
             if short_number and _inside_longer_number(text, start, end):
+                continue
+            if short_mixed and _inside_longer_word(text, start, end):
+                continue
+            if _short_touching_token(start, end, token_spans):
                 continue
             if mostly_digits(entry.value) and end < len(text) and text[end].isdigit():
                 continue
