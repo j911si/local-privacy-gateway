@@ -367,3 +367,14 @@ def test_a_known_short_number_inside_a_word_is_replaced_and_restored(
         output = session.pseudonymize(text)
         assert "4711" not in output
         assert session.restore(output, "strict").text == text
+
+
+def test_a_known_phone_number_with_a_00_country_prefix_is_replaced_and_restored(
+    default_config: Config,
+) -> None:
+    text = "Tel. +49 30 12345678 und im Skript 0049 30 12345678 sowie 004930 12345678."
+    with Gateway(default_config) as gateway:
+        session = gateway.session("phone00")
+        output = session.pseudonymize(text)
+        assert "12345678" not in output
+        assert session.restore(output, "strict").text.count("12345678") == 3

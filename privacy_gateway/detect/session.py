@@ -18,10 +18,13 @@ MIN_DIGITS_FOR_DIGIT_SEARCH = 6
 MIN_DIGITS_FOR_PLAIN_NUMBER = 4
 
 
-def _value_span(text: str, start: int, end: int) -> Span | None:
-    """Widen a run of digits to its word; None inside a longer number, bare digits before a letter."""
+def _value_span(text: str, start: int, end: int, long_value: bool) -> Span | None:
+    """Widen a run of digits to its word; bare digits inside a longer number or before a letter.
+
+    A short number inside a longer number is no match (None).
+    """
     if start and text[start - 1].isdigit():
-        return None
+        return Span(start, end) if long_value else None
     if end < len(text) and text[end].isalnum():
         return Span(start, end)
     while start and text[start - 1].isalnum():
@@ -78,7 +81,12 @@ class SessionStage:
         result: list[Finding] = []
         for digits, value in self._by_digits.items():
             for match in re.finditer(re.escape(digits), projection):
-                span = _value_span(text, offsets[match.start()], offsets[match.end() - 1] + 1)
+                span = _value_span(
+                    text,
+                    offsets[match.start()],
+                    offsets[match.end() - 1] + 1,
+                    len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH,
+                )
                 if span is None or any(span.overlaps(other) for other in taken):
                     continue
                 taken.append(span)
