@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 
 from privacy_gateway.config import Config
@@ -14,6 +14,7 @@ from privacy_gateway.model import Entity, Finding
 DIGIT_ONLY_CLASSES = frozenset(
     {"PHONE", "MOBILE_PHONE", "FAX", "IBAN", "CREDIT_CARD", "BANK_ACCOUNT"}
 )
+CLASS_ALIASES = {"PHONE_INTERNATIONAL": "PHONE"}
 PERSON_FULL_NAME = "PERSON_FULL_NAME"
 PERSON_LAST_NAME = "PERSON_LAST_NAME"
 PERSON_FIRST_NAME = "PERSON_FIRST_NAME"
@@ -58,6 +59,10 @@ def correlate(
 ) -> tuple[list[Finding], dict[str, Entity]]:
     """Set entity ids and attributes on findings and return the entities they belong to."""
     findings = _without_system_usernames(text, findings, config)
+    findings = [
+        replace(f, data_class=CLASS_ALIASES[f.data_class]) if f.data_class in CLASS_ALIASES else f
+        for f in findings
+    ]
     groups = _build_groups(text, findings)
     _resolve_persons(groups)
     _resolve_generic_ids(groups)

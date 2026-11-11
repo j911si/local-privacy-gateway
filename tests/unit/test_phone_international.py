@@ -53,7 +53,7 @@ def test_international_number_is_found_without_context(
 ) -> None:
     text = f"Rückruf {number} bitte"
     assert stage_values(text, default_config) == [number]
-    assert phone_classes(text, default_config) == [(CLASS, number)]
+    assert phone_classes(text, default_config) == [("PHONE", number)]
 
 
 def test_number_at_line_edges_and_in_brackets(default_config: Config) -> None:
@@ -159,3 +159,11 @@ def test_numbers_round_trip_through_the_gateway(gateway: Gateway) -> None:
 def test_text_without_numbers_is_unchanged(gateway: Gateway) -> None:
     text = "x+4917123, +15% und +3.5, @@ -1,5 +1,7 @@, UTC+01:00"
     assert gateway.pseudonymize(text).text == text
+
+
+def test_one_number_in_two_spellings_gets_one_token(gateway: Gateway) -> None:
+    session = gateway.session()
+    first = session.pseudonymize("Telefon: +49 171 2345678 ist erreichbar.")
+    second = session.pseudonymize("Ruf an unter +49 171 2345678 oder +491712345678.")
+    assert first == "Telefon: <PHONE_001> ist erreichbar."
+    assert second == "Ruf an unter <PHONE_001> oder <PHONE_001>."
