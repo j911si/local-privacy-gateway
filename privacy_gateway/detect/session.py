@@ -13,6 +13,7 @@ from privacy_gateway.detect.dictionaries import TrieMatcher, allows_genitive
 from privacy_gateway.detect.normalize import normalized, offset_map
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, compact_digit_run, mostly_digits
 from privacy_gateway.model import Finding, Span
+from privacy_gateway.tokens import ANY_TOKEN
 
 if TYPE_CHECKING:
     from privacy_gateway.config import Config
@@ -21,6 +22,10 @@ SESSION_CONFIDENCE = 1.0
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
 MIN_DIGITS_FOR_PLAIN_NUMBER = 4
 MIN_LENGTH_FOR_SUBSTRING_SEARCH = 4
+MIN_LENGTH_FOR_SWEEP = 4
+MIN_DIGITS_FOR_SWEEP = 6
+MIN_LENGTH_FOR_GLUED = 3
+LITERAL_ESCAPE_LETTERS = "ntr"
 PATTERN_CACHE_SIZE = 4096
 
 Known = tuple[str, str]
@@ -175,6 +180,133 @@ class KnownMatcher:
         return result
 
 
+def _lower(text: str) -> str:
+    """Lowercase that keeps the length, so offsets stay valid."""
+    lowered = text.lower()
+    if len(lowered) == len(text):
+        return lowered
+    return "".join(char.lower() if len(char.lower()) == 1 else char for char in text)
+
+
+def _left_boundary(text: str, start: int) -> bool:
+    """No letter before `start`, a literal `\\n`/`\\t`/`\\r` before it, or a camelCase break."""
+    if start == 0:
+        return True
+    before = text[start - 1]
+    if not before.isalpha():
+        return True
+    if before in LITERAL_ESCAPE_LETTERS and start >= 2 and text[start - 2] == "\\":
+        return True
+    return before.islower() and text[start].isupper()
+
+
+def _right_boundary(text: str, end: int, numeric: bool) -> bool:
+    if end == len(text):
+        return True
+    after = text[end]
+    if numeric and after.isdigit():
+        return False
+    if not after.isalpha():
+        return True
+    return after.isupper() and text[end - 1].islower()
+
+
+class SubstringSweep:
+    """A plain substring search for known values, independent of `KnownMatcher`.
+
+    It finds a value where the word-bound search cannot: next to digits, after a literal
+    escape, at a camelCase break, or glued to another known value. A pure-letter value inside a
+    longer word ("Stein" in "Steinbruch") is no hit, and a short mixed value ("B2C4") is a hit
+    only next to a non-alphanumeric character or another hit. Values under four characters
+    (digit-only under six) are not searched, except a three-letter value glued to a hit.
+    """
+
+    def __init__(self, known: Mapping[str, Known]) -> None:
+        self._values: dict[str, Known] = {}
+        self._spaced: list[tuple[re.Pattern[str], Known]] = []
+        self._short_mixed: set[str] = set()
+        self._glued_only: set[str] = set()
+        for form, value in known.items():
+            words = normalized(form).split()
+            key = _lower(" ".join(words))
+            if key in self._values or not self._long_enough(key):
+                continue
+            self._values[key] = value
+            if _is_short_mixed(key):
+                self._short_mixed.add(key)
+            if len(key) < MIN_LENGTH_FOR_SWEEP:
+                self._glued_only.add(key)
+            if len(words) > 1:
+                self._spaced.append((_substring_pattern(tuple(words)), value))
+
+    @staticmethod
+    def _long_enough(key: str) -> bool:
+        if key.isdigit():
+            return len(key) >= MIN_DIGITS_FOR_SWEEP
+        return len(key) >= MIN_LENGTH_FOR_GLUED
+
+    @staticmethod
+    def _free_left(text: str, start: int) -> bool:
+        return start == 0 or not text[start - 1].isalnum()
+
+    @staticmethod
+    def _free_right(text: str, end: int) -> bool:
+        return end == len(text) or not text[end].isalnum()
+
+    def find(self, text: str) -> list[Hit]:
+        """Hits outside literal tokens, spans pointing into `text`."""
+        mapping = offset_map(text)
+        work = text if mapping is None else mapping.text
+        lowered = _lower(work)
+        tokens = [Span(match.start(), match.end()) for match in ANY_TOKEN.finditer(work)]
+        raw: list[tuple[int, int, Known]] = []
+        for key, value in self._values.items():
+            if " " in key:
+                continue
+            start = lowered.find(key)
+            while start != -1:
+                raw.append((start, start + len(key), value))
+                start = lowered.find(key, start + 1)
+        for pattern, value in self._spaced:
+            raw.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
+        raw = [
+            hit
+            for hit in raw
+            if not any(token.overlaps(Span(hit[0], hit[1])) for token in tokens)
+        ]
+        raw.sort(key=lambda hit: (hit[0] - hit[1], hit[0]))
+        chosen: list[tuple[int, int, Known]] = []
+        covered = bytearray(len(work))
+        for start, end, value in raw:
+            if covered.find(1, start, end) == -1:
+                covered[start:end] = b"\x01" * (end - start)
+                chosen.append((start, end, value))
+        full = [hit for hit in chosen if lowered[hit[0] : hit[1]] not in self._glued_only]
+        starts = {start for start, _, _ in full}
+        ends = {end for _, end, _ in full}
+        hits: list[Hit] = []
+        for start, end, value in sorted(chosen):
+            if lowered[start:end] in self._glued_only:
+                glued_left = start in ends and _right_boundary(work, end, False)
+                glued_right = end in starts and _left_boundary(work, start)
+                if not (glued_left or glued_right):
+                    continue
+            elif lowered[start:end] in self._short_mixed:
+                if not (self._free_left(work, start) or start in ends):
+                    continue
+                if not (self._free_right(work, end) or end in starts):
+                    continue
+            else:
+                numeric = mostly_digits(work[start:end])
+                if not (_left_boundary(work, start) or start in ends):
+                    continue
+                if not (_right_boundary(work, end, numeric) or end in starts):
+                    continue
+            span = Span(start, end)
+            hits.append((span if mapping is None else mapping.original(span), value))
+        return hits
+
+
 def known_occurrences(text: str, known: Mapping[str, Known], registry: ClassRegistry) -> list[Hit]:
     """Every occurrence of a known form (form -> (data class, token)) in `text`."""
     return KnownMatcher(known, registry).find(text)
@@ -190,12 +322,24 @@ class SessionStage:
         # case-insensitive leak check reject every "/home/alex/" in later text
         self._known = {form: value for form, value in known.items() if form}
         self._matcher: KnownMatcher | None = None
+        self._sweep: SubstringSweep | None = None
 
     def run(self, text: str, config: Config, findings: list[Finding]) -> list[Finding]:
         """Return findings for known values; earlier findings are not inspected."""
         if self._matcher is None:
             self._matcher = KnownMatcher(self._known, config.registry)
-        return [self._finding(span, value) for span, value in self._matcher.find(text)]
+        if self._sweep is None:
+            self._sweep = SubstringSweep(self._known)
+        hits = self._matcher.find(text)
+        taken = bytearray(len(text))
+        for span, _ in hits:
+            taken[span.start : span.end] = b"\x01" * len(span)
+        hits += [
+            (span, value)
+            for span, value in self._sweep.find(text)
+            if taken.find(1, span.start, span.end) == -1
+        ]
+        return [self._finding(span, value) for span, value in hits]
 
     def _finding(self, span: Span, value: Known) -> Finding:
         data_class, token = value

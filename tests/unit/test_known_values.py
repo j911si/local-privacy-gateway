@@ -12,7 +12,8 @@ from hypothesis import strategies as st
 
 from privacy_gateway.api import Gateway, GatewaySession
 from privacy_gateway.config import load_config
-from privacy_gateway.detect.session import known_occurrences
+from privacy_gateway.detect.session import _is_short_mixed, known_occurrences
+from privacy_gateway.detect.spans import mostly_digits
 from privacy_gateway.model import Span
 from privacy_gateway.tokens import ANY_TOKEN
 
@@ -114,3 +115,33 @@ def test_whatever_the_check_would_report_is_replaced(
     variant = re.sub(r" ", gap, case(value))  # type: ignore[operator]
     output = session.pseudonymize(around.format(v=variant))
     assert not _outside_tokens(session, output)
+
+
+NEIGHBORS = st.sampled_from(
+    ["{v}", "7{v}", "{v}7", "_{v}", "{v}_", "-{v}", "{v}-", ".{v}", "{v}.", "/{v}/",
+     "<EMAIL_001>{v}", "{v}<EMAIL_002>", "Wert: {v}.", "a\n{v}\tb", "{v}{v}", "a\\n{v}\\n",
+     "\u200b{v}\u200b"]
+)
+
+
+def _stripped(output: str) -> str:
+    plain = ANY_TOKEN.sub("\x00", output).replace("\u200b", "").lower()
+    return re.sub(r"\s+", " ", plain)
+
+
+@settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(shape=_shapes(), around=NEIGHBORS, case=CASES, gap=GAPS)
+def test_no_known_value_of_the_minimum_length_is_left_as_a_substring(
+    gateway: Gateway, shape: tuple[str, str], around: str, case: object, gap: str
+) -> None:
+    data_class, value = shape
+    if len(value) < (6 if value.isdigit() else 4):
+        return
+    if _is_short_mixed(value):
+        return  # a short mix of letters and digits says nothing inside a word
+    if mostly_digits(value) and around == "{v}7":
+        return  # a longer number that starts like a known one is another number
+    session = _seeded(gateway, value, data_class)
+    variant = re.sub(r" ", gap, case(value))  # type: ignore[operator]
+    output = session.pseudonymize(around.format(v=variant))
+    assert re.sub(r"\s+", " ", value.lower()) not in _stripped(output)
