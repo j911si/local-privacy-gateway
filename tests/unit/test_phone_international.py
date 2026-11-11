@@ -327,3 +327,27 @@ def test_a_list_or_signature_line_next_to_the_number_is_no_diff(
     default_config: Config, text: str
 ) -> None:
     assert len(stage_values(text, default_config)) == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Vergleich:\n--- alt\n+++ neu\nErreichbar:\n+49 30 12345678",
+        "--- alt\n+++ neu\n\n+49 30 12345678",
+        "@@ -1,2 +1,2 @@\n x\n\nSignatur\nAnna\n+49 30 12345678",
+    ],
+)
+def test_a_header_does_not_cover_a_number_after_prose_or_a_blank_line(
+    default_config: Config, text: str
+) -> None:
+    assert len(stage_values(text, default_config)) == 1
+
+
+def test_added_line_with_a_plus_number_inside_a_hunk_is_found(default_config: Config) -> None:
+    text = "@@ -1,2 +1,2 @@\n-+49 30 12345678\n++49 30 12345679"
+    assert stage_values(text, default_config) == ["+49 30 12345678", "+49 30 12345679"]
+
+
+@pytest.mark.parametrize("text", ["+++49 30 12345678", "a ++49 30 12345678", "x\n+++49 30 12345678"])
+def test_more_plus_signs_are_still_no_number(default_config: Config, text: str) -> None:
+    assert stage_values(text, default_config) == []
