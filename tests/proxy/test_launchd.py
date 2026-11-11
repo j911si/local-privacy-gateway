@@ -291,7 +291,7 @@ def test_log_startup_warns_about_a_non_loopback_bind_without_a_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING):
-        cli.log_startup(ProxySettings(listen_host="100.64.0.1"))
+        cli.log_startup(ProxySettings(listen_host="192.0.2.1"))
 
     assert "no auth token" in caplog.text
 
@@ -300,7 +300,7 @@ def test_log_startup_is_quiet_about_the_token_when_one_is_set(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.INFO):
-        cli.log_startup(ProxySettings(listen_host="100.64.0.1", auth_token="tok-canary-123"))
+        cli.log_startup(ProxySettings(listen_host="192.0.2.1", auth_token="tok-canary-123"))
 
     assert "no auth token" not in caplog.text
     assert "tok-canary-123" not in caplog.text

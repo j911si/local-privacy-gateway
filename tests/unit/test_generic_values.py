@@ -41,7 +41,7 @@ def test_system_names_in_paths_are_not_usernames(path: str, default_config: Conf
     assert values_of(f"Datei {path} liegt dort.", default_config, "PERSON_USERNAME") == []
 
 
-@pytest.mark.parametrize("path", ["/home/annaberg/work", "/Users/michaelj/Documents"])
+@pytest.mark.parametrize("path", ["/home/annaberg/work", "/Users/thomask/Documents"])
 def test_real_usernames_in_paths_are_still_found(path: str, default_config: Config) -> None:
     assert values_of(f"Datei {path} liegt dort.", default_config, "PERSON_USERNAME")
 
