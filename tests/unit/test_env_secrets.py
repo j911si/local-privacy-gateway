@@ -304,3 +304,23 @@ def test_password_value_ends_where_the_value_ends(
 )
 def test_code_and_prose_after_password_words_stay(gateway: Gateway, text: str) -> None:
     assert gateway.pseudonymize(text).text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Passwort: Tr0ub4dor&3 (bitte nicht weitergeben)",
+        "Passwort: the-quick-brown-fox-42",
+        "password: no-reply-4711",
+        "WLAN-Passwort: Gartenzwerg im Regen",
+        "KEY=9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+    ],
+)
+def test_a_prose_word_inside_the_secret_does_not_hide_it(text: str) -> None:
+    findings = Pipeline(load_config()).run(text).findings
+    assert any(f.data_class in ("PASSWORD", "API_KEY") for f in findings)
+
+
+@pytest.mark.parametrize("text", ["Passwort: siehe oben", "Passwort: wird per Post verschickt"])
+def test_prose_that_starts_with_a_filler_word_is_no_password(text: str) -> None:
+    assert [f for f in Pipeline(load_config()).run(text).findings if f.data_class == "PASSWORD"] == []

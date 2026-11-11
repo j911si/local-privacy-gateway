@@ -25,8 +25,9 @@ IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
 PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
-DIFF_HEADER_RE = re.compile(r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|\+\+\+ |--- )", re.MULTILINE)
-NUMBER_LINE_RE = re.compile(r"[+\-][ ]?\d[\d ()/.\-]*")
+DIFF_HEADER_RE = re.compile(
+    r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|--- \S[^\n]*\r?\n\+\+\+ \S)", re.MULTILINE
+)
 LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
@@ -79,19 +80,9 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
-def _is_diff_marker(line: str) -> bool:
-    return line[:1] in ("+", "-") and NUMBER_LINE_RE.fullmatch(line.rstrip()) is None
-
-
-def _in_diff_block(text: str, start: int) -> bool:
-    """A hunk or file header anywhere in the text, or a `+`/`-` line next to the line at `start`."""
-    if DIFF_HEADER_RE.search(text) is not None:
-        return True
-    before = text[:start].rsplit("\n", 2)
-    previous = before[-2] if len(before) > 1 else ""
-    end = text.find("\n", start)
-    following = text[end + 1 :].split("\n", 1)[0] if end != -1 else ""
-    return _is_diff_marker(previous.rstrip("\r")) or _is_diff_marker(following.rstrip("\r"))
+def _in_diff_block(text: str) -> bool:
+    """A hunk header or a `---`/`+++` file header pair anywhere in the text."""
+    return DIFF_HEADER_RE.search(text) is not None
 
 
 def _at_line_start(text: str, start: int) -> bool:
@@ -141,7 +132,7 @@ class PatternStage:
         if (
             data_class.name == PHONE_INTERNATIONAL_CLASS
             and _at_line_start(text, span.start)
-            and _in_diff_block(text, span.start)
+            and _in_diff_block(text)
         ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)

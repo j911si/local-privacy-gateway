@@ -87,10 +87,6 @@ def test_number_in_column_zero_is_found_outside_a_diff(default_config: Config, t
         "@@ -1,3 +1,4 @@\n line\n+49 30 12345678 neue Zeile",
         "@@ -1,3 +1,4 @@\n+49 30 12345678",
         "diff --git a/x b/x\n--- a/x\n+++ b/x\nfoo\n+49 30 12345678",
-        "+foo = 1\n+49 30 12345678",
-        "+49 30 12345678\n-bar = 2",
-        " x = y\n+    retry = 3\n+49 30 12345678",
-        "+\n+49 30 12345678",
         "@@ -1,2 +1,3 @@\n+49 passed, 3 failed\n+1 415 lines changed\n+44 20 files",
         "@@ -9,2 +9,3 @@\n+44 20 7946 0958 Zeilen\n+1 415 555 2671",
     ],
@@ -316,3 +312,18 @@ def test_compact_spelling_of_a_known_number_gets_its_own_token(gateway: Gateway)
     second = session.pseudonymize("Ruf an unter +49 171 2345678 oder +491712345678.")
     assert "2345678" not in second
     assert second.count("<PHONE_001>") == 1 and second.count("<PHONE_002>") == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Kontakte:\n- Zentrale\n+49 30 12345678",
+        "--- Kontakt ---\n+49 30 12345678",
+        "Anna\n+49 171 2345678\n-> bitte anrufen",
+        "+ Neu: Rückrufnummer\n+49 30 12345678",
+    ],
+)
+def test_a_list_or_signature_line_next_to_the_number_is_no_diff(
+    default_config: Config, text: str
+) -> None:
+    assert len(stage_values(text, default_config)) == 1
