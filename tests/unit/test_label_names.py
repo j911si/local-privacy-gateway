@@ -29,7 +29,7 @@ def _round(gateway: Gateway, line: str) -> str:
 NAMED = [
     ("Name: Gisela Hollerbacher", "Gisela"),
     ("Name: Tobias Kreuzeder", "Kreuzeder"),
-    ("Zugangs-PIN für das Online-Banking: 482913, Kontoinhaber Hans Brandmeier.", "Brandmeier"),
+    ("Zugang für das Online-Banking, Kontoinhaber Hans Brandmeier.", "Brandmeier"),
     ("Kontoinhaber Ute Zeilhofer.", "Zeilhofer"),
     ("Kontoinhaberin: Mirela Dantzer", "Dantzer"),
     ("Inhaber Karl Wesnitzer", "Wesnitzer"),
@@ -69,6 +69,14 @@ KEPT = [
 @pytest.mark.parametrize(("line", "word"), NAMED)
 def test_label_name_is_replaced(gateway: Gateway, line: str, word: str) -> None:
     assert word not in _round(gateway, line)
+
+
+def test_a_redacted_pin_and_a_labelled_name_in_one_line(gateway: Gateway) -> None:
+    line = "Zugangs-PIN für das Online-Banking: 482913, Kontoinhaber Hans Brandmeier."
+    out = gateway.pseudonymize(line).text
+    assert "482913" not in out
+    assert "Brandmeier" not in out
+    assert out.startswith("Zugangs-PIN für das Online-Banking: <PIN_REDACTED>, Kontoinhaber <")
 
 
 @pytest.mark.parametrize("line", KEPT)
