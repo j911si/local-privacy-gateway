@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
-from privacy_gateway.detect.session import SubstringSweep, known_occurrences
+from privacy_gateway.detect.session import SubstringSweep, known_forms, known_occurrences
 from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, Span, VaultEntry
 from privacy_gateway.tokens import ANY_TOKEN, NUMBERED_TOKEN
 
@@ -84,11 +84,7 @@ def check_leakage(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
         )
 
-    known: dict[str, tuple[str, str]] = {}
-    for token, entry in entries.items():
-        for form in [entry.value, *entry.surface_forms]:
-            if form:
-                known.setdefault(form, (entry.data_class, token))
+    known = known_forms(entries)
     for span, (data_class, _) in known_occurrences(text, known, registry):
         if any(token.contains(span) for token in token_spans):
             continue
