@@ -226,6 +226,8 @@ def check_leakage(
                 continue
             if _short_touching_token(start, end, token_spans):
                 continue
+            if any(token.contains(Span(start, end)) for token in token_spans):
+                continue
             if mostly_digits(entry.value) and end < len(text) and text[end].isdigit():
                 continue
             if entry.data_class == "SOCIAL_MEDIA_HANDLE" and _host_part(text, start, token_spans):

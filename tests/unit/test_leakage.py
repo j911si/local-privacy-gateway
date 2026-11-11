@@ -311,6 +311,21 @@ def test_a_short_mixed_value_inside_a_longer_word_is_no_leak(default_config: Con
         check_leakage("id B2C4 und XB2C4D6", entries, _empty_scan, registry)
 
 
+def test_a_known_value_that_equals_a_token_name_is_no_leak_inside_that_token(
+    default_config: Config,
+) -> None:
+    entries = {
+        "<HOST_001>": _entry("HOST_001", "HOSTNAME"),
+        "<ACCOUNT_ID_001>": _entry("ACCOUNT_ID_001", "TICKET_ID"),
+    }
+    registry = default_config.registry
+
+    inside = "Hosts: <HOST_001> und <ACCOUNT_ID_001> sind Platzhalter."
+    assert check_leakage(inside, entries, _empty_scan, registry, frozenset()) is None
+    with pytest.raises(LeakageError):
+        check_leakage("Host HOST_001 steht offen.", entries, _empty_scan, registry)
+
+
 def test_a_short_value_glued_to_a_token_is_no_leak(default_config: Config) -> None:
     entries = {
         "<PERSON_001>": _entry("Li", "PERSON_LAST_NAME"),
