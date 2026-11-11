@@ -607,6 +607,10 @@ classes:
 
 dictionaries: {}
 
+system_usernames: [Shared, Public, Default, Guest, runner, root, ubuntu, ec2-user, admin,
+  administrator, user, username, vagrant, docker, node, app, git, jenkins, circleci,
+  runneradmin, vscode, codespace, nobody, daemon, www-data, postgres, mysql]
+
 vault:
   db_path: ~/.local/share/privacy-gateway/vault.db
   key_file: ~/.config/privacy-gateway/vault.key
