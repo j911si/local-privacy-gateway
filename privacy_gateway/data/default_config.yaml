@@ -172,7 +172,10 @@ classes:
   TAX_ID:
     category: IDENTIFIER
     policy: tokenize
-    patterns: ['\b\d{2}[ ]?\d{3}[ ]?\d{3}[ ]?\d{3}\b', '\b[A-Z]{2}[0-9A-Z]{8,12}\b']
+    patterns:
+      - '\b\d{2}[ ]?\d{3}[ ]?\d{3}[ ]?\d{3}\b'
+      - '\b[A-Z]{2}[0-9A-Z]{8,12}\b'
+      - '(?i)(?<![A-Za-z0-9])(?P<label>steuer-?id(?:nr)?|steueridentifikationsnummer|steuernummer|idnr|tin|tax[ -]?id)\.?[ \t]*[:=]?[ \t]*(?P<value>\d{2}(?: ?\d{3}){3})\b'
     validator: tax_id
     context_words: ['steuer', 'tax', 'ust', 'vat']
     context_required: true
@@ -232,7 +235,7 @@ classes:
   CREDIT_CARD:
     category: FINANCIAL
     policy: tokenize
-    patterns: ['\b(?:\d[ -]?){13,19}\b']
+    patterns: ['\b\d(?:[ -]?\d){12,18}\b']
     validator: luhn
     context_words: ['card', 'karte', 'visa', 'mastercard', 'amex', 'kreditkarte']
   DEBIT_CARD:
@@ -498,15 +501,21 @@ classes:
   PIN:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\bpin\s*[:=]?\s*(\d{4,8})\b']
+    patterns:
+      - '(?i)\bpin\s*[:=]?\s*(\d{4,8})\b'
+      - '(?i)\bpin\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{4,8})\b'
   TAN:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\btan\s*[:=]?\s*(\d{6,8})\b']
+    patterns:
+      - '(?i)\btan\s*[:=]?\s*(\d{6,8})\b'
+      - '(?i)\btan\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{6,8})\b'
   OTP:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\b(?:otp|one-time code|einmalcode)\s*[:=]?\s*(\d{6,8})\b']
+    patterns:
+      - '(?i)\b(?:otp|one-time code|einmalcode)\s*[:=]?\s*(\d{6,8})\b'
+      - '(?i)\b(?:otp|one-time code|einmalcode)\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{6,8})\b'
   ACCESS_TOKEN:
     category: SECRET
     policy: redact
