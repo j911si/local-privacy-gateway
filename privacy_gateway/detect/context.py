@@ -153,8 +153,32 @@ STOP_WORDS = frozenset(
         "im",
         "in",
         "on",
+        "admin",
+        "administrator",
+        "user",
+        "root",
+        "api",
+        "rest",
+        "http",
+        "https",
+        "sql",
+        "test",
+        "prod",
+        "dev",
+        "default",
+        "unknown",
+        "n/a",
+        "todo",
+        "tbd",
+        "example",
+        "sample",
+        "demo",
+        "local",
+        "main",
+        "master",
     }
 )
+TOKEN_SHAPED_RE = re.compile(r"[A-Z][A-Z0-9_]*_\d{3,}")
 
 HEALTH_MARKERS = (
     "diagnose",
@@ -284,7 +308,9 @@ class ContextStage:
         self._initials(text, config, out)
         self._handles(text, config, out)
         self._countries(text, config, out)
-        return self._deduplicate(out)
+        return self._deduplicate(
+            [f for f in out if not TOKEN_SHAPED_RE.fullmatch(text[f.span.start : f.span.end])]
+        )
 
     def _emit(
         self,

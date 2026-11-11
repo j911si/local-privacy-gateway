@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from dataclasses import dataclass, field
+from functools import cache
 
 from privacy_gateway.config import Config
+from privacy_gateway.detect.dictionaries import load_terms
 from privacy_gateway.model import Entity, Finding
 
 DIGIT_ONLY_CLASSES = frozenset(
@@ -27,6 +29,8 @@ GENDER = "gender"
 GENDER_CONFLICT = "gender_conflict"
 LINKED_ENTITY = "linked_entity"
 TOKEN = "token"
+COMMON_NAME_WORDS_FILE = "common_name_words.txt"
+PATTERN_STAGE = "pattern"
 FOLDINGS = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}
 
 
@@ -53,6 +57,7 @@ def correlate(
     text: str, findings: list[Finding], config: Config
 ) -> tuple[list[Finding], dict[str, Entity]]:
     """Set entity ids and attributes on findings and return the entities they belong to."""
+    findings = _without_system_usernames(text, findings, config)
     groups = _build_groups(text, findings)
     _resolve_persons(groups)
     _resolve_generic_ids(groups)
@@ -61,6 +66,27 @@ def correlate(
     _apply_token(groups, entities)
     _link_emails(text, findings, groups)
     return list(findings), entities
+
+
+def _without_system_usernames(
+    text: str, findings: list[Finding], config: Config
+) -> list[Finding]:
+    """Drop path-pattern usernames that are system or role names; dictionary hits stay."""
+    system = {_normalize_text(name) for name in config.system_usernames}
+    return [
+        f
+        for f in findings
+        if not (
+            f.data_class == PERSON_USERNAME
+            and f.stage == PATTERN_STAGE
+            and _normalize_text(text[f.span.start : f.span.end]) in system
+        )
+    ]
+
+
+@cache
+def _common_name_words() -> frozenset[str]:
+    return frozenset(_normalize_text(word) for word in load_terms(COMMON_NAME_WORDS_FILE))
 
 
 def _hashed(key: str) -> str:
@@ -144,6 +170,8 @@ def _resolve_persons(groups: list[_Group]) -> None:
             continue
         target = _join_target(group, people, names)
         if target is None:
+            continue
+        if group.key in _common_name_words() and group.confidence < PROMOTED_CONFIDENCE:
             continue
         for finding in group.findings:
             finding.confidence = max(finding.confidence, PROMOTED_CONFIDENCE)
