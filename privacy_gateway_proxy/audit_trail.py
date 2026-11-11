@@ -238,10 +238,15 @@ def scan(
     return hits
 
 
+MAX_SUFFIX_DIGITS = 3
+
+
 def _scanned_text(leaf: TextRef) -> str:
     """The leaf text, without the `#n` suffix the proxy itself added to a colliding key."""
     match = KEY_SUFFIX_RE.fullmatch(leaf.text) if isinstance(leaf.path[-1], KeyAt) else None
-    return match.group("base") if match else leaf.text
+    if match is None or len(match.group("number")) > MAX_SUFFIX_DIGITS:
+        return leaf.text
+    return match.group("base")
 
 
 def _finding(log: RequestAuditLog, text: str, item: FieldFinding) -> dict[str, object]:

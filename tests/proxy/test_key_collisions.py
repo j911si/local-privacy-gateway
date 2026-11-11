@@ -105,3 +105,12 @@ def test_keys_that_look_like_suffixed_tokens_roundtrip_byte_equal(
 
     assert rescan.blocking == []
     assert json.dumps(back) == json.dumps(payload)
+
+
+def test_a_long_number_after_the_hash_is_no_suffix_and_stays_in_the_scan() -> None:
+    card = "4111111111111111"
+    leaf = transform.TextRef((transform.KeyAt(0),), f"<IBAN_001>#{card}")
+    short = transform.TextRef((transform.KeyAt(0),), "<IBAN_001>#12")
+
+    assert audit_trail._scanned_text(leaf).endswith(card)
+    assert audit_trail._scanned_text(short) == "<IBAN_001>"
