@@ -212,7 +212,7 @@ UPPER_START_RE = re.compile(r"[A-ZÄÖÜ]")
 ADDRESS_RUN_RE = re.compile(r"[\wäöüß.-]+")
 ORGANIZATION_RUN_RE = re.compile(r"[\wäöüß&.-]+")
 INITIALS_RE = re.compile(r"\b([A-ZÄÖÜ]\.\s?[A-ZÄÖÜ]\.)")
-HANDLE_RE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{3,30}\b")
+HANDLE_RE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{3,30}\b(?![-/])")
 IDENTIFIER_PREFIX = r"(?<![-_./:\w])"
 MESSENGER_RE = re.compile(
     r"(?i)" + IDENTIFIER_PREFIX + r"(?:telegram|signal|whatsapp|teams|slack)"

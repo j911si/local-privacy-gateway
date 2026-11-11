@@ -369,6 +369,15 @@ def test_social_media_handle(default_config: Config) -> None:
     assert handles[0].confidence == 0.8
 
 
+def test_at_sign_import_and_scope_forms_are_not_handles(default_config: Config) -> None:
+    for text in (
+        "@beispiel-workflow.md",
+        "Importiere @name/pfad bitte",
+        "npm install @scope/paket",
+    ):
+        assert of_class(detect(text, default_config), "SOCIAL_MEDIA_HANDLE") == [], text
+
+
 def test_email_is_not_a_handle(default_config: Config) -> None:
     assert of_class(detect("max@example.com", default_config), "SOCIAL_MEDIA_HANDLE") == []
 
