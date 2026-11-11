@@ -91,6 +91,11 @@ DIALING_CODES = frozenset(
     | {"992", "993", "994", "995", "996", "998"}
 )
 MIN_PHONE_DIGITS = 8
+MIN_SUBSCRIBER_DIGITS = 5
+# Countries whose national numbers always have the same length (E.164, without trunk zero).
+NATIONAL_DIGITS = {
+    "1": 10, "31": 9, "33": 9, "34": 9, "41": 9, "48": 9, "90": 10, "420": 9,
+}
 MAX_PHONE_DIGITS = 15
 MAX_LABEL_LENGTH = 63
 IPV6 = 6
@@ -104,6 +109,7 @@ MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
 PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
+PHONE_GROUP_SPLIT_RE = re.compile(r"[ ()/\-]+")
 TRUNK_ZERO_RE = re.compile(r"\(0\)")
 CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
@@ -237,14 +243,29 @@ def phone_valid(s: str) -> bool:
 
 
 def phone_international_valid(s: str) -> bool:
-    """E.164 shape: `+`, a known country code, 8 to 15 digits; `(0)` is not dialled."""
+    """E.164 shape in written form: `+`, a country code as its own group, then separated groups.
+
+    The country code is the first digit group and must be a known one. At least one separator
+    must follow it (`+4917123456789` is not recognised without a context word). The national part
+    has to look like a number: a fixed length for countries that have one, and at least five
+    digits after the first group, which keeps lists like `+255 255 255 0` out.
+    """
     value = s.strip()
     if PHONE_INTERNATIONAL_RE.fullmatch(value) is None:
         return False
-    digits = "".join(char for char in TRUNK_ZERO_RE.sub("", value) if char.isdigit())
-    if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
+    cleaned = TRUNK_ZERO_RE.sub(" ", value[1:])
+    groups = [group for group in PHONE_GROUP_SPLIT_RE.split(cleaned) if group]
+    if len(groups) < 2 or groups[0] not in DIALING_CODES:
         return False
-    return any(digits[:length] in DIALING_CODES for length in (1, 2, 3))
+    national = groups[1:]
+    digits = len(groups[0]) + sum(len(group) for group in national)
+    if not MIN_PHONE_DIGITS <= digits <= MAX_PHONE_DIGITS:
+        return False
+    national_digits = digits - len(groups[0])
+    if NATIONAL_DIGITS.get(groups[0], national_digits) != national_digits:
+        return False
+    subscriber = national[1:] or national
+    return sum(len(group) for group in subscriber) >= MIN_SUBSCRIBER_DIGITS
 
 
 def date_valid(s: str) -> bool:
