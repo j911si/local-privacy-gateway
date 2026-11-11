@@ -16,6 +16,8 @@ TRUTHY_VALUES = ("1", "true", "yes", "on")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 LOCAL_UPSTREAM_PREFIXES = ("http://127.0.0.1", "http://localhost")
 PROCESS_SESSION_KEY = secrets.token_hex(8)
+AUDIT_DIR_ENV = "PGW_AUDIT_LOG_DIR"
+DEFAULT_AUDIT_DIR = Path("~/.local/state/privacy-gateway/audit")
 
 
 @dataclass
@@ -33,6 +35,16 @@ class ProxySettings:
     transform_system: bool = True
     placeholder_notice: bool = True
     debug_originals: bool = False
+    audit_dir: Path | None = None
+    rescan_budget_s: float = 10.0
+
+
+def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
+    """The daily audit directory: setting, then `PGW_AUDIT_LOG_DIR`, then the default."""
+    if settings.audit_dir is not None:
+        return Path(settings.audit_dir).expanduser()
+    value = (os.environ if env is None else env).get(AUDIT_DIR_ENV)
+    return Path(value).expanduser() if value else DEFAULT_AUDIT_DIR.expanduser()
 
 
 def is_loopback(host: str) -> bool:
@@ -89,6 +101,15 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     debug_originals = environment.get("PGW_PROXY_DEBUG_ORIGINALS")
     if debug_originals is not None:
         values["debug_originals"] = debug_originals.strip().lower() in TRUTHY_VALUES
+    rescan_budget = environment.get("PGW_PROXY_RESCAN_BUDGET")
+    if rescan_budget is not None:
+        try:
+            values["rescan_budget_s"] = float(rescan_budget)
+        except ValueError:
+            raise ConfigError(f"invalid rescan budget: {rescan_budget!r}") from None
+    audit_dir = environment.get(AUDIT_DIR_ENV)
+    if audit_dir:
+        values["audit_dir"] = Path(audit_dir)
 
     known = {item.name for item in fields(ProxySettings)}
     for name, value in overrides.items():

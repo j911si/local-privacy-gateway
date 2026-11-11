@@ -19,6 +19,9 @@ classes:
     category: PERSON
     policy: tokenize
     token_label: PERSON
+    patterns:
+      - '(?<![\w.:-])/(?:Users|home)/([^/\s\x60\x27\x22<>:*?|\\,;()\[\]]{1,64})'
+      - '[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/:*?\x22<>|\r\n]{1,64})'
   PERSON_INITIALS:
     category: PERSON
     policy: tokenize
@@ -538,6 +541,7 @@ classes:
     category: SECRET
     policy: redact
     patterns: ['\b[A-Za-z0-9~._-]{34,40}\b']
+    validator: secret_digit
     context_words: ['client_secret', 'azure']
     context_required: true
   GCP_CREDENTIAL:

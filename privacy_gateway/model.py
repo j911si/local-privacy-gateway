@@ -36,6 +36,7 @@ class LeakageError(PrivacyGatewayError):
 
     def __init__(self, leaks: list[Leak]) -> None:
         self.leaks: list[Leak] = leaks
+        self.text_index: int | None = None
         super().__init__(self._describe(leaks))
 
     @staticmethod
@@ -71,6 +72,19 @@ class Finding:
     entity_id: str | None = None
     attributes: dict[str, str] = field(default_factory=dict)
     children: list[Finding] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FieldFinding:
+    """One finding of a request field as the audit log records it; carries no value."""
+
+    data_class: str
+    start: int
+    end: int
+    token: str | None
+    policy: str
+    confidence: float
+    stage: str
 
 
 @dataclass

@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from privacy_gateway.detect.runs import run_finditer
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -18,7 +19,9 @@ CONFIDENCE = 0.98
 JWT_CONFIDENCE = 0.99
 
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://[^\s>\"')]+")
+URL_TRAILING_PUNCTUATION = ".,;:!?"
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+EMAIL_RUN_RE = re.compile(r"[\w.+-]+")
 JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_.\-])"
 )
@@ -152,9 +155,7 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
             children.append(_finding(offset, offset + len(user), "PERSON_USERNAME"))
         if separator and password:
             password_start = offset + len(user) + 1
-            children.append(
-                _finding(password_start, password_start + len(password), "PASSWORD")
-            )
+            children.append(_finding(password_start, password_start + len(password), "PASSWORD"))
     host = host_part
     if host.startswith("["):
         host = host[: host.find("]") + 1] if "]" in host else host
@@ -169,8 +170,15 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
 def _parse_urls(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in URL_RE.finditer(text):
-        raw = match.group(0)
-        parts = urlsplit(raw)
+        raw = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
+        end = match.start() + len(raw)
+        if not raw.partition("://")[2]:
+            continue
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), end, "URL"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         host = parts.hostname or ""
         children = _netloc_children(
@@ -187,13 +195,13 @@ def _parse_urls(text: str, config: Config) -> list[Finding]:
             if override is not None:
                 data_class = override
         children.sort(key=lambda child: child.span.start)
-        findings.append(_finding(match.start(), match.end(), data_class, children))
+        findings.append(_finding(match.start(), end, data_class, children))
     return findings
 
 
 def _parse_emails(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in EMAIL_RE.finditer(text):
+    for match in run_finditer(EMAIL_RE, text, EMAIL_RUN_RE):
         local, _, domain = match.group(0).partition("@")
         domain_start = match.start() + len(local) + 1
         children = [
@@ -243,7 +251,11 @@ def _parse_connection_strings(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in DB_URI_RE.finditer(text):
         raw = match.group(0)
-        parts = urlsplit(raw)
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), match.end(), "DATABASE_CONNECTION_STRING"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         children = _netloc_children(parts.netloc, netloc_offset, config, "DATABASE_HOST")
         children = [
@@ -328,9 +340,7 @@ def _parse_headers(text: str, config: Config) -> list[Finding]:
             credential = AUTH_RE.match(value)
             if credential is not None:
                 start = value_offset + credential.start(1)
-                findings.append(
-                    _finding(start, start + len(credential.group(1)), "ACCESS_TOKEN")
-                )
+                findings.append(_finding(start, start + len(credential.group(1)), "ACCESS_TOKEN"))
         elif name in ("cookie", "set-cookie"):
             children = _cookie_children(value, value_offset, name == "set-cookie")
             if children:

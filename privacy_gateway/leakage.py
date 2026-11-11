@@ -6,7 +6,9 @@ import re
 from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
-from privacy_gateway.model import DetectionReport, Leak, LeakageError, Span, VaultEntry
+from privacy_gateway.detect.dictionaries import allows_genitive
+from privacy_gateway.detect.spans import compact_digit_run, mostly_digits
+from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, Span, VaultEntry
 
 MIN_DIGITS_FOR_DIGIT_SEARCH = 6
 MIN_LENGTH_FOR_FUZZY_SEARCH = 4
@@ -14,6 +16,50 @@ MIN_LENGTH_FOR_FUZZY_SEARCH = 4
 _ANY_TOKEN = re.compile(r"<[A-Z][A-Z_]*?_(?:\d{3,}|REDACTED)>")
 _NUMBERED_TOKEN = re.compile(r"<[A-Z][A-Z_]*?_\d{3,}>")
 _WHITESPACE = re.compile(r"\s+")
+
+
+def glued_to_token(finding: Finding, tokens: list[Span]) -> bool:
+    """A handle that starts right after a token is the host part of `user@host`, not a handle."""
+    return finding.data_class == "SOCIAL_MEDIA_HANDLE" and any(
+        token.end == finding.span.start for token in tokens
+    )
+
+
+def _host_part(text: str, start: int, tokens: list[Span]) -> bool:
+    """True when a handle-shaped hit follows a word character or a token (`user@host`)."""
+    return start > 0 and (text[start - 1].isalnum() or any(t.end == start for t in tokens))
+
+
+def _inside_longer_number(text: str, start: int, end: int) -> bool:
+    """True when a short number hit is only a fragment of a longer run of digits."""
+    return (start > 0 and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit())
+
+
+def _inside_longer_word(text: str, start: int, end: int) -> bool:
+    """True when a hit is only a fragment of a longer run of letters and digits."""
+    return (start > 0 and text[start - 1].isalnum()) or (end < len(text) and text[end].isalnum())
+
+
+def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
+    """A short hit right next to a token was part of a longer word before the token went in."""
+    return end - start < MIN_LENGTH_FOR_FUZZY_SEARCH and any(
+        token.end == start or token.start == end for token in tokens
+    )
+
+
+def _is_short_mixed(value: str) -> bool:
+    """A short value of letters and digits, which says nothing when it sits inside a word."""
+    return (
+        len(value) < MIN_DIGITS_FOR_DIGIT_SEARCH
+        and value.isalnum()
+        and any(char.isdigit() for char in value)
+        and any(char.isalpha() for char in value)
+    )
+
+
+def numbered_tokens(text: str) -> frozenset[str]:
+    """Every numbered token-shaped string in `text`."""
+    return frozenset(match.group(0) for match in _NUMBERED_TOKEN.finditer(text))
 
 
 def _collapsed(text: str) -> tuple[str, list[int]]:
@@ -43,22 +89,23 @@ def _digits_only(text: str) -> tuple[str, list[int]]:
     return "".join(chars), offsets
 
 
-def _needle_pattern(needle: str, *, bounded: bool) -> re.Pattern[str]:
+def _needle_pattern(needle: str, *, bounded: bool, genitive: bool = True) -> re.Pattern[str]:
     body = re.escape(needle)
     if not bounded:
         return re.compile(body, re.IGNORECASE)
     prefix = r"(?<![^\W_])" if needle[:1].isalnum() else ""
-    suffix = r"s?(?![^\W_])" if needle[-1:].isalnum() else ""
+    ending = "s?" if genitive else ""
+    suffix = ending + r"(?![^\W_])" if needle[-1:].isalnum() else ""
     return re.compile(prefix + body + suffix, re.IGNORECASE)
 
 
 def _projected_hits(
-    projection: str, offsets: list[int], needle: str, *, bounded: bool
+    projection: str, offsets: list[int], needle: str, *, bounded: bool, genitive: bool = True
 ) -> set[tuple[int, int]]:
     if not needle:
         return set()
     hits: set[tuple[int, int]] = set()
-    for match in _needle_pattern(needle, bounded=bounded).finditer(projection):
+    for match in _needle_pattern(needle, bounded=bounded, genitive=genitive).finditer(projection):
         if match.end() == match.start():
             continue
         hits.add((offsets[match.start()], offsets[match.end() - 1] + 1))
@@ -91,7 +138,9 @@ class _Projections:
         return self._digits
 
 
-def _occurrences(views: _Projections, value: str) -> set[tuple[int, int]]:
+def _occurrences(
+    views: _Projections, value: str, genitive: bool = True
+) -> set[tuple[int, int]]:
     if not value:
         return set()
     text = views.text
@@ -101,14 +150,20 @@ def _occurrences(views: _Projections, value: str) -> set[tuple[int, int]]:
         return {(m.start(), m.end()) for m in re.finditer(pattern, text)}
     digits = "".join(char for char in value if char.isdigit())
     bounded = not digits
-    for match in _needle_pattern(value, bounded=bounded).finditer(text):
+    for match in _needle_pattern(value, bounded=bounded, genitive=genitive).finditer(text):
         hits.add((match.start(), match.end()))
     projection, offsets = views.collapsed
     collapsed_value = _WHITESPACE.sub(" ", value).strip()
-    hits |= _projected_hits(projection, offsets, collapsed_value, bounded=bounded)
-    if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH:
+    hits |= _projected_hits(
+        projection, offsets, collapsed_value, bounded=bounded, genitive=genitive
+    )
+    if len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH and mostly_digits(value):
         projection, offsets = views.digits()
-        hits |= _projected_hits(projection, offsets, digits, bounded=False)
+        hits |= {
+            hit
+            for hit in _projected_hits(projection, offsets, digits, bounded=False)
+            if compact_digit_run(text, *hit)
+        }
     return hits
 
 
@@ -134,8 +189,12 @@ def check_leakage(
     entries: Mapping[str, VaultEntry],
     scan: Callable[[str], DetectionReport],
     registry: ClassRegistry,
+    literal_tokens: frozenset[str] = frozenset(),
 ) -> None:
-    """Raise `LeakageError` when the pseudonymized text still exposes data."""
+    """Raise `LeakageError` when the pseudonymized text still exposes data.
+
+    `literal_tokens` are token-shaped strings that were already in the input text.
+    """
     leaks: list[Leak] = []
     token_spans = [Span(match.start(), match.end()) for match in _ANY_TOKEN.finditer(text)]
 
@@ -144,20 +203,39 @@ def check_leakage(
             continue
         if any(token.contains(finding.span) for token in token_spans):
             continue
+        if glued_to_token(finding, token_spans):
+            continue
+        if _short_touching_token(finding.span.start, finding.span.end, token_spans):
+            continue
         leaks.append(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
         )
 
     views = _Projections(text)
     for entry in entries.values():
+        genitive = allows_genitive(registry, entry.data_class)
         hits: set[tuple[int, int]] = set()
         for value in dict.fromkeys([entry.value, *entry.surface_forms]):
-            hits |= _occurrences(views, value)
+            hits |= _occurrences(views, value, genitive)
+        short_number = entry.value.isdigit() and len(entry.value) < MIN_DIGITS_FOR_DIGIT_SEARCH
+        short_mixed = _is_short_mixed(entry.value)
         for start, end in _merged(hits):
+            if short_number and _inside_longer_number(text, start, end):
+                continue
+            if short_mixed and _inside_longer_word(text, start, end):
+                continue
+            if _short_touching_token(start, end, token_spans):
+                continue
+            if any(token.contains(Span(start, end)) for token in token_spans):
+                continue
+            if mostly_digits(entry.value) and end < len(text) and text[end].isdigit():
+                continue
+            if entry.data_class == "SOCIAL_MEDIA_HANDLE" and _host_part(text, start, token_spans):
+                continue
             leaks.append(Leak("original_value", entry.data_class, start, end))
 
     for match in _NUMBERED_TOKEN.finditer(text):
-        if match.group(0) not in entries:
+        if match.group(0) not in entries and match.group(0) not in literal_tokens:
             leaks.append(Leak("unknown_token", "", match.start(), match.end()))
 
     if leaks:

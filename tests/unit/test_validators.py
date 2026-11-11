@@ -30,6 +30,7 @@ EXPECTED_KEYS = {
     "tax_id",
     "ssn",
     "fqdn",
+    "secret_digit",
 }
 
 

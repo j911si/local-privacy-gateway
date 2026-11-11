@@ -153,6 +153,19 @@ def test_status_reports_not_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.plist == launchd.plist_path(LABEL)
 
 
+def test_status_without_launchctl_reports_not_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(args: list[str]) -> None:
+        raise FileNotFoundError(2, "No such file or directory", args[0])
+
+    monkeypatch.setattr(launchd, "_run", missing)
+    monkeypatch.setattr(launchd, "_port_open", lambda host, port: True)
+
+    result = launchd.status(LABEL, "127.0.0.1", 8787)
+
+    assert result.loaded is False
+    assert result.listening is True
+
+
 def test_program_args_point_at_the_repo_root(tmp_path: Path) -> None:
     args = cli.program_args(tmp_path)
 

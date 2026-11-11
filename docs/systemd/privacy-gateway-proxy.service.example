@@ -1,0 +1,63 @@
+# Example systemd user unit for the Local Privacy Gateway proxy.
+#
+# Install:
+#   uv sync --group proxy                      # inside the checkout, once
+#   cp docs/systemd/privacy-gateway-proxy.service.example \
+#      ~/.config/systemd/user/privacy-gateway-proxy.service
+#   # adjust INSTALL_DIR below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now privacy-gateway-proxy.service
+#   loginctl enable-linger "$USER"             # keep it running without a login session
+#
+# The unit starts the console script from the project's .venv directly, so no
+# `uv run` (and no dependency resolution or download) happens at service start.
+# %h is systemd's specifier for the user's home directory.
+
+[Unit]
+Description=Local Privacy Gateway proxy
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# INSTALL_DIR: the absolute path of your checkout.
+WorkingDirectory=%h/local-privacy-gateway
+ExecStart=%h/local-privacy-gateway/.venv/bin/pgw-proxy serve
+Restart=on-failure
+RestartSec=10
+
+# Loopback is the safe default: the Host header check stays on.
+Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
+# Binding to a non-loopback address turns the Host header check off (the proxy
+# logs a warning at startup) and the proxy has no auth token. Only bind to an
+# address that nothing but trusted devices can reach, for example the address
+# of a private VPN interface. Never bind to 0.0.0.0.
+# Environment=PGW_PROXY_LISTEN=<vpn-interface-address>:8787
+#
+# Tailscale variant: listen on this host's Tailscale IPv4 address, read when the service starts.
+# Without a 100.x address the start fails and is retried every RestartSec, so the proxy never
+# falls back to another address. To use it, delete the PGW_PROXY_LISTEN line above and replace
+# the ExecStart line with (adjust the path; a doubled dollar sign keeps systemd from expanding
+# the variable):
+# ExecStart=/bin/sh -c 'ip=$$(/usr/bin/tailscale ip -4 | head -n1); case "$$ip" in 100.*) ;; *) echo "no Tailscale IPv4, start aborted" >&2; exit 1;; esac; exec %h/local-privacy-gateway/.venv/bin/pgw-proxy serve --listen "$$ip:8787"'
+
+Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
+Environment=PGW_VAULT_DB=%h/.local/state/privacy-gateway/vault.db
+Environment=PGW_VAULT_KEY_FILE=%h/.config/privacy-gateway/vault.key
+Environment=PGW_AUDIT_LOG=%h/.local/state/privacy-gateway/audit.jsonl
+Environment=PGW_AUDIT_LOG_DIR=%h/.local/state/privacy-gateway/audit
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Uncomment when the client logs in with OAuth instead of an API key:
+# Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
+
+# Hardening that works in the user manager without extra privileges.
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

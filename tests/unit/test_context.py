@@ -67,6 +67,19 @@ def test_male_salutation_with_academic_title(default_config: Config) -> None:
     assert last_name[0].attributes["gender"] == "male"
 
 
+def test_a_one_or_two_letter_name_after_a_salutation_is_not_learned(
+    default_config: Config,
+) -> None:
+    text = "Herr Li und Frau Ng schrieben, Frau Müller antwortete."
+    findings = detect(text, default_config)
+    assert [value_of(text, f) for f in of_class(findings, "PERSON_LAST_NAME")] == ["Müller"]
+    assert [value_of(text, f) for f in of_class(findings, "SALUTATION")] == [
+        "Herr",
+        "Frau",
+        "Frau",
+    ]
+
+
 def test_two_token_name_becomes_full_name(default_config: Config) -> None:
     text = "Sehr geehrter Herr Max Mustermann,"
     findings = detect(text, default_config)
@@ -258,6 +271,43 @@ def test_department_marker(default_config: Config) -> None:
     assert [value_of(text, f) for f in department] == ["IT-Security"]
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Abteilung: Einkauf. Bitte melden.", "Einkauf"),
+        ("Bitte an Department Finance weiterleiten.", "Finance"),
+        ("Zuständig ist Dept. Legal, danke.", "Legal"),
+        ("Die Abteilung Qualitätssicherung Ost prüft das.", "Qualitätssicherung Ost"),
+        ("department = Research & Development", "Research & Development"),
+        ("Abteilung Forschung/Entwicklung hat zugestimmt.", "Forschung/Entwicklung"),
+        ("Abteilung: Human-Resources Team Süd Nord West", "Human-Resources Team Süd"),
+    ],
+)
+def test_department_value_stays_bounded(
+    default_config: Config, text: str, expected: str
+) -> None:
+    # The generic marker path may add the first word on its own; the regex span is the longest.
+    values = [value_of(text, f) for f in of_class(detect(text, default_config), "DEPARTMENT")]
+    assert max(values, key=len) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Wir sprechen mit der Abteilung über das Budget.",
+        "Die Abteilung hat zugestimmt.",
+        "Das departmentweite Budget steigt.",
+        "Die Abteilungsleitung ist informiert.",
+        "Das ist eine Department-level Entscheidung.",
+        "Raum in Abteilung 42 ist frei.",
+        "SELECT * WHERE department_id = row",
+        "Die Abteilung, die zuständig ist, meldet sich.",
+    ],
+)
+def test_department_rejects_non_values(default_config: Config, text: str) -> None:
+    assert of_class(detect(text, default_config), "DEPARTMENT") == []
+
+
 def test_job_title(default_config: Config) -> None:
     text = "Sie ist Geschäftsführerin der GmbH."
     titles = of_class(detect(text, default_config), "JOB_TITLE")
@@ -317,6 +367,15 @@ def test_social_media_handle(default_config: Config) -> None:
     handles = of_class(detect(text, default_config), "SOCIAL_MEDIA_HANDLE")
     assert [value_of(text, f) for f in handles] == ["@max_muster"]
     assert handles[0].confidence == 0.8
+
+
+def test_at_sign_import_and_scope_forms_are_not_handles(default_config: Config) -> None:
+    for text in (
+        "@beispiel-workflow.md",
+        "Importiere @name/pfad bitte",
+        "npm install @scope/paket",
+    ):
+        assert of_class(detect(text, default_config), "SOCIAL_MEDIA_HANDLE") == [], text
 
 
 def test_email_is_not_a_handle(default_config: Config) -> None:

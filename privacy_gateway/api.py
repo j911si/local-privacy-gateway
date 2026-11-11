@@ -7,19 +7,25 @@ import os
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
 from privacy_gateway.audit import AuditLog
+from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
-from privacy_gateway.leakage import check_leakage
+from privacy_gateway.detect.public import is_public_reference
+from privacy_gateway.leakage import _ANY_TOKEN, check_leakage, glued_to_token, numbered_tokens
 from privacy_gateway.model import (
     DetectionReport,
+    FieldFinding,
+    Leak,
     LeakageError,
     PseudonymizeResult,
     RestoreResult,
+    Span,
     SummaryReport,
     VaultEntry,
 )
@@ -30,6 +36,9 @@ from privacy_gateway.vault import Vault
 PSEUDONYMIZE_STAGE = "pseudonymize"
 SESSION_STAGE = "session_pseudonymize"
 RESULT_CACHE_SIZE = 256
+RESCAN_CACHE_SIZE = 1024
+MAX_PASSES = 4
+REDACTED_SUFFIX = "_REDACTED>"
 
 
 class Gateway:
@@ -141,7 +150,9 @@ class GatewaySession:
     """One conversation: every value keeps the token it received on the first call.
 
     A cached result was leak-checked when it was first produced, so a repeat of the same
-    text is returned unchanged without re-running the pipeline or the leak check.
+    text is returned unchanged without re-running the pipeline or the leak check. The cache is
+    dropped whenever the set of known values changes, because an earlier result may then
+    still carry a value that is only known now.
     """
 
     def __init__(self, gateway: Gateway, session_id: str) -> None:
@@ -149,8 +160,10 @@ class GatewaySession:
         self._gateway = gateway
         self._entries: dict[str, VaultEntry] = gateway.vault.load(session_id)
         self._counters: dict[str, int] = gateway.vault.max_counters(session_id)
-        self._results: OrderedDict[str, str] = OrderedDict()
+        self._results: OrderedDict[str, tuple[str, list[FieldFinding]]] = OrderedDict()
+        self._rescans: OrderedDict[str, list[Leak]] = OrderedDict()
         self._known_cache: dict[str, tuple[str, str]] | None = None
+        self._generation = 0
 
     def entries(self) -> Mapping[str, VaultEntry]:
         """Every token mapping this session knows."""
@@ -158,6 +171,10 @@ class GatewaySession:
 
     def pseudonymize(self, text: str) -> str:
         """Replace values with tokens, reusing the ones this session already assigned."""
+        return self.pseudonymize_report(text)[0]
+
+    def pseudonymize_report(self, text: str) -> tuple[str, list[FieldFinding]]:
+        """Pseudonymized text plus its value-free findings, offsets in the original text."""
         started = time.perf_counter()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._results.get(digest)
@@ -166,24 +183,39 @@ class GatewaySession:
             self._gateway.audit.session_pseudonymize(
                 self.session_id, 0, 0, "ok", _elapsed_ms(started)
             )
-            return cached
-        known = self._known()
+            return cached[0], list(cached[1])
         counters = dict(self._counters)
         written: list[str] = []
         appended: list[tuple[str, list[str]]] = []
         pipeline = self._gateway._pipeline
+        literal_tokens = numbered_tokens(text)
         try:
-            report = pipeline.run(text, known)
-            pseudonymized = pseudonymize_text(
-                text, report, self._gateway.config, counters=self._counters
-            )
-            self._write(text, pseudonymized, written, appended)
-            check_leakage(
-                pseudonymized.text,
-                self._entries,
-                lambda candidate: pipeline.run(candidate, known),
-                self._gateway.config.registry,
-            )
+            for attempt in range(MAX_PASSES):
+                generation = self._generation
+                known = self._known()
+                report = pipeline.run(text, known)
+                pseudonymized = pseudonymize_text(
+                    text, report, self._gateway.config, counters=self._counters
+                )
+                self._write(text, pseudonymized, written, appended)
+                try:
+                    check_leakage(
+                        pseudonymized.text,
+                        self._entries,
+                        lambda candidate, known=known: pipeline.run(candidate, known),
+                        self._gateway.config.registry,
+                        literal_tokens,
+                    )
+                except LeakageError as exc:
+                    if attempt + 1 < MAX_PASSES and (
+                        self._generation != generation
+                        or self._learn_residue(
+                            pseudonymized.text, exc.leaks, known, written, appended
+                        )
+                    ):
+                        continue
+                    raise
+                break
         except LeakageError:
             self._rollback(written, appended, counters)
             self._gateway.audit.session_pseudonymize(
@@ -197,17 +229,61 @@ class GatewaySession:
         self._gateway.audit.session_pseudonymize(
             self.session_id, len(written), len(appended), "ok", _elapsed_ms(started)
         )
-        self._remember(digest, pseudonymized.text)
-        return pseudonymized.text
+        findings = _field_findings(report, pseudonymized, self._gateway.config.registry)
+        self._remember(digest, (pseudonymized.text, findings))
+        return pseudonymized.text, list(findings)
 
-    def _remember(self, digest: str, result: str) -> None:
+    def rescan(self, text: str) -> list[Leak]:
+        """Findings in text about to be sent that are not a token this session issued."""
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        cached = self._rescans.get(digest)
+        if cached is not None:
+            self._rescans.move_to_end(digest)
+            return list(cached)
+        registry = self._gateway.config.registry
+        tokens = [
+            Span(match.start(), match.end())
+            for match in _ANY_TOKEN.finditer(text)
+            if match.group(0) in self._entries or match.group(0).endswith(REDACTED_SUFFIX)
+        ]
+        leaks: list[Leak] = []
+        for finding in self._gateway._pipeline.run(text, self._known()).findings:
+            if _ignored(registry, finding.data_class):
+                continue
+            if any(token.contains(finding.span) for token in tokens):
+                continue
+            if glued_to_token(finding, tokens):
+                continue
+            if is_public_reference(text[finding.span.start : finding.span.end]):
+                continue
+            leaks.append(Leak("rescan", finding.data_class, finding.span.start, finding.span.end))
+        self._rescans[digest] = leaks
+        while len(self._rescans) > RESCAN_CACHE_SIZE:
+            self._rescans.popitem(last=False)
+        return list(leaks)
+
+    def _remember(self, digest: str, result: tuple[str, list[FieldFinding]]) -> None:
         self._results[digest] = result
         while len(self._results) > RESULT_CACHE_SIZE:
             self._results.popitem(last=False)
 
     def pseudonymize_many(self, texts: list[str]) -> list[str]:
         """Pseudonymize several texts in order, sharing counters and known values."""
-        return [self.pseudonymize(text) for text in texts]
+        return [text for text, _ in self.pseudonymize_report_many(texts)]
+
+    def pseudonymize_report_many(self, texts: list[str]) -> list[tuple[str, list[FieldFinding]]]:
+        """Like `pseudonymize_report` per text, repeated until no text adds a known value."""
+        while True:
+            generation = self._generation
+            results = []
+            for index, text in enumerate(texts):
+                try:
+                    results.append(self.pseudonymize_report(text))
+                except LeakageError as exc:
+                    exc.text_index = index
+                    raise
+            if self._generation == generation:
+                return results
 
     def restore(self, text: str, mode: str | None = None) -> RestoreResult:
         """Map tokens back to the values recorded for this session."""
@@ -241,7 +317,15 @@ class GatewaySession:
         appended: list[tuple[str, list[str]]],
     ) -> None:
         if pseudonymized.assignments:
+            known = self._known()
+            if any(
+                text[span.start : span.end] not in known
+                for assignment in pseudonymized.assignments
+                for span in assignment.spans
+            ):
+                self._known_changed()
             self._known_cache = None
+            self._rescans.clear()
         for assignment in pseudonymized.assignments:
             forms = [text[span.start : span.end] for span in assignment.spans]
             entry = self._entries.get(assignment.token)
@@ -266,6 +350,42 @@ class GatewaySession:
             self._gateway.vault.append_surface_forms(self.session_id, assignment.token, forms)
             entry.surface_forms.extend(forms)
 
+    def _learn_residue(
+        self,
+        output: str,
+        leaks: list[Leak],
+        known: dict[str, tuple[str, str]],
+        written: list[str],
+        appended: list[tuple[str, list[str]]],
+    ) -> bool:
+        """Make values the output check found a known value, so the next pass replaces them.
+
+        Replacing shortens text, so a context word can come into range of a value that the
+        original text had out of range.
+        """
+        spans = {
+            (leak.start, leak.end, leak.data_class)
+            for leak in leaks
+            if leak.kind == "residual_finding"
+        }
+        if not spans:
+            return False
+        report = self._gateway._pipeline.run(output, known)
+        kept = [
+            finding
+            for finding in report.findings
+            if (finding.span.start, finding.span.end, finding.data_class) in spans
+            and "<" not in output[finding.span.start : finding.span.end]
+        ]
+        if not kept:
+            return False
+        generation = self._generation
+        learned = pseudonymize_text(
+            output, replace(report, findings=kept), self._gateway.config, counters=self._counters
+        )
+        self._write(output, learned, written, appended)
+        return self._generation != generation
+
     def _rollback(
         self,
         written: list[str],
@@ -273,16 +393,60 @@ class GatewaySession:
         counters: dict[str, int],
     ) -> None:
         self._known_cache = None
+        self._rescans.clear()
+        if written or appended:
+            self._known_changed()
         self._gateway.vault.delete_tokens(self.session_id, written)
         for token in written:
             self._entries.pop(token, None)
-        for token, forms in appended:
-            entry = self._entries[token]
+        for token, forms in reversed(appended):
+            entry = self._entries.get(token)
+            if entry is None:
+                continue
             entry.surface_forms = list(forms)
             self._gateway.vault.store(
                 self.session_id, token, entry.data_class, entry.value, forms, entry.attributes
             )
         self._counters = counters
+
+    def _known_changed(self) -> None:
+        self._generation += 1
+        self._results.clear()
+
+
+def _ignored(registry: ClassRegistry, data_class: str) -> bool:
+    return data_class in registry and registry.get(data_class).policy is Policy.IGNORE
+
+
+def _field_findings(
+    report: DetectionReport, pseudonymized: PseudonymizedText, registry: ClassRegistry
+) -> list[FieldFinding]:
+    tokens = {
+        span: assignment.token
+        for assignment in pseudonymized.assignments
+        for span in assignment.spans
+    }
+    findings: list[FieldFinding] = []
+    for finding in report.findings:
+        data_class = registry.get(finding.data_class)
+        if data_class.policy is Policy.IGNORE:
+            continue
+        if data_class.policy is Policy.REDACT:
+            token: str | None = f"<{data_class.name}{REDACTED_SUFFIX}"
+        else:
+            token = tokens.get(finding.span)
+        findings.append(
+            FieldFinding(
+                data_class=finding.data_class,
+                start=finding.span.start,
+                end=finding.span.end,
+                token=token,
+                policy=data_class.policy.value,
+                confidence=finding.confidence,
+                stage=finding.stage,
+            )
+        )
+    return findings
 
 
 def _elapsed_ms(started: float) -> int:

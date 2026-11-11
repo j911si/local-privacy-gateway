@@ -18,9 +18,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from privacy_gateway.audit import RequestAuditLog
 from privacy_gateway.model import LeakageError
+from privacy_gateway_proxy import audit_trail
 from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
-from privacy_gateway_proxy.settings import ProxySettings, is_loopback
+from privacy_gateway_proxy.settings import ProxySettings, audit_dir_for, is_loopback
 
 TRANSFORMED_PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
 MESSAGES_PREFIX = "/v1/messages"
@@ -58,12 +60,13 @@ def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient 
     """Build the proxy application for one gateway and one upstream client."""
     upstream = client if client is not None else httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     sessions: OrderedDict[str, Any] = OrderedDict()
+    trail = RequestAuditLog(audit_dir_for(settings))
 
     async def health(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
     async def proxy(request: Request) -> Response:
-        return await _dispatch(request, settings, gateway, upstream, sessions)
+        return await _dispatch(request, settings, gateway, upstream, sessions, trail)
 
     app = Starlette(
         routes=[
@@ -75,6 +78,7 @@ def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient 
     app.state.gateway = gateway
     app.state.client = upstream
     app.state.sessions = sessions
+    app.state.trail = trail
     return app
 
 
@@ -84,6 +88,7 @@ async def _dispatch(
     gateway: Any,
     client: httpx.AsyncClient,
     sessions: OrderedDict[str, Any],
+    trail: RequestAuditLog,
 ) -> Response:
     if is_loopback(settings.listen_host) and not _host_allowed(request.headers.get("host", "")):
         return _error("privacy_gateway_forbidden", "host header is not loopback", 403)
@@ -94,8 +99,8 @@ async def _dispatch(
         encoded = bool(request.headers.get("content-encoding"))
         body = None if encoded else _parse_json(raw)
         if not isinstance(body, dict) or request.url.path not in TRANSFORMED_PATHS:
-            return _rejected(gateway, request, settings)
-        return await _transformed(request, body, settings, gateway, client, sessions)
+            return _rejected(gateway, request, settings, trail)
+        return await _transformed(request, body, settings, gateway, client, sessions, trail)
     return await _passthrough(request, raw, settings, client)
 
 
@@ -106,6 +111,7 @@ async def _transformed(
     gateway: Any,
     client: httpx.AsyncClient,
     sessions: OrderedDict[str, Any],
+    trail: RequestAuditLog,
 ) -> Response:
     started = time.perf_counter()
     path = request.url.path
@@ -115,22 +121,46 @@ async def _transformed(
     session = _session_for(gateway, sessions, key)
     streaming = body.get("stream") is True
     include_system = settings.transform_system
+    notice = settings.placeholder_notice
     fields = _field_count(body, include_system)
+    recorder = audit_trail.Recorder(session)
+    checked = audit_trail.checked_refs(_transform, body, include_system, notice)
+
+    def record(verdict: str, leakage: str, **parts: Any) -> None:
+        _record(trail, key, path, streaming, started, verdict, leakage, checked, recorder, **parts)
+
     try:
         new_body, fields = _transform.pseudonymize_request(
             body,
-            session,
+            recorder,
             include_system=include_system,
-            notice=settings.placeholder_notice,
+            notice=notice,
         )
     except LeakageError as exc:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        unchecked = audit_trail.unchecked_refs(_transform, body, include_system)
+        observed = audit_trail.scan(session, audit_trail.unchecked_leaves(unchecked))
+        record("blocked", "fail", unchecked=unchecked, observed=observed)
         if settings.debug_originals:
             _debug_dump(settings, f"{key}-FAILED-original", body)
         return _leak_response(exc)
 
-    _debug_dump(settings, key, new_body)
     payload = json.dumps(new_body).encode("utf-8")
+    unchecked = audit_trail.unchecked_refs(_transform, new_body, include_system)
+    rescan = audit_trail.rescan_body(session, new_body, checked, settings.rescan_budget_s)
+    outcome = {
+        "unchecked": unchecked, "observed": rescan.hits, "payload": payload, "rescan": rescan
+    }
+    if rescan.reason == audit_trail.TIMEOUT:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        record("error", "ok", **outcome)
+        return _error("privacy_gateway_timeout", "rescan exceeded its time budget", 503)
+    if rescan.blocking:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        record("blocked", "ok", **outcome)
+        return _leak_response(LeakageError(audit_trail.as_leaks(rescan.blocking)))
+
+    _debug_dump(settings, key, new_body)
     upstream_request = client.build_request(
         "POST",
         _upstream_url(request, settings),
@@ -144,9 +174,11 @@ async def _transformed(
             gateway, key, path, fields, session, "upstream_error", streaming, started,
             include_system,
         )
+        record("error", "ok", **outcome)
         return _upstream_error(exc)
 
     _audit(gateway, key, path, fields, session, "ok", streaming, started, include_system)
+    record("ok", "ok", **outcome)
     headers = _response_headers(response.headers)
     if response.status_code >= 400:
         try:
@@ -342,12 +374,16 @@ def _error(kind: str, message: str, status: int) -> Response:
     )
 
 
-def _rejected(gateway: Any, request: Request, settings: ProxySettings) -> Response:
+def _rejected(
+    gateway: Any, request: Request, settings: ProxySettings, trail: RequestAuditLog
+) -> Response:
     """Refuse a `/v1/messages` POST the proxy cannot transform, without an upstream call."""
+    started = time.perf_counter()
     _audit(
         gateway, "-", request.url.path, 0, None, "rejected", False,
-        time.perf_counter(), settings.transform_system,
+        started, settings.transform_system,
     )
+    _record(trail, "-", request.url.path, False, started, "error", "ok", [], None)
     return _error(
         "privacy_gateway_rejected", "request body is not a transformable JSON object", 422
     )
@@ -366,6 +402,42 @@ def _upstream_error(exc: httpx.HTTPError) -> Response:
     return _error(
         "privacy_gateway_upstream", f"upstream request failed: {type(exc).__name__}", 502
     )
+
+
+def _record(
+    trail: RequestAuditLog,
+    session_key: str,
+    path: str,
+    streaming: bool,
+    started: float,
+    verdict: str,
+    leakage: str,
+    checked: list[Any],
+    recorder: audit_trail.Recorder | None,
+    *,
+    unchecked: list[Any] | None = None,
+    observed: list[Any] | None = None,
+    payload: bytes | None = None,
+    rescan: audit_trail.Rescan | None = None,
+) -> None:
+    fields = audit_trail.entry(
+        trail,
+        session_key=session_key,
+        path=path,
+        streaming=streaming,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        verdict=verdict,
+        checked=checked,
+        findings=recorder.findings if recorder is not None else [],
+        unchecked=unchecked or [],
+        observed=observed,
+        leakage=leakage,
+        payload=payload,
+        rescan=rescan if rescan is not None else audit_trail.Rescan("skipped"),
+        failed_index=recorder.failed_index if recorder is not None else None,
+        failed_leaks=recorder.failed_leaks if recorder is not None else None,
+    )
+    trail.write("proxy_request", fields)
 
 
 def _audit(

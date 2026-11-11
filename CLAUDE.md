@@ -30,7 +30,8 @@ claude --model "sonnet[1m]"                          # else Claude Code assumes 
 
 Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY_UPSTREAM`,
 `PGW_PROXY_SESSION_STRATEGY`, `PGW_PROXY_TRANSFORM_SYSTEM`, `PGW_PROXY_PLACEHOLDER_NOTICE`,
-`PGW_PROXY_DEBUG_DIR`, `PGW_PROXY_DEBUG_ORIGINALS`.
+`PGW_PROXY_DEBUG_DIR`, `PGW_PROXY_DEBUG_ORIGINALS`, `PGW_AUDIT_LOG_DIR`,
+`PGW_PROXY_RESCAN_BUDGET`.
 
 ## Architecture
 
@@ -56,6 +57,27 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   signs them, so a changed byte invalidates the turn. Same for `tools`, `metadata` and images.
 - Streaming restores `text_delta` with a holdback: any trailing fragment that could start a token
   is kept back until the next delta or `content_block_stop`, so a token is never split.
+- Besides the old `PGW_AUDIT_LOG` events, `server.py` writes one `proxy_request` v2 line per
+  `/v1/messages` request via `audit_trail.py` into `PGW_AUDIT_LOG_DIR` (`audit-YYYY-MM-DD.jsonl`,
+  UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings and a salted
+  `hmac`, unchecked fields with a read-only `observed` scan, `outgoing` sha256/bytes and a rescan
+  of the sent body (`GatewaySession.rescan`); a rescan hit in a checked field blocks the request.
+  `verdict: ok` only means the rules found nothing. Tests point `PGW_AUDIT_LOG_DIR` at `tmp_path`.
+- `GatewaySession` drops its result cache whenever the set of known values changes, and
+  `pseudonymize_report_many` repeats the pass over a request's texts until no text adds a value.
+  Inside one text `pseudonymize_report` repeats while the known values change (`MAX_PASSES`, 4),
+  so `/Users/anna/` also covers `-Users-anna-`, `~anna` and `anna_x` in the same text; a failed
+  attempt rolls back every token of all passes (`appended` is restored in reverse order).
+- A user name in `/Users/<n>/`, `/home/<n>/` or `C:\Users\<n>\` is `PERSON_USERNAME` (two
+  patterns on that class in `default_config.yaml`, capture group 1 is the span).
+- `GatewaySession.rescan` skips values under `example.com/.org/.net`, `json-schema.org` and `w3.org`
+  (`detect/public.py`); checked fields are still tokenized, only the report ignores them.
+  `LeakageError.text_index` and `audit_trail.Recorder` put `leaks` (kind, cls, offsets, no values)
+  on the failing field of a blocked request.
+- `detect/runs.py` scans `ADDRESS_RE`, `ORGANIZATION_RE` and `EMAIL_RE` with one start per
+  character run, and the default `FQDN` pattern with a memoized label-chain pre-check (linear
+  instead of quadratic; `patterns.LINEAR_FINDERS` matches the exact pattern string, so a
+  changed pattern falls back to `finditer`). `tests/unit/test_runs.py` proves equal matches.
 - One gateway session per conversation, keyed by the `session_<uuid>` in `metadata.user_id`;
   `server.py` caches the `GatewaySession` instances so a conversation reuses one in-memory mapping.
 

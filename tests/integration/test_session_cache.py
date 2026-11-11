@@ -63,3 +63,32 @@ def test_pseudonymize_many_reuses_the_cache_across_calls(
     after_first = counted_pipeline[0]
     assert session.pseudonymize_many(texts) == first
     assert counted_pipeline[0] == after_first
+
+
+CALLBACK = "Bitte Müller zurückrufen."
+LETTER = "Sehr geehrte Frau Müller, danke für Ihren Brief."
+
+
+def test_a_value_learned_later_invalidates_an_earlier_cached_result(gateway: Gateway) -> None:
+    session = gateway.session("learned")
+    session.pseudonymize(CALLBACK)
+    session.pseudonymize(LETTER)
+    assert "Müller" not in session.pseudonymize(CALLBACK)
+
+
+def test_one_call_covers_a_value_found_in_a_later_text(gateway: Gateway) -> None:
+    session = gateway.session("learned")
+    callback, letter = session.pseudonymize_many([CALLBACK, LETTER])
+    assert "Müller" not in callback
+    assert "Müller" not in letter
+    assert session.pseudonymize_many([CALLBACK, LETTER]) == [callback, letter]
+
+
+def test_unchanged_known_values_keep_serving_the_cache(
+    gateway: Gateway, counted_pipeline: list[int]
+) -> None:
+    session = gateway.session("learned")
+    session.pseudonymize_many([CALLBACK, LETTER])
+    after = counted_pipeline[0]
+    session.pseudonymize_many([CALLBACK, LETTER])
+    assert counted_pipeline[0] == after
