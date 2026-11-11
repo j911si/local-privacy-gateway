@@ -29,8 +29,11 @@ from privacy_gateway_proxy.settings import (
     is_loopback,
     is_normal_path,
 )
+from privacy_gateway_proxy.transform import KeyCollisionError
 
 TRANSFORMED_PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
+QUERY_NAMES = frozenset({"beta", "limit", "before_id", "after_id"})
+QUERY_VALUE_RE = re.compile(r"[A-Za-z0-9_.:-]{0,128}")
 CONTENT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 AUTH_HEADER = "x-pgw-auth"
 MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -88,7 +91,24 @@ def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient 
     app.state.client = upstream
     app.state.sessions = sessions
     app.state.trail = trail
+    _redact_access_log()
     return app
+
+
+class _QueryRedactingFilter(logging.Filter):
+    """Cuts the query string off the request line of the uvicorn access log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], args[2].partition("?")[0], *args[3:])
+        return True
+
+
+def _redact_access_log() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _QueryRedactingFilter) for item in access.filters):
+        access.addFilter(_QueryRedactingFilter())
 
 
 async def _dispatch(
@@ -111,15 +131,23 @@ async def _dispatch(
         return _rejected(
             gateway, request, settings, trail, "-", "request path is not in normal form", 400
         )
+    if not _query_allowed(request.url.query):
+        return _malformed(gateway, settings, trail, path, "query string is not allowed")
     if request.method in CONTENT_METHODS:
         if request.method == "POST" and path in TRANSFORMED_PATHS:
-            encoded = bool(request.headers.get("content-encoding"))
-            body = None if encoded else _parse_json(raw)
-            if not isinstance(body, dict):
+            if request.headers.get("content-encoding"):
                 return _rejected(
                     gateway, request, settings, trail, path,
                     "request body is not a transformable JSON object",
                 )
+            body = _parse_json(raw)
+            if not isinstance(body, dict):
+                return _malformed(
+                    gateway, settings, trail, path, "request body must be a JSON object"
+                )
+            problem = _shape_error(body)
+            if problem is not None:
+                return _malformed(gateway, settings, trail, path, problem)
             return await _transformed(request, body, settings, gateway, client, sessions, trail)
         if path not in settings.passthrough_paths:
             return _rejected(
@@ -131,6 +159,22 @@ async def _dispatch(
             gateway, request, settings, trail, path, "request must not carry a body"
         )
     return await _passthrough(request, raw, settings, client)
+
+
+def _query_allowed(query: str) -> bool:
+    """True for no query, or only known parameter names with plain identifier-like values."""
+    if not query:
+        return True
+    for pair in query.split("&"):
+        name, _, value = pair.partition("=")
+        if name not in QUERY_NAMES or QUERY_VALUE_RE.fullmatch(value) is None:
+            return False
+    return True
+
+
+def _shape_error(body: dict) -> str | None:
+    check = getattr(_transform, "request_shape_error", None)
+    return check(body) if check is not None else None
 
 
 def _authorized(request: Request, settings: ProxySettings) -> bool:
@@ -179,6 +223,16 @@ async def _transformed(
             recorder,
             include_system=include_system,
             notice=notice,
+        )
+    except KeyCollisionError:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        unchecked = audit_trail.unchecked_refs(_transform, body, include_system)
+        observed = audit_trail.scan(session, audit_trail.unchecked_leaves(unchecked))
+        record("blocked", "fail", unchecked=unchecked, observed=observed)
+        return _error(
+            "privacy_gateway_key_collision",
+            "fail-closed: two object keys became equal after replacement",
+            422,
         )
     except LeakageError as exc:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
@@ -430,6 +484,16 @@ def _rejected(
     _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
     _record(trail, "-", path, False, started, "error", "ok", [], None)
     return _error("privacy_gateway_rejected", message, status)
+
+
+def _malformed(
+    gateway: Any, settings: ProxySettings, trail: RequestAuditLog, path: str, message: str
+) -> Response:
+    """Refuse a request of unexpected form with an Anthropic-style 400 and a `blocked` audit line."""
+    started = time.perf_counter()
+    _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
+    _record(trail, "-", path, False, started, "blocked", "ok", [], None)
+    return _error("invalid_request_error", message, 400)
 
 
 def _leak_response(exc: LeakageError) -> Response:

@@ -15,6 +15,7 @@ from privacy_gateway_proxy.transform import (
     Path,
     TextRef,
     UncheckedRef,
+    collect_keyed,
     collect_strings,
     format_path,
 )
@@ -23,6 +24,8 @@ SESSION_HASH_CHARS = 12
 REDACT_POLICY = "redact"
 BASE64_TYPE = "base64"
 TIMEOUT = "timeout"
+OK = "ok"
+OK_WITH_UNCHECKED_FINDINGS = "ok_with_unchecked_findings"
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,8 @@ def entry(
         fields.append(item)
     for ref in unchecked:
         fields.append(_unchecked(ref, observed or []))
+    if verdict == OK and any(item["observed"] for item in fields if item["status"] == "unchecked"):
+        verdict = OK_WITH_UNCHECKED_FINDINGS
     return {
         "request_id": str(uuid.uuid4()),
         "session": hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:SESSION_HASH_CHARS],
@@ -182,11 +187,17 @@ def unchecked_leaves(unchecked: list[UncheckedRef]) -> list[TextRef]:
 
 
 def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
-    """String leaves except the `data` of a base64 source, which detection cannot scan fast."""
+    """String leaves except the `data` of a base64 source, which detection cannot scan fast.
+
+    The input of a `tool_use` block is scanned with its keys, addressed by position.
+    """
     if isinstance(value, dict):
         leaves: list[TextRef] = []
         for key, item in value.items():
             if key == "data" and value.get("type") == BASE64_TYPE:
+                continue
+            if key == "input" and value.get("type") == "tool_use":
+                leaves.extend(collect_keyed(item, (*path, key)))
                 continue
             leaves.extend(scannable_strings(item, (*path, key)))
         return leaves

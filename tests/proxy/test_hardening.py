@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ class Proxy:
 
     def __init__(self, gateway: Gateway, audit_dir: Path, **overrides: Any) -> None:
         self.seen: list[httpx.Request] = []
+        self.reply: Callable[[httpx.Request], httpx.Response] | None = None
         self.audit_dir = audit_dir
         settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir, **overrides)
         upstream = httpx.AsyncClient(transport=httpx.MockTransport(self._handler))
@@ -50,6 +52,8 @@ class Proxy:
 
     def _handler(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
+        if self.reply is not None:
+            return self.reply(request)
         return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
 
     async def call(
@@ -58,6 +62,7 @@ class Proxy:
         raw_path: str,
         body: bytes = b"",
         headers: dict[str, str] | None = None,
+        query: str = "",
     ) -> tuple[int, bytes]:
         """Drive the ASGI app with an exact raw path, which httpx would normalize."""
         pairs = {"host": "127.0.0.1:8787", "content-type": "application/json"}
@@ -71,7 +76,7 @@ class Proxy:
             "path": unquote(raw_path),
             "raw_path": raw_path.encode("ascii"),
             "root_path": "",
-            "query_string": b"",
+            "query_string": query.encode("ascii"),
             "headers": [(k.encode(), v.encode()) for k, v in pairs.items()],
             "server": ("127.0.0.1", 8787),
             "client": ("127.0.0.1", 50000),
@@ -308,3 +313,379 @@ async def test_the_session_header_is_not_forwarded_without_a_token(
     await proxy.call("POST", "/v1/messages", MESSAGE_BYTES, {"x-pgw-session": "abc"})
 
     assert "x-pgw-session" not in proxy.seen[0].headers
+
+
+SECRET_MAIL = "geheim.person@beispiel-firma.de"
+SECRET_IBAN = "DE89370400440532013000"
+CLEAN = {
+    **MESSAGE,
+    "metadata": {"user_id": "user_a_account_b_session_0b1c2d3e-5f6a-4b7c-8d9e-0a1b2c3d4e5f"},
+}
+
+
+def message_with(blocks: list[dict[str, Any]], **extra: Any) -> bytes:
+    body = {**CLEAN, **extra, "messages": [{"role": "assistant", "content": blocks}]}
+    return json.dumps(body).encode()
+
+
+def tool_use(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "tool_use", "id": "toolu_1", "name": "Lookup", "input": payload}
+
+
+def sent_input(proxy: Proxy, index: int = 0) -> dict[str, Any]:
+    return json.loads(proxy.seen[index].content)["messages"][0]["content"][0]["input"]
+
+
+@pytest.mark.asyncio
+async def test_a_sensitive_key_in_tool_use_input_never_leaves_in_clear(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    nested = {"outer": [{SECRET_MAIL: "x", "plain": "y"}]}
+    body = message_with([tool_use({SECRET_MAIL: "x", "n": nested, "ok": "1"})])
+
+    status, _ = await proxy.call("POST", "/v1/messages", body)
+
+    assert status == 200
+    sent = proxy.seen[0].content.decode()
+    assert "geheim.person" not in sent
+    assert "beispiel-firma" not in sent
+    sent_in = sent_input(proxy)
+    assert list(sent_in)[1:] == ["n", "ok"]
+    assert list(sent_in["n"]["outer"][0])[1] == "plain"
+    assert "geheim.person" not in proxy.log_text()
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "ok"
+    key_fields = [f for f in entry["fields"] if f["path"].endswith("#key") and f["findings"]]
+    assert {f["path"] for f in key_fields} == {
+        "messages[0].content[0].input{0}#key",
+        "messages[0].content[0].input{1}{0}[0]{0}#key",
+    }
+
+
+@pytest.mark.asyncio
+async def test_keys_without_findings_stay_byte_identical(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    payload = {"file_path": "a", "z": {"b": 1, "a": 2}}
+
+    await proxy.call("POST", "/v1/messages", message_with([tool_use(payload)]))
+
+    assert sent_input(proxy) == payload
+    assert list(sent_input(proxy)["z"]) == ["b", "a"]
+    assert b'"input": {"file_path": "a", "z": {"b": 1, "a": 2}}' in proxy.seen[0].content
+
+
+@pytest.mark.asyncio
+async def test_a_token_key_in_the_response_is_restored(make_proxy: Callable[..., Proxy]) -> None:
+    proxy = make_proxy()
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        sent_keys = json.loads(request.content)["messages"][0]["content"][0]["input"]
+        (token_key,) = sent_keys
+        block = {"type": "tool_use", "id": "t2", "name": "Lookup", "input": {token_key: "v"}}
+        return httpx.Response(200, json={"content": [block]})
+
+    proxy.reply = reply
+
+    status, data = await proxy.call(
+        "POST", "/v1/messages", message_with([tool_use({SECRET_MAIL: "x"})])
+    )
+
+    assert status == 200
+    assert json.loads(data)["content"][0]["input"] == {SECRET_MAIL: "v"}
+
+
+@pytest.mark.asyncio
+async def test_a_key_collision_is_refused_and_audited(make_proxy: Callable[..., Proxy]) -> None:
+    proxy = make_proxy()
+    await proxy.call("POST", "/v1/messages", message_with([tool_use({SECRET_MAIL: "1"})]))
+    (token,) = sent_input(proxy)
+    proxy.seen.clear()
+    clash = message_with([tool_use({SECRET_MAIL: "1", token: "2"})])
+
+    status, data = await proxy.call("POST", "/v1/messages", clash)
+
+    assert status == 422
+    assert error_type(data) == "privacy_gateway_key_collision"
+    assert proxy.seen == []
+    last = proxy.entries()[-1]
+    assert last["verdict"] == "blocked"
+    assert SECRET_MAIL not in proxy.log_text()
+
+
+@pytest.mark.asyncio
+async def test_a_sensitive_value_under_any_key_is_still_tokenized(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+
+    await proxy.call("POST", "/v1/messages", message_with([tool_use({"iban": SECRET_IBAN})]))
+
+    assert SECRET_IBAN not in proxy.seen[0].content.decode()
+    assert "iban" in sent_input(proxy)
+
+
+@pytest.mark.asyncio
+async def test_unchecked_findings_change_the_verdict_but_do_not_block(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    tools = [{"name": "T", "description": f"Mail {SECRET_MAIL}", "input_schema": {}}]
+
+    status, _ = await proxy.call(
+        "POST", "/v1/messages", json.dumps({**CLEAN, "tools": tools}).encode()
+    )
+
+    assert status == 200
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+    assert entry["outgoing"]["leakage"] == "ok"
+    assert SECRET_MAIL in proxy.seen[0].content.decode()
+
+
+@pytest.mark.asyncio
+async def test_clean_unchecked_fields_keep_the_verdict_ok(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    body = {**CLEAN, "tools": [{"name": "T", "description": "Reads a file", "input_schema": {}}]}
+
+    await proxy.call("POST", "/v1/messages", json.dumps(body).encode())
+
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_findings_in_an_untransformed_system_prompt_change_the_verdict(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy(transform_system=False)
+    body = {**CLEAN, "system": f"Kontakt {SECRET_MAIL}"}
+
+    await proxy.call("POST", "/v1/messages", json.dumps(body).encode())
+
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+
+
+@pytest.mark.asyncio
+async def test_well_formed_unknown_blocks_are_forwarded_and_counted_unchecked(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    block = {"type": "future_block", "payload": {"mail": SECRET_MAIL}}
+
+    status, _ = await proxy.call("POST", "/v1/messages", message_with([block]))
+
+    assert status == 200
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+
+
+MALFORMED = {
+    "messages_is_a_string": {**MESSAGE, "messages": f"Hallo {SECRET_MAIL}"},
+    "messages_missing": {k: v for k, v in MESSAGE.items() if k != "messages"},
+    "message_is_a_string": {**MESSAGE, "messages": [f"Hallo {SECRET_MAIL}"]},
+    "content_is_a_dict": {
+        **MESSAGE,
+        "messages": [{"role": "user", "content": {"type": "text", "text": SECRET_MAIL}}],
+    },
+    "content_missing": {**MESSAGE, "messages": [{"role": "user"}]},
+    "block_is_a_string": {**MESSAGE, "messages": [{"role": "user", "content": [SECRET_MAIL]}]},
+    "block_without_type": {
+        **MESSAGE,
+        "messages": [{"role": "user", "content": [{"text": SECRET_MAIL}]}],
+    },
+    "text_is_a_list": {
+        **MESSAGE,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": [SECRET_MAIL]}]}],
+    },
+    "tool_result_content_is_a_dict": {
+        **MESSAGE,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": {"type": "text", "text": "x"}}],
+            }
+        ],
+    },
+    "tool_result_item_is_a_string": {
+        **MESSAGE,
+        "messages": [
+            {"role": "user", "content": [{"type": "tool_result", "content": [SECRET_MAIL]}]}
+        ],
+    },
+    "system_is_a_number": {**MESSAGE, "system": 5},
+    "system_block_is_a_string": {**MESSAGE, "system": [SECRET_MAIL]},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(MALFORMED))
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+async def test_a_malformed_body_gets_400_without_upstream(
+    make_proxy: Callable[..., Proxy], name: str, path: str
+) -> None:
+    proxy = make_proxy()
+
+    status, data = await proxy.call("POST", path, json.dumps(MALFORMED[name]).encode())
+
+    assert status == 400
+    assert error_type(data) == "invalid_request_error"
+    assert json.loads(data)["type"] == "error"
+    assert SECRET_MAIL not in data.decode()
+    assert proxy.seen == []
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "blocked"
+    assert entry["path"] == path
+    assert SECRET_MAIL not in proxy.log_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw", [b"{not json", b'["a"]', b'"text"', b"null", b"42", b"", b'{"messages": [}']
+)
+async def test_a_body_that_is_not_a_json_object_gets_400(
+    make_proxy: Callable[..., Proxy], raw: bytes
+) -> None:
+    proxy = make_proxy()
+
+    status, data = await proxy.call("POST", "/v1/messages", raw)
+
+    assert status == 400
+    assert error_type(data) == "invalid_request_error"
+    assert proxy.seen == []
+    assert proxy.entries()[0]["verdict"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_a_realistic_claude_code_request_is_not_newly_blocked(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    body = {
+        "model": "claude-x",
+        "max_tokens": 64,
+        "stream": True,
+        "metadata": {"user_id": f"user_a_account_b_session_{CONVERSATION}"},
+        "system": [
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Dir", "cache_control": {"type": "ephemeral"}},
+        ],
+        "tools": [{"name": "Read", "description": "Reads", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": "Hallo"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hm", "signature": "c2ln"},
+                    {"type": "text", "text": "Ich lese."},
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "inhalt"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t2",
+                        "content": [{"type": "text", "text": "x"}],
+                        "is_error": False,
+                    },
+                    {"type": "tool_result", "tool_use_id": "t3"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"},
+                    },
+                    {"type": "text", "text": "weiter", "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+        ],
+    }
+
+    for path in ("/v1/messages", "/v1/messages/count_tokens"):
+        status, _ = await proxy.call("POST", path, json.dumps(body).encode())
+        assert status == 200
+    assert len(proxy.seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_get_query_with_free_text_is_refused_and_never_logged(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+
+    status, data = await proxy.call("GET", "/v1/models", query=f"q={SECRET_MAIL}")
+
+    assert status == 400
+    assert error_type(data) == "invalid_request_error"
+    assert proxy.seen == []
+    assert SECRET_MAIL not in proxy.log_text()
+    assert proxy.entries()[0]["verdict"] == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "query"),
+    [
+        ("GET", "/v1/models", "limit=20"),
+        ("GET", "/v1/models", "limit=20&after_id=model_01-x"),
+        ("POST", "/v1/messages", "beta=true"),
+        ("POST", "/v1/messages/count_tokens", "beta=true"),
+    ],
+)
+async def test_the_known_query_parameters_are_forwarded(
+    make_proxy: Callable[..., Proxy], method: str, path: str, query: str
+) -> None:
+    proxy = make_proxy()
+    body = MESSAGE_BYTES if method == "POST" else b""
+
+    status, _ = await proxy.call(method, path, body, query=query)
+
+    assert status == 200
+    assert proxy.seen[0].url.query.decode() == query
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        f"beta={SECRET_MAIL}",
+        "limit=20%40x",
+        "x=1",
+        "beta=true&q=a",
+        "beta=" + "a" * 200,
+        "limit=1;x=2",
+    ],
+)
+async def test_other_query_parameters_and_values_are_refused(
+    make_proxy: Callable[..., Proxy], query: str
+) -> None:
+    proxy = make_proxy()
+
+    status, _ = await proxy.call("POST", "/v1/messages", MESSAGE_BYTES, query=query)
+
+    assert status == 400
+    assert proxy.seen == []
+    assert SECRET_MAIL not in proxy.log_text()
+
+
+def test_the_access_log_drops_the_query_string(make_proxy: Callable[..., Proxy]) -> None:
+    make_proxy()
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1", "GET", f"/v1/models?q={SECRET_MAIL}", "1.1", 400),
+        None,
+    )
+
+    assert logging.getLogger("uvicorn.access").filter(record)
+    assert SECRET_MAIL not in record.getMessage()
+    assert "/v1/models" in record.getMessage()
