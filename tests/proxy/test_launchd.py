@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from privacy_gateway.model import ConfigError
 from privacy_gateway_proxy import cli, launchd
 from privacy_gateway_proxy.settings import ProxySettings
 
@@ -270,3 +271,37 @@ def test_log_startup_warns_about_a_non_loopback_bind(
         cli.log_startup(ProxySettings(listen_host="0.0.0.0"))
 
     assert "non-loopback" in caplog.text
+
+
+def test_launchd_env_refuses_a_plain_auth_token() -> None:
+    with pytest.raises(ConfigError) as caught:
+        cli.launchd_env({"PGW_PROXY_AUTH_TOKEN": "tok-canary-123", "PATH": "/opt/bin"})
+
+    assert "tok-canary-123" not in str(caught.value)
+    assert "PGW_PROXY_AUTH_TOKEN_FILE" in str(caught.value)
+
+
+def test_launchd_env_takes_over_the_token_file_path() -> None:
+    env = cli.launchd_env({"PGW_PROXY_AUTH_TOKEN_FILE": "/home/me/.config/pgw/token"})
+
+    assert env == {"PGW_PROXY_AUTH_TOKEN_FILE": "/home/me/.config/pgw/token"}
+
+
+def test_log_startup_warns_about_a_non_loopback_bind_without_a_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        cli.log_startup(ProxySettings(listen_host="100.64.0.1"))
+
+    assert "no auth token" in caplog.text
+
+
+def test_log_startup_is_quiet_about_the_token_when_one_is_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        cli.log_startup(ProxySettings(listen_host="100.64.0.1", auth_token="tok-canary-123"))
+
+    assert "no auth token" not in caplog.text
+    assert "tok-canary-123" not in caplog.text
+    assert "auth_token=set" in caplog.text

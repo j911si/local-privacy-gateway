@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
+import stat
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from privacy_gateway.model import ConfigError
@@ -37,6 +39,8 @@ class ProxySettings:
     debug_originals: bool = False
     audit_dir: Path | None = None
     rescan_budget_s: float = 10.0
+    passthrough_paths: tuple[str, ...] = ()
+    auth_token: str = field(default="", repr=False)
 
 
 def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
@@ -60,6 +64,29 @@ def _upstream_allowed(url: str) -> bool:
         if url.startswith(prefix) and (not rest or rest[0] in ":/"):
             return True
     return False
+
+
+def is_normal_path(path: str) -> bool:
+    """True for an absolute path with no encoded characters, empty or dot segments."""
+    if not path.startswith("/") or "%" in path or "\\" in path:
+        return False
+    if path == "/":
+        return True
+    segments = path.removesuffix("/").split("/")[1:]
+    return all(segment not in ("", ".", "..") for segment in segments)
+
+
+def _read_token_file(path: Path) -> str:
+    try:
+        mode = path.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise ConfigError(f"auth token file must not be accessible to group or others: {path}")
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ConfigError(f"auth token file is not readable: {type(exc).__name__}") from None
+    if not token:
+        raise ConfigError(f"auth token file is empty: {path}")
+    return token
 
 
 def parse_listen(value: str) -> tuple[str, int]:
@@ -107,6 +134,19 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
             values["rescan_budget_s"] = float(rescan_budget)
         except ValueError:
             raise ConfigError(f"invalid rescan budget: {rescan_budget!r}") from None
+    passthrough = environment.get("PGW_PROXY_PASSTHROUGH_PATHS")
+    if passthrough is not None:
+        values["passthrough_paths"] = tuple(
+            item.strip() for item in passthrough.split(",") if item.strip()
+        )
+    auth_token = environment.get("PGW_PROXY_AUTH_TOKEN")
+    token_file = environment.get("PGW_PROXY_AUTH_TOKEN_FILE")
+    if auth_token and token_file:
+        raise ConfigError("set only one of PGW_PROXY_AUTH_TOKEN and PGW_PROXY_AUTH_TOKEN_FILE")
+    if auth_token:
+        values["auth_token"] = auth_token
+    if token_file:
+        values["auth_token"] = _read_token_file(Path(token_file))
     audit_dir = environment.get(AUDIT_DIR_ENV)
     if audit_dir:
         values["audit_dir"] = Path(audit_dir)
@@ -121,6 +161,11 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     if "upstream_base_url" in values:
         values["upstream_base_url"] = str(values["upstream_base_url"]).rstrip("/")
     settings = ProxySettings(**values)  # type: ignore[arg-type]
+    if not math.isfinite(settings.rescan_budget_s) or settings.rescan_budget_s <= 0:
+        raise ConfigError("rescan budget must be a finite number of seconds above zero")
+    for path in settings.passthrough_paths:
+        if not is_normal_path(path):
+            raise ConfigError(f"passthrough path is not a normal absolute path: {path!r}")
     if settings.session_strategy not in SESSION_STRATEGIES:
         raise ConfigError(f"unknown session strategy: {settings.session_strategy!r}")
     if not _upstream_allowed(settings.upstream_base_url):
