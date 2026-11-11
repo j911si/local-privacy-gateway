@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import sqlite3
 import sys
@@ -19,12 +18,12 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .model import SessionInfo, VaultEntry, VaultError
+from .tokens import NUMBERED_TOKEN
 
 KEY_SIZE = 32
 NONCE_SIZE = 12
 GENDER_LABEL_SUFFIXES = ("_FEMALE", "_MALE")
 
-_NUMBERED_TOKEN = re.compile(r"^<([A-Z][A-Z0-9_]*)_(\d+)>$")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -178,11 +177,11 @@ class Vault:
             "SELECT token FROM mappings WHERE session_id = ?", (session_id,)
         ).fetchall()
         for (token,) in rows:
-            match = _NUMBERED_TOKEN.match(token)
+            match = NUMBERED_TOKEN.fullmatch(token)
             if match is None:
                 continue
-            label = _base_label(match.group(1))
-            counters[label] = max(counters.get(label, 0), int(match.group(2)))
+            label = _base_label(match.group("label"))
+            counters[label] = max(counters.get(label, 0), int(match.group("number")))
         return counters
 
     def delete_tokens(self, session_id: str, tokens: Iterable[str]) -> None:
