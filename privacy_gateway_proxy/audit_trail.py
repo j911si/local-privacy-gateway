@@ -12,6 +12,7 @@ from typing import Any
 from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.transform import (
+    KEY_SUFFIX_RE,
     KeyAt,
     Path,
     TextRef,
@@ -232,9 +233,15 @@ def scan(
     for leaf in leaves:
         if deadline is not None and time.perf_counter() > deadline:
             break
-        for leak in rescan(leaf.text):
+        for leak in rescan(_scanned_text(leaf)):
             hits.append(Hit(leaf.path, leak.data_class, leak.start, leak.end))
     return hits
+
+
+def _scanned_text(leaf: TextRef) -> str:
+    """The leaf text, without the `#n` suffix the proxy itself added to a colliding key."""
+    match = KEY_SUFFIX_RE.fullmatch(leaf.text) if isinstance(leaf.path[-1], KeyAt) else None
+    return match.group("base") if match else leaf.text
 
 
 def _finding(log: RequestAuditLog, text: str, item: FieldFinding) -> dict[str, object]:

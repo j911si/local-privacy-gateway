@@ -48,7 +48,9 @@ CHECKED_BLOCK_KEYS = {
 WHOLE_BLOCK_REASONS = {"thinking": "thinking", "redacted_thinking": "thinking", "image": "image"}
 
 
-KEY_SUFFIX_RE = re.compile(r"(?P<base>.*<[A-Z][A-Z0-9_]*_\d{3,}>.*)#(?P<number>\d+)", re.DOTALL)
+KEY_SUFFIX_RE = re.compile(
+    r"(?P<base>.*<[A-Z][A-Z0-9_]*_(?:\d{3,}|REDACTED)>.*)#(?P<number>\d+)", re.DOTALL
+)
 
 
 @runtime_checkable
