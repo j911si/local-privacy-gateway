@@ -100,7 +100,13 @@ class Gateway:
                     assignment.attributes,
                 )
             entries = self.vault.load(session_id)
-            check_leakage(pseudonymized.text, entries, self._pipeline.run, self.config.registry)
+            check_leakage(
+                pseudonymized.text,
+                entries,
+                self._pipeline.run,
+                self.config.registry,
+                sweep=False,
+            )
         except LeakageError:
             self._discard(session_id)
             self.audit.pseudonymize(session_id, {}, 0, "failed", _elapsed_ms(started))
