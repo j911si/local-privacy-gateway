@@ -128,6 +128,7 @@ def entry(
     rescan: Rescan,
     failed_index: int | None = None,
     failed_leaks: list[Leak] | None = None,
+    upstream_status: int | None = None,
 ) -> dict[str, object]:
     """The `proxy_request` v2 fields (without `v`, `event`, `ts`); never carries a value."""
     fields: list[dict[str, object]] = []
@@ -170,6 +171,7 @@ def entry(
             "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
             "bytes": len(payload) if payload is not None else 0,
             "leakage": leakage,
+            "upstream_status": upstream_status,
             "rescan": {
                 "status": rescan.status,
                 **({"reason": rescan.reason} if rescan.reason is not None else {}),

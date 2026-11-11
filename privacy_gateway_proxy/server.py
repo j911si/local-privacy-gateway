@@ -300,7 +300,7 @@ async def _transformed(
         return _upstream_error(exc)
 
     _audit(gateway, key, path, fields, session, "ok", streaming, started, include_system)
-    record("ok", "ok", **outcome)
+    record("ok", "ok", upstream_status=response.status_code, **outcome)
     headers = _response_headers(response.headers)
     if response.status_code >= 400:
         try:
@@ -550,6 +550,7 @@ def _record(
     observed: list[Any] | None = None,
     payload: bytes | None = None,
     rescan: audit_trail.Rescan | None = None,
+    upstream_status: int | None = None,
 ) -> None:
     fields = audit_trail.entry(
         trail,
@@ -567,6 +568,7 @@ def _record(
         rescan=rescan if rescan is not None else audit_trail.Rescan("skipped"),
         failed_index=recorder.failed_index if recorder is not None else None,
         failed_leaks=recorder.failed_leaks if recorder is not None else None,
+        upstream_status=upstream_status,
     )
     trail.write("proxy_request", fields)
 

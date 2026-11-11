@@ -896,7 +896,9 @@ Each line lists every field of the request:
   scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
   block) is such a field with `reason: system`.
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
-  `leakage` and a `rescan`: the full detection runs again over every string of that body. A hit
+  `leakage`, `upstream_status` (the HTTP status the upstream answered with, `null` when nothing
+  was sent or the connection failed; the verdict does not depend on it) and a `rescan`: the full
+  detection runs again over every string of that body. A hit
   in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
   only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
   `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by

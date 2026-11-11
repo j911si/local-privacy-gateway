@@ -319,6 +319,24 @@ async def test_an_upstream_failure_is_logged_as_error(gateway: Gateway, audit_di
     assert response.status_code == 502
     (entry,) = entries(audit_dir)
     assert entry["verdict"] == "error"
+    assert entry["outgoing"]["upstream_status"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 400, 429])
+async def test_the_upstream_status_is_logged(
+    gateway: Gateway, audit_dir: Path, status: int
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"type": "error", "error": {"type": "x", "message": "y"}})
+
+    async with build(gateway, audit_dir, handler) as client:
+        response = await client.post("/v1/messages", json=body_with("Hallo"))
+
+    assert response.status_code == status
+    (entry,) = entries(audit_dir)
+    assert entry["outgoing"]["upstream_status"] == status
+    assert entry["verdict"] in ("ok", "ok_with_unchecked_findings")
 
 
 @pytest.mark.asyncio
