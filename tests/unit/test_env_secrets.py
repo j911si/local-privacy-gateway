@@ -237,3 +237,70 @@ def test_comparisons_calls_references_and_prose_are_no_secrets(
     gateway: Gateway, text: str
 ) -> None:
     assert gateway.pseudonymize(text).text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "PGPASSWORD=Sup3rGeheim psql -h db01 -U app",
+            "PGPASSWORD=<PASSWORD_REDACTED> psql -h db01 -U app",
+        ),
+        (
+            "PGPASSWORD=geheim pg_dump -h db01 kunden > dump.sql",
+            "PGPASSWORD=<PASSWORD_REDACTED> pg_dump -h db01 kunden > dump.sql",
+        ),
+        (
+            "password=abc123 --verbose --host db01",
+            "password=<PASSWORD_REDACTED> --verbose --host db01",
+        ),
+        ("export DB_PASSWORD=hunter2hunter2; ls", "export DB_PASSWORD=<PASSWORD_REDACTED>; ls"),
+        (
+            "DB_PASSWORD='hunter2 hunter2' psql",
+            "DB_PASSWORD='<PASSWORD_REDACTED>' psql",
+        ),
+        ("PASSWORD=geheim", "PASSWORD=<PASSWORD_REDACTED>"),
+        ('password := "geheim123"', 'password := "<PASSWORD_REDACTED>"'),
+        ("password := 'geheim123'", "password := '<PASSWORD_REDACTED>'"),
+        ("password: correct horse battery staple", "password: <PASSWORD_REDACTED>"),
+        ("Passwort: sommer regen wind", "Passwort: <PASSWORD_REDACTED>"),
+        ("Kennwort: Sommer regen 2024.", "Kennwort: <PASSWORD_REDACTED>."),
+        ("passphrase: korrekt pferd batterie heftklammer", "passphrase: <PASSWORD_REDACTED>"),
+        ("pass: geheim123", "pass: <PASSWORD_REDACTED>"),
+        ("mysql -u root -pGeheim99 kunden", "mysql -u root -p<PASSWORD_REDACTED> kunden"),
+        ("sshpass -p 'geheim' ssh root@db01", "sshpass -p '<PASSWORD_REDACTED>' ssh root@db01"),
+        ('sshpass -p "gehe im" ssh root@db01', 'sshpass -p "<PASSWORD_REDACTED>" ssh root@db01'),
+        ("sshpass -p Geheim99 ssh root@db01", "sshpass -p <PASSWORD_REDACTED> ssh root@db01"),
+    ],
+)
+def test_password_value_ends_where_the_value_ends(
+    gateway: Gateway, text: str, expected: str
+) -> None:
+    assert gateway.pseudonymize(text).text == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "if password == confirm_password:",
+        "password = new_password",
+        'password = os.environ["X"]',
+        "password: str",
+        "password: Optional[str] = None",
+        "Passwort: siehe oben",
+        "Passwort: wird per Post verschickt",
+        "password: see the vault entry",
+        "passwd: all authentication tokens updated successfully.",
+        "pass: true",
+        "pass: 10",
+        "pass: 2 of 3 checks",
+        "mysql -u root -p kunden",
+        "mysql -h db01 -P 3306",
+        "mysqldump --port=3306 kunden",
+        "sshpass -p",
+        "ps -p 1234",
+        "password := getpass.getpass()",
+    ],
+)
+def test_code_and_prose_after_password_words_stay(gateway: Gateway, text: str) -> None:
+    assert gateway.pseudonymize(text).text == text
