@@ -353,3 +353,38 @@ def test_unquoted_password_value_with_spaces_is_taken_to_the_line_end(
 )
 def test_requirement_prose_after_a_password_word_stays(gateway: Gateway, text: str) -> None:
     assert gateway.pseudonymize(text).text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("env password=tester99 python manage.py migrate", " python manage.py migrate"),
+        ("Der Parameter password=wert ist optional und kann fehlen", " ist optional und kann fehlen"),
+        ("f(password=abcd, user=bob, port=5432)", ", user=bob, port=5432)"),
+        ("password=wert1234 # nur ein kommentar", " # nur ein kommentar"),
+    ],
+)
+def test_a_password_inside_a_line_does_not_swallow_the_rest(gateway: Gateway, text: str, kept: str) -> None:
+    assert gateway.pseudonymize(text).text.endswith(kept)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "KEY=/usr/local/share/keys/server1",
+        "make KEY=release-2026-11-10-build-17",
+        "KEY=users_by_region_2024_q1_idx",
+        "KEY=feature-flag-dark-mode-v2-enabled",
+    ],
+)
+def test_a_path_or_identifier_after_a_bare_key_is_no_secret(gateway: Gateway, text: str) -> None:
+    assert gateway.pseudonymize(text).text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Passwort: muss 8 Zeichen Xk9!geheim", "Passwort: sollte 12 Zeichen haben: Qw7!zzTop#aa"],
+)
+def test_a_value_after_requirement_words_is_still_a_password(gateway: Gateway, text: str) -> None:
+    out = gateway.pseudonymize(text).text
+    assert "geheim" not in out and "zzTop" not in out

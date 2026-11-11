@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from functools import cache
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
@@ -30,7 +30,6 @@ DIFF_HEADER_RE = re.compile(
 )
 DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
 DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
-BLANK_LINE_RE = re.compile(r"\r?\n[ \t]*\r?\n")
 LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
@@ -83,23 +82,31 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
-def _in_diff_block(text: str, start: int) -> bool:
-    """A diff header above the line at `start`, with no blank line in between.
+@lru_cache(maxsize=8)
+def _diff_lines(text: str) -> frozenset[int]:
+    """Start offsets of the lines below a diff header, up to the first blank or non-diff line."""
+    covered: set[int] = set()
+    inside = False
+    offset = 0
+    lines = text.split("\n")
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if not line.strip():
+            inside = False
+        elif DIFF_HEADER_RE.match(line) or DIFF_FILE_HEADER_RE.match(f"{line}\n{following}"):
+            inside = True
+        elif inside and DIFF_LINE_RE.match(line):
+            covered.add(offset)
+        else:
+            inside = False
+        offset += len(raw) + 1
+    return frozenset(covered)
 
-    A hunk or `diff --git` header covers the block; a bare `---`/`+++` pair only while every
-    line below it starts like a diff line.
-    """
-    blocks = BLANK_LINE_RE.split(text[:start])
-    block = blocks[-1]
-    if DIFF_HEADER_RE.search(block) is not None:
-        return True
-    pair = None
-    for pair in DIFF_FILE_HEADER_RE.finditer(block):
-        pass
-    if pair is None:
-        return False
-    rest = block[pair.end() :].split("\n")[1:]
-    return all(not line or DIFF_LINE_RE.match(line) for line in rest)
+
+def _in_diff_block(text: str, start: int) -> bool:
+    """A diff header above the line at `start`, with only diff lines and no blank line between."""
+    return text.rfind("\n", 0, start) + 1 in _diff_lines(text)
 
 
 def _at_line_start(text: str, start: int) -> bool:

@@ -925,7 +925,8 @@ Each line lists every field of the request:
 - The keys of the objects inside `tool_use.input` are checked like values. A key field has the
   path of its object plus `{n}#key`; objects are addressed by position, so a key never appears in
   a path. If two keys of one object become equal after replacement, the later one gets a suffix
-  (`#2`, `#3`), which the restore removes again. `coverage` counts values and keys separately as
+  (`#2`, `#3`). The restore removes it again when the key has a reversible token. A redacted key
+  keeps the suffix, and a key that already ends in `#2` in your own data can lose it. `coverage` counts values and keys separately as
   `checked_fields` and `checked_keys`, next to `unchecked_fields`.
 - Query strings are forwarded only with the parameters `beta`, `limit`, `before_id` and `after_id`
   and values of letters, digits and `_.:-` (up to 128 characters); anything else is refused with

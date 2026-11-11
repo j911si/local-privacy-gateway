@@ -86,7 +86,7 @@ def test_number_in_column_zero_is_found_outside_a_diff(default_config: Config, t
     [
         "@@ -1,3 +1,4 @@\n line\n+49 30 12345678 neue Zeile",
         "@@ -1,3 +1,4 @@\n+49 30 12345678",
-        "diff --git a/x b/x\n--- a/x\n+++ b/x\nfoo\n+49 30 12345678",
+        "diff --git a/x b/x\n--- a/x\n+++ b/x\n foo\n+49 30 12345678",
         "@@ -1,2 +1,3 @@\n+49 passed, 3 failed\n+1 415 lines changed\n+44 20 files",
         "@@ -9,2 +9,3 @@\n+44 20 7946 0958 Zeilen\n+1 415 555 2671",
     ],
@@ -351,3 +351,16 @@ def test_added_line_with_a_plus_number_inside_a_hunk_is_found(default_config: Co
 @pytest.mark.parametrize("text", ["+++49 30 12345678", "a ++49 30 12345678", "x\n+++49 30 12345678"])
 def test_more_plus_signs_are_still_no_number(default_config: Config, text: str) -> None:
     assert stage_values(text, default_config) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "diff --git a/x b/x\nKontakt:\n+49 30 12345678",
+        "@@ -1 +1 @@\n+foo\nRuf an:\n+49 30 12345678",
+    ],
+)
+def test_a_line_that_is_no_diff_line_ends_the_diff_block(
+    default_config: Config, text: str
+) -> None:
+    assert stage_values(text, default_config) == ["+49 30 12345678"]
