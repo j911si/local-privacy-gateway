@@ -56,6 +56,8 @@ TEXTS = [
     "say \"PERSON_001\" and 'email_001' and `ipv4_012`",
     "/home/<PERSON_001>/<PERSON_001>_notes.md",
     "<PERSON_001><PERSON_001>",
+    "<PERSON_001>`PERSON_001`",
+    "<PERSON_001>\"PERSON_001\"",
 ]
 
 
