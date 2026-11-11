@@ -24,14 +24,13 @@ def restore_text(
 ) -> RestoreResult:
     """Replace tokens; the text around a token is never touched.
 
-    Strict mode is for the unchanged pseudonymized text and hands back the recorded surface forms
-    in occurrence order. Lenient mode is for a model's answer, where tokens come in any number
-    and order (and in pieces, when streamed), so it always restores the canonical value.
+    A token stands for exactly one value, so the result does not depend on how often or in which
+    order tokens occur. Strict mode raises on an unknown token and takes only bracketed tokens;
+    lenient mode is for a model's answer and also takes a token in its own quotes.
     """
     if mode not in (STRICT, LENIENT):
         raise RestoreError(f"unknown restore mode: {mode}")
     pattern = NUMBERED_TOKEN if mode == STRICT else _LENIENT_TOKEN
-    occurrences: dict[str, int] = {}
     unknown: list[str] = []
     restored = 0
 
@@ -51,11 +50,6 @@ def restore_text(
                 unknown.append(token)
             return match.group(0)
         restored += 1
-        if mode == STRICT:
-            index = occurrences.get(token, 0)
-            occurrences[token] = index + 1
-            if index < len(entry.surface_forms):
-                return entry.surface_forms[index]
         return f"{quote}{entry.value}{quote}"
 
     return RestoreResult(

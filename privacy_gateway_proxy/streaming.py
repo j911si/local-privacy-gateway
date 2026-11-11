@@ -58,6 +58,7 @@ class StreamRestorer:
         self._restore = restore
         self._buffer = b""
         self._held: dict[int, str] = {}
+        self._before: dict[int, str] = {}
         self._partial: dict[int, str] = {}
 
     def feed(self, chunk: bytes) -> bytes:
@@ -108,11 +109,21 @@ class StreamRestorer:
         if split < len(buffered):
             self._held[index] = buffered[split:]
         safe = buffered[:split]
-        return _text_event(index, self._restore(safe)) if safe else b""
+        return _text_event(index, self._restore_after(index, safe)) if safe else b""
 
     def _flush_text(self, index: int) -> bytes:
         held = self._held.pop(index, "")
-        return _text_event(index, self._restore(held)) if held else b""
+        return _text_event(index, self._restore_after(index, held)) if held else b""
+
+    def _restore_after(self, index: int, text: str) -> str:
+        """Restore `text` as if the raw text sent before it stood in front of it.
+
+        A bare token needs a non-word, non-`>` character before its quote, so the last raw
+        character of the previous piece goes in as context and comes out unchanged.
+        """
+        before = self._before.get(index, "")
+        self._before[index] = text[-1]
+        return self._restore(before + text)[len(before) :]
 
     def _flush_partial(self, index: int) -> bytes:
         accumulated = self._partial.pop(index, "")

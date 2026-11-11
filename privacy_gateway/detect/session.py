@@ -177,9 +177,17 @@ class KnownMatcher:
                 first, last = offsets[match.start()], offsets[match.end() - 1] + 1
                 if not compact_digit_run(text, first, last):
                     continue
+                lead = first
+                while lead and text[lead - 1].isdigit():
+                    lead -= 1
+                international = digits in self._signed_digits and text[lead:first] == "00"
+                if lead < first and not international:
+                    continue
                 span = _value_span(text, first, last, len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH)
                 if span is None:
                     continue
+                if international:
+                    span = Span(lead, span.end)
                 if digits in self._signed_digits and text[span.start - 1 : span.start] == "+":
                     span = Span(span.start - 1, span.end)
                 result.append((span, value))

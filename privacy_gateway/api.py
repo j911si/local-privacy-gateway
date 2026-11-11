@@ -17,6 +17,7 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
+from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
 from privacy_gateway.leakage import check_leakage, exempt_from_residual, numbered_tokens
 from privacy_gateway.model import (
     DetectionReport,
@@ -96,7 +97,7 @@ class Gateway:
                     assignment.token,
                     assignment.data_class,
                     text[first.start : first.end],
-                    [text[span.start : span.end] for span in assignment.spans],
+                    [text[first.start : first.end]],
                     assignment.attributes,
                 )
             entries = self.vault.load(session_id)
@@ -170,6 +171,7 @@ class GatewaySession:
         self._results: OrderedDict[str, tuple[str, list[FieldFinding]]] = OrderedDict()
         self._rescans: OrderedDict[str, list[Leak]] = OrderedDict()
         self._known_cache: dict[str, tuple[str, str]] | None = None
+        self._values: dict[tuple[str, str], str] | None = None
         self._generation = 0
 
     def entries(self) -> Mapping[str, VaultEntry]:
@@ -193,18 +195,18 @@ class GatewaySession:
             return cached[0], list(cached[1])
         counters = dict(self._counters)
         written: list[str] = []
-        appended: list[tuple[str, list[str]]] = []
+        reused: list[str] = []
         pipeline = self._gateway._pipeline
         literal_tokens = numbered_tokens(text)
         try:
             for attempt in range(MAX_PASSES):
                 generation = self._generation
                 known = self._known()
-                report = pipeline.run(text, known)
+                report = self._bind_tokens(text, pipeline.run(text, known))
                 pseudonymized = pseudonymize_text(
                     text, report, self._gateway.config, counters=self._counters
                 )
-                self._write(text, pseudonymized, written, appended)
+                self._write(text, pseudonymized, written, reused)
                 try:
                     check_leakage(
                         pseudonymized.text,
@@ -217,24 +219,24 @@ class GatewaySession:
                     if attempt + 1 < MAX_PASSES and (
                         self._generation != generation
                         or self._learn_residue(
-                            pseudonymized.text, exc.leaks, known, written, appended
+                            pseudonymized.text, exc.leaks, known, written, reused
                         )
                     ):
                         continue
                     raise
                 break
         except LeakageError:
-            self._rollback(written, appended, counters)
+            self._rollback(written, counters)
             self._gateway.audit.session_pseudonymize(
                 self.session_id, 0, 0, "failed", _elapsed_ms(started)
             )
             raise
         except Exception as exc:
-            self._rollback(written, appended, counters)
+            self._rollback(written, counters)
             self._gateway.audit.error(type(exc).__name__, SESSION_STAGE)
             raise
         self._gateway.audit.session_pseudonymize(
-            self.session_id, len(written), len(appended), "ok", _elapsed_ms(started)
+            self.session_id, len(written), len(reused), "ok", _elapsed_ms(started)
         )
         findings = _field_findings(report, pseudonymized, self._gateway.config.registry)
         self._remember(digest, (pseudonymized.text, findings))
@@ -314,12 +316,36 @@ class GatewaySession:
         self._known_cache = known
         return known
 
+    def _value_index(self) -> dict[tuple[str, str], str]:
+        if self._values is None:
+            self._values = {}
+            for token, entry in self._entries.items():
+                self._values.setdefault((entry.data_class, entry.value), token)
+        return self._values
+
+    def _bind_tokens(self, text: str, report: DetectionReport) -> DetectionReport:
+        """Give a finding the token whose value is exactly its text, and none otherwise.
+
+        The session stage also finds other spellings of a known value; those get a token of their
+        own, so every token restores to the exact bytes it replaced.
+        """
+        index = self._value_index()
+        findings = []
+        for finding in report.findings:
+            span = finding.span
+            token = index.get((finding.data_class, text[span.start : span.end]))
+            attributes = {k: v for k, v in finding.attributes.items() if k != TOKEN_ATTRIBUTE}
+            if token is not None:
+                attributes[TOKEN_ATTRIBUTE] = token
+            findings.append(replace(finding, attributes=attributes))
+        return replace(report, findings=findings)
+
     def _write(
         self,
         text: str,
         pseudonymized: PseudonymizedText,
         written: list[str],
-        appended: list[tuple[str, list[str]]],
+        reused: list[str],
     ) -> None:
         if pseudonymized.assignments:
             known = self._known()
@@ -330,30 +356,29 @@ class GatewaySession:
             ):
                 self._known_changed()
             self._known_cache = None
+            self._values = None
             self._rescans.clear()
         for assignment in pseudonymized.assignments:
-            forms = [text[span.start : span.end] for span in assignment.spans]
-            entry = self._entries.get(assignment.token)
-            if entry is None:
-                self._gateway.vault.store(
-                    self.session_id,
-                    assignment.token,
-                    assignment.data_class,
-                    forms[0],
-                    forms,
-                    assignment.attributes,
-                )
-                self._entries[assignment.token] = VaultEntry(
-                    value=forms[0],
-                    data_class=assignment.data_class,
-                    surface_forms=list(forms),
-                    attributes=dict(assignment.attributes),
-                )
-                written.append(assignment.token)
+            first = assignment.spans[0]
+            value = text[first.start : first.end]
+            if assignment.token in self._entries:
+                reused.append(assignment.token)
                 continue
-            appended.append((assignment.token, list(entry.surface_forms)))
-            self._gateway.vault.append_surface_forms(self.session_id, assignment.token, forms)
-            entry.surface_forms.extend(forms)
+            self._gateway.vault.store(
+                self.session_id,
+                assignment.token,
+                assignment.data_class,
+                value,
+                [value],
+                assignment.attributes,
+            )
+            self._entries[assignment.token] = VaultEntry(
+                value=value,
+                data_class=assignment.data_class,
+                surface_forms=[value],
+                attributes=dict(assignment.attributes),
+            )
+            written.append(assignment.token)
 
     def _learn_residue(
         self,
@@ -361,7 +386,7 @@ class GatewaySession:
         leaks: list[Leak],
         known: dict[str, tuple[str, str]],
         written: list[str],
-        appended: list[tuple[str, list[str]]],
+        reused: list[str],
     ) -> bool:
         """Make values the output check found a known value, so the next pass replaces them.
 
@@ -375,7 +400,7 @@ class GatewaySession:
         }
         if not spans:
             return False
-        report = self._gateway._pipeline.run(output, known)
+        report = self._bind_tokens(output, self._gateway._pipeline.run(output, known))
         kept = [
             finding
             for finding in report.findings
@@ -388,30 +413,22 @@ class GatewaySession:
         learned = pseudonymize_text(
             output, replace(report, findings=kept), self._gateway.config, counters=self._counters
         )
-        self._write(output, learned, written, appended)
+        self._write(output, learned, written, reused)
         return self._generation != generation
 
     def _rollback(
         self,
         written: list[str],
-        appended: list[tuple[str, list[str]]],
         counters: dict[str, int],
     ) -> None:
         self._known_cache = None
+        self._values = None
         self._rescans.clear()
-        if written or appended:
+        if written:
             self._known_changed()
         self._gateway.vault.delete_tokens(self.session_id, written)
         for token in written:
             self._entries.pop(token, None)
-        for token, forms in reversed(appended):
-            entry = self._entries.get(token)
-            if entry is None:
-                continue
-            entry.surface_forms = list(forms)
-            self._gateway.vault.store(
-                self.session_id, token, entry.data_class, entry.value, forms, entry.attributes
-            )
         self._counters = counters
 
     def _known_changed(self) -> None:
