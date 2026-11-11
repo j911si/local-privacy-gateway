@@ -197,6 +197,11 @@ HEALTH_MARKER_WINDOW = 60
 SENTENCE_BOUNDARIES = ".\n"
 
 MIN_SALUTATION_NAME_LENGTH = 3
+MIN_NAME_PART_LENGTH = 4
+NAME_PARTICLES = frozenset(
+    {"von", "van", "de", "der", "den", "zu", "zur", "zum", "vom", "du", "di", "da", "la", "le",
+     "ten", "ter", "bin", "ibn", "al", "el", "dos", "das", "del", "della"}
+)
 SALUTATION_RE = re.compile(
     r"(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
     r"\b(Frau|Herr|Herrn|Mrs\.?|Mr\.?|Ms\.?|Mx\.?)\s+"
@@ -301,6 +306,23 @@ def _cities() -> frozenset[str]:
 @cache
 def _common_name_words() -> frozenset[str]:
     return frozenset(term.lower() for term in load_terms("common_name_words.txt"))
+
+
+def learnable_name_part(part: str) -> bool:
+    """A first or last name that a session may learn as a word of its own."""
+    low = part.lower()
+    return (
+        len(part) >= MIN_NAME_PART_LENGTH
+        and part.isalpha()
+        and part[0].isupper()
+        and not part.isupper()
+        and low not in NAME_PARTICLES
+        and low not in STOP_WORDS
+        and low not in NAME_DENY_WORDS
+        and low not in _common_name_words()
+        and low not in _cities()
+        and not _country_matcher().find(part)
+    )
 
 
 def _trimmed_span(text: str, start: int, end: int) -> Span:
