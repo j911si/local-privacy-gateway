@@ -26,6 +26,15 @@ def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
     )
 
 
+def exempt_from_residual(finding: Finding, tokens: list[Span]) -> bool:
+    """A residual finding that is part of a token or glued to one is no leak."""
+    return (
+        any(token.contains(finding.span) for token in tokens)
+        or glued_to_token(finding, tokens)
+        or _short_touching_token(finding.span.start, finding.span.end, tokens)
+    )
+
+
 def numbered_tokens(text: str) -> frozenset[str]:
     """Every numbered token-shaped string in `text`."""
     return frozenset(match.group(0) for match in NUMBERED_TOKEN.finditer(text))
@@ -65,11 +74,7 @@ def check_leakage(
     for finding in scan(text).findings:
         if _policy(registry, finding.data_class) is Policy.IGNORE:
             continue
-        if any(token.contains(finding.span) for token in token_spans):
-            continue
-        if glued_to_token(finding, token_spans):
-            continue
-        if _short_touching_token(finding.span.start, finding.span.end, token_spans):
+        if exempt_from_residual(finding, token_spans):
             continue
         leaks.append(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
