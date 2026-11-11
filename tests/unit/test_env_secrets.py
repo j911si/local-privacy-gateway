@@ -173,7 +173,6 @@ def test_env_file_without_secrets_is_unchanged(gateway: Gateway) -> None:
         ("ENCRYPTION_KEY=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZg==", "Zm9vYmFy"),
         ("SIGNING_KEY=6e3f1a9c8b7d5e4f2a1b0c9d8e7f6a5b", "6e3f1a9c"),
         ("LICENSE_KEY=AB12C-DE34F-GH56I-JK78L-MN90P", "DE34F-GH56I"),
-        ("key=9f8e7d6c5b4a39281706f5e4d3c2b1a0", "9f8e7d6c"),
         ("TELEGRAM_BOT_TOKEN=7123456789:AAHk3Jx9Lm2Qp7Rt5Vw8Yz1Bc4Df6Gh0JnQ", "AAHk3Jx9"),
         ("CREDENTIALS=annika:Sommer2024geheim", "Sommer2024geheim"),
         ("passphrase: korrekt-pferd-batterie-heftklammer-77", "pferd-batterie"),
@@ -218,9 +217,90 @@ def test_value_with_special_characters_is_replaced_up_to_the_line_end(gateway: G
         "token = get_access_token()",
         "credentials: include",
         "PGPASSWORD=${DB_PASSWORD} psql",
+        'key = "users:list:page:1:size:20"',
+        "key: 'sidebar-item-12345678'",
+        '<li key="item-1234567890abcdef">',
+        '"key": "feature_flag_dark_mode_v2"',
+        'cache.get(key="session:42:profile:data")',
+        "key: 9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        "license_key: MIT-or-Apache-2.0-dual",
+        "license: GPL-3.0-or-later-with-exceptions",
+        "LICENSE_KEY=Apache-2.0-with-LLVM-exception",
+        "credentials: include-same-origin-v2",
+        "credentials: 'same-origin-policy-v2'",
+        "token: Token = Depends(oauth2_scheme)",
+        "async def me(token: Token = Depends(oauth2_scheme_v2)):",
+        'api_key = "users:list:page:1:size:20"',
     ],
 )
 def test_comparisons_calls_references_and_prose_are_no_secrets(
     gateway: Gateway, text: str
 ) -> None:
+    assert gateway.pseudonymize(text).text == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "PGPASSWORD=Sup3rGeheim psql -h db01 -U app",
+            "PGPASSWORD=<PASSWORD_REDACTED> psql -h db01 -U app",
+        ),
+        (
+            "PGPASSWORD=geheim pg_dump -h db01 kunden > dump.sql",
+            "PGPASSWORD=<PASSWORD_REDACTED> pg_dump -h db01 kunden > dump.sql",
+        ),
+        (
+            "password=abc123 --verbose --host db01",
+            "password=<PASSWORD_REDACTED> --verbose --host db01",
+        ),
+        ("export DB_PASSWORD=hunter2hunter2; ls", "export DB_PASSWORD=<PASSWORD_REDACTED>; ls"),
+        (
+            "DB_PASSWORD='hunter2 hunter2' psql",
+            "DB_PASSWORD='<PASSWORD_REDACTED>' psql",
+        ),
+        ("PASSWORD=geheim", "PASSWORD=<PASSWORD_REDACTED>"),
+        ('password := "geheim123"', 'password := "<PASSWORD_REDACTED>"'),
+        ("password := 'geheim123'", "password := '<PASSWORD_REDACTED>'"),
+        ("password: correct horse battery staple", "password: <PASSWORD_REDACTED>"),
+        ("Passwort: sommer regen wind", "Passwort: <PASSWORD_REDACTED>"),
+        ("Kennwort: Sommer regen 2024.", "Kennwort: <PASSWORD_REDACTED>."),
+        ("passphrase: korrekt pferd batterie heftklammer", "passphrase: <PASSWORD_REDACTED>"),
+        ("pass: geheim123", "pass: <PASSWORD_REDACTED>"),
+        ("mysql -u root -pGeheim99 kunden", "mysql -u root -p<PASSWORD_REDACTED> kunden"),
+        ("sshpass -p 'geheim' ssh root@db01", "sshpass -p '<PASSWORD_REDACTED>' ssh root@db01"),
+        ('sshpass -p "gehe im" ssh root@db01', 'sshpass -p "<PASSWORD_REDACTED>" ssh root@db01'),
+        ("sshpass -p Geheim99 ssh root@db01", "sshpass -p <PASSWORD_REDACTED> ssh root@db01"),
+    ],
+)
+def test_password_value_ends_where_the_value_ends(
+    gateway: Gateway, text: str, expected: str
+) -> None:
+    assert gateway.pseudonymize(text).text == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "if password == confirm_password:",
+        "password = new_password",
+        'password = os.environ["X"]',
+        "password: str",
+        "password: Optional[str] = None",
+        "Passwort: siehe oben",
+        "Passwort: wird per Post verschickt",
+        "password: see the vault entry",
+        "passwd: all authentication tokens updated successfully.",
+        "pass: true",
+        "pass: 10",
+        "pass: 2 of 3 checks",
+        "mysql -u root -p kunden",
+        "mysql -h db01 -P 3306",
+        "mysqldump --port=3306 kunden",
+        "sshpass -p",
+        "ps -p 1234",
+        "password := getpass.getpass()",
+    ],
+)
+def test_code_and_prose_after_password_words_stay(gateway: Gateway, text: str) -> None:
     assert gateway.pseudonymize(text).text == text

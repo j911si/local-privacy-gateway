@@ -63,11 +63,57 @@ def test_number_in_brackets_and_at_the_end_of_a_line(default_config: Config) -> 
     assert stage_values("Ruf +49 171 2345678.", default_config) == ["+49 171 2345678"]
 
 
-def test_number_in_column_zero_is_not_found_without_context(default_config: Config) -> None:
-    """A `+` in column 0 is a diff line; the price is that a bare number there is not found."""
-    for text in ("+49 171 2345678", "a\n+49 171 2345678\nb", "+1 415 555 0132 ruft an"):
-        assert stage_values(text, default_config) == []
-        assert phone_classes(text, default_config) == []
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+49 171 2345678",
+        "a\n+49 171 2345678\nb",
+        "+1 415 555 0132 ruft an",
+        "Signatur\nAnnika Sommerfeld\n+49 30 12345678",
+        "Kontaktliste:\n+49 30 12345678\n+49 151 23456789\n+43 1 58858-0",
+        "Signatur\nAnnika Sommerfeld\n+49 30 12345678\nannika@kanzlei.example",
+    ],
+)
+def test_number_in_column_zero_is_found_outside_a_diff(default_config: Config, text: str) -> None:
+    assert stage_values(text, default_config) != []
+    assert all(("PHONE", v) in phone_classes(text, default_config) for v in stage_values(
+        text, default_config
+    ))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "@@ -1,3 +1,4 @@\n line\n+49 30 12345678 neue Zeile",
+        "@@ -1,3 +1,4 @@\n+49 30 12345678",
+        "diff --git a/x b/x\n--- a/x\n+++ b/x\nfoo\n+49 30 12345678",
+        "+foo = 1\n+49 30 12345678",
+        "+49 30 12345678\n-bar = 2",
+        " x = y\n+    retry = 3\n+49 30 12345678",
+        "+\n+49 30 12345678",
+        "@@ -1,2 +1,3 @@\n+49 passed, 3 failed\n+1 415 lines changed\n+44 20 files",
+        "@@ -9,2 +9,3 @@\n+44 20 7946 0958 Zeilen\n+1 415 555 2671",
+    ],
+)
+def test_number_in_column_zero_of_a_diff_block_is_not_found(
+    default_config: Config, text: str
+) -> None:
+    assert stage_values(text, default_config) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+49 passed, 3 failed",
+        "+1 415 lines changed",
+        "+44 20 files",
+        "@@ -1,3 +1,4 @@\n+49 passed, 3 failed\n+1 415 lines changed\n+44 20 files",
+        "+2025-01-15 09:30:00 INFO",
+        "x\n+2025-01-15 09:30:00 INFO\n+0200\n+15%\n+3.5\n=+86400000\n+1700000000",
+    ],
+)
+def test_diff_excerpts_and_log_lines_give_no_finding(default_config: Config, text: str) -> None:
+    assert phone_classes(text, default_config) == []
 
 
 def test_compact_number_needs_a_context_word(default_config: Config) -> None:
@@ -147,6 +193,40 @@ def test_logs_numbers_and_dates_are_no_phone(default_config: Config, text: str) 
     for variant in (text, f"Ruf {text}", f"Ruf ({text})"):
         assert stage_values(variant, default_config) == []
         assert phone_classes(variant, default_config) == []
+
+
+@pytest.mark.parametrize(
+    "number",
+    ["(+49) 30 1234567", "(+49) 30 12345678", "0049 30 1234567", "0049 30 12345678", "0041 44 668 18 00"],
+)
+def test_bracketed_plus_and_double_zero_prefix_are_found(
+    default_config: Config, number: str
+) -> None:
+    for text in (f"Rückruf {number} bitte", f"contact: {number}", number):
+        assert stage_values(text, default_config) == [number]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0049",
+        "0049 30",
+        "00 49 30",
+        "1.0049 30 1234567",
+        "x0049 30 1234567",
+        "0099 30 1234567",
+        "00123456789",
+        "0049 30 1234567890123",
+        "(+49) 30",
+        "(+49)",
+        "f(+49) 30 1234567",
+        "(+999) 30 1234567",
+        "002026 11 10 12 00",
+        "000 111 222 333",
+    ],
+)
+def test_bracketed_plus_and_double_zero_negatives(default_config: Config, text: str) -> None:
+    assert stage_values(text, default_config) == []
 
 
 def test_national_number_still_needs_a_context_word(default_config: Config) -> None:

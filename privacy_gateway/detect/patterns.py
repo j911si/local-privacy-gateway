@@ -24,6 +24,9 @@ MAX_CONFIDENCE = 0.99
 IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
+PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
+DIFF_HEADER_RE = re.compile(r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|\+\+\+ |--- )", re.MULTILINE)
+NUMBER_LINE_RE = re.compile(r"[+\-][ ]?\d[\d ()/.\-]*")
 LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
@@ -76,6 +79,25 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
+def _is_diff_marker(line: str) -> bool:
+    return line[:1] in ("+", "-") and NUMBER_LINE_RE.fullmatch(line.rstrip()) is None
+
+
+def _in_diff_block(text: str, start: int) -> bool:
+    """A hunk or file header anywhere in the text, or a `+`/`-` line next to the line at `start`."""
+    if DIFF_HEADER_RE.search(text) is not None:
+        return True
+    before = text[:start].rsplit("\n", 2)
+    previous = before[-2] if len(before) > 1 else ""
+    end = text.find("\n", start)
+    following = text[end + 1 :].split("\n", 1)[0] if end != -1 else ""
+    return _is_diff_marker(previous.rstrip("\r")) or _is_diff_marker(following.rstrip("\r"))
+
+
+def _at_line_start(text: str, start: int) -> bool:
+    return start == 0 or text[start - 1] in "\r\n"
+
+
 def _span_of(match: re.Match[str]) -> Span:
     if match.re.groups >= 1 and match.group(1) is not None:
         return Span(*match.span(1))
@@ -115,6 +137,12 @@ class PatternStage:
         if data_class.name == GENERIC_ID_CLASS and _is_standard_reference(value):
             return []
         if validator is not None and not validator(value):
+            return []
+        if (
+            data_class.name == PHONE_INTERNATIONAL_CLASS
+            and _at_line_start(text, span.start)
+            and _in_diff_block(text, span.start)
+        ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)
         if data_class.context_required and not has_context:
