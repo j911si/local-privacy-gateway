@@ -220,10 +220,6 @@ def test_text_without_numbers_is_unchanged(gateway: Gateway) -> None:
     assert gateway.pseudonymize(text).text == text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="session.py learns the compact spelling without its leading `+`; owned by another agent",
-)
 def test_one_number_in_two_spellings_gets_one_token(gateway: Gateway) -> None:
     session = gateway.session()
     first = session.pseudonymize("Telefon: +49 171 2345678 ist erreichbar.")

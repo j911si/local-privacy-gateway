@@ -88,6 +88,7 @@ class KnownMatcher:
         self._spaced: list[tuple[re.Pattern[str], Known]] = []
         self._substrings: list[_Substring] = []
         self._by_digits: dict[str, Known] = {}
+        self._signed_digits: set[str] = set()
         for form, value in known.items():
             words = normalized(form).split()
             if not words:
@@ -115,6 +116,8 @@ class KnownMatcher:
         long_number = len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH and mostly_digits(key)
         if plain or long_number:
             self._by_digits.setdefault(digits, value)
+            if key.startswith("+"):
+                self._signed_digits.add(digits)
         if len(key) >= MIN_LENGTH_FOR_SUBSTRING_SEARCH and not _is_short_mixed(key):
             self._substrings.append(
                 _Substring(
@@ -175,8 +178,11 @@ class KnownMatcher:
                 if not compact_digit_run(text, first, last):
                     continue
                 span = _value_span(text, first, last, len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH)
-                if span is not None:
-                    result.append((span, value))
+                if span is None:
+                    continue
+                if digits in self._signed_digits and text[span.start - 1 : span.start] == "+":
+                    span = Span(span.start - 1, span.end)
+                result.append((span, value))
         return result
 
 
