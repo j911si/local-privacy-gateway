@@ -26,8 +26,11 @@ IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
 PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
 DIFF_HEADER_RE = re.compile(
-    r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|--- \S[^\n]*\r?\n\+\+\+ \S)", re.MULTILINE
+    r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
 )
+DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
+DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
+BLANK_LINE_RE = re.compile(r"\r?\n[ \t]*\r?\n")
 LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
@@ -80,9 +83,23 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
-def _in_diff_block(text: str) -> bool:
-    """A hunk header or a `---`/`+++` file header pair anywhere in the text."""
-    return DIFF_HEADER_RE.search(text) is not None
+def _in_diff_block(text: str, start: int) -> bool:
+    """A diff header above the line at `start`, with no blank line in between.
+
+    A hunk or `diff --git` header covers the block; a bare `---`/`+++` pair only while every
+    line below it starts like a diff line.
+    """
+    blocks = BLANK_LINE_RE.split(text[:start])
+    block = blocks[-1]
+    if DIFF_HEADER_RE.search(block) is not None:
+        return True
+    pair = None
+    for pair in DIFF_FILE_HEADER_RE.finditer(block):
+        pass
+    if pair is None:
+        return False
+    rest = block[pair.end() :].split("\n")[1:]
+    return all(not line or DIFF_LINE_RE.match(line) for line in rest)
 
 
 def _at_line_start(text: str, start: int) -> bool:
@@ -132,7 +149,7 @@ class PatternStage:
         if (
             data_class.name == PHONE_INTERNATIONAL_CLASS
             and _at_line_start(text, span.start)
-            and _in_diff_block(text)
+            and _in_diff_block(text, span.start)
         ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)

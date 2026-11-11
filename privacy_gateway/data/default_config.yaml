@@ -84,7 +84,7 @@ classes:
     policy: tokenize
     token_label: PHONE
     priority: 179
-    patterns: ['(?<![\w+=])(?:\+[1-9]\d*|\(\+[1-9]\d*\)|(?<![.,])00[1-9]\d*)(?:(?: ?[\-/] ?| )?\(\d{1,5}\)(?: ?[\-/] ?| )?\d*)?(?:(?: ?[\-/] ?| )\d+)*(?!\w|[.,]\d)']
+    patterns: ['(?:(?<![\w+=])|(?<=^\+))(?:\+[1-9]\d*|\(\+[1-9]\d*\)|(?<![.,])00[1-9]\d*)(?:(?: ?[\-/] ?| )?\(\d{1,5}\)(?: ?[\-/] ?| )?\d*)?(?:(?: ?[\-/] ?| )\d+)*(?!\w|[.,]\d)']
     validator: phone_international
   FAX:
     category: CONTACT
@@ -488,7 +488,8 @@ classes:
       - '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|passwort|(?<=[_.\-])pass)["'']?\]?[ \t]*(?::=|[:=])(?!=)[ \t]*"([^"\n]{4,})"'
       - '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|passwort|(?<=[_.\-])pass)["'']?\]?[ \t]*(?::=|[:=])(?!=)[ \t]*''([^''\n]{4,})'''
       - '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|passwort|(?<=[_.\-])pass)["'']?\]?[ \t]*=(?!=)[ 	]*(?!["'']|\$|\(|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|optional|secretstr)\b|[\w.]+[(\[]|(?:[A-Za-z_]+(?:\.[A-Za-z_]+)+|(?-i:[a-z]+(?:_[a-z]+)+))[ \t]*[.,;:)\]]*(?=\s|$))(\S{4,}?)[ \t]*[.,;:)\]]*(?=\s|$)'
-      - '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|passwort|(?<=[_.\-])pass)["'']?\]?[ \t]*:(?!=)[ 	]*(?!["'']|\$|\(|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|optional|secretstr)\b|[\w.]+[(\[]|(?:[A-Za-z_]+(?:\.[A-Za-z_]+)+|(?-i:[a-z]+(?:_[a-z]+)+))[ \t]*[.,;:)\]]*$)(?!(?![^\n]*\d)(?:wird|werden|wurde|ist|sind|war|siehe|oben|unten|per|mit|ohne|und|oder|der|die|das|dem|den|ein|eine|einer|einem|nicht|kein|keine|bitte|nur|auch|wie|wenn|dann|bei|von|vom|zum|zur|im|am|auf|aus|an|in|für|fuer|über|ueber|nach|vor|the|a|an|is|are|was|will|be|see|by|via|with|without|and|or|not|no|to|for|of|on|at|from|your|you|must|should|can|please|here|enter|all|has|have|been|this|that|it|as|if|successfully|updated|changed)(?![\w'']))(\S[^\n]{3,}?)[ \t]*[.,;:)\]]*$'
+      - '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|passwort|(?<=[_.\-])pass)["'']?\]?[ \t]*:(?!=)[ 	]*(?!["'']|\$|\(|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|optional|secretstr)\b|[\w.]+[(\[]|(?:[A-Za-z_]+(?:\.[A-Za-z_]+)+|(?-i:[a-z]+(?:_[a-z]+)+))[ \t]*[.,;:)\]]*$)(?!(?:must|muss|should|sollte)(?![\w''])[^\n]*\b\d+\+?[ \t]+(?:characters?|chars|digits?|letters?|zeichen|ziffern|buchstaben)\b)(?!(?![^\n]*\d)(?:wird|werden|wurde|ist|sind|war|siehe|oben|unten|per|mit|ohne|und|oder|der|die|das|dem|den|ein|eine|einer|einem|nicht|kein|keine|bitte|nur|auch|wie|wenn|dann|bei|von|vom|zum|zur|im|am|auf|aus|an|in|für|fuer|über|ueber|nach|vor|the|a|an|is|are|was|will|be|see|by|via|with|without|and|or|not|no|to|for|of|on|at|from|your|you|must|should|can|please|here|enter|all|has|have|been|this|that|it|as|if|successfully|updated|changed|required)(?![\w'']))(\S[^\n]{3,}?)[ \t]*[.,;:)\]]*$'
+      - '(?i)(?<![A-Za-z0-9])(?-i:[Pp]assword|[Pp]asswort|[Kk]ennwort|passwd|passphrase)["'']?\]?[ \t]*=(?!=)[ 	]*(?!["'']|\$|\(|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|optional|secretstr)\b|[\w.]+[(\[]|(?:[A-Za-z_]+(?:\.[A-Za-z_]+)+|(?-i:[a-z]+(?:_[a-z]+)+))[ \t]*[.,;:)\]]*(?=\s|$))([^\s"''`$(<{][^\s]{3,}(?:[ \t]+[^\s"''`$(<{|&;>=\\/\-][^\s|&;<>$`\\]*){2,}?)[ \t]*\r?$'
       - '(?i)(?<![\w.\-])(?:pass|pw)[ \t]*:(?!=)[ \t]*(?!["''$(<{])(?=\S*\d)(?=\S*[A-Za-z])(\S{6,}?)[.,;:)\]]*(?=\s|$)'
       - '\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n]*?[ \t]-p(?!\s)([^\s"''\-]\S{3,})'
       - '\bsshpass\b[^\n]*?[ \t]-p[ \t]*''([^''\n]{4,})'''

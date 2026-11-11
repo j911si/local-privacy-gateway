@@ -324,3 +324,32 @@ def test_a_prose_word_inside_the_secret_does_not_hide_it(text: str) -> None:
 @pytest.mark.parametrize("text", ["Passwort: siehe oben", "Passwort: wird per Post verschickt"])
 def test_prose_that_starts_with_a_filler_word_is_no_password(text: str) -> None:
     assert [f for f in Pipeline(load_config()).run(text).findings if f.data_class == "PASSWORD"] == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=correct horse battery staple", "password=<PASSWORD_REDACTED>"),
+        ("Passwort=Sommer regen wind 2024", "Passwort=<PASSWORD_REDACTED>"),
+        ("passphrase=korrekt pferd batterie heftklammer", "passphrase=<PASSWORD_REDACTED>"),
+        ("password=abc123 mysql -u root kunden", "password=<PASSWORD_REDACTED> mysql -u root kunden"),
+        ("PGPASSWORD=Sup3rGeheim psql", "PGPASSWORD=<PASSWORD_REDACTED> psql"),
+        ("PGPASSWORD=geheim pg_dump kunden backup", "PGPASSWORD=<PASSWORD_REDACTED> pg_dump kunden backup"),
+    ],
+)
+def test_unquoted_password_value_with_spaces_is_taken_to_the_line_end(
+    gateway: Gateway, text: str, expected: str
+) -> None:
+    assert gateway.pseudonymize(text).text == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: must be at least 8 characters",
+        "Passwort: muss mindestens 8 Zeichen lang sein",
+        "password: required for login",
+    ],
+)
+def test_requirement_prose_after_a_password_word_stays(gateway: Gateway, text: str) -> None:
+    assert gateway.pseudonymize(text).text == text
