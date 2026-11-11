@@ -79,6 +79,13 @@ classes:
     validator: phone
     context_words: ['mobil', 'mobile', 'handy', 'cell']
     context_required: true
+  PHONE_INTERNATIONAL:
+    category: CONTACT
+    policy: tokenize
+    token_label: PHONE
+    priority: 179
+    patterns: ['(?<![\w+])\+[1-9]\d*(?:(?: ?[\-/] ?| )?\(\d{1,5}\)(?: ?[\-/] ?| )?\d*)?(?:(?: ?[\-/] ?| )\d+)*(?!\w)']
+    validator: phone_international
   FAX:
     category: CONTACT
     policy: tokenize

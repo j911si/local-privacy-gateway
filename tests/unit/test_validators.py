@@ -26,6 +26,7 @@ EXPECTED_KEYS = {
     "mac",
     "vin",
     "phone",
+    "phone_international",
     "date",
     "tax_id",
     "ssn",

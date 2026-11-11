@@ -73,6 +73,25 @@ FILE_EXTENSIONS = frozenset(
     )
 )
 
+DIALING_CODES = frozenset(
+    {"1", "7"}
+    | {str(n) for n in (20, 27, 30, 31, 32, 33, 34, 36, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49)}
+    | {str(n) for n in (51, 52, 53, 54, 55, 56, 57, 58, 60, 61, 62, 63, 64, 65, 66)}
+    | {str(n) for n in (81, 82, 84, 86, 90, 91, 92, 93, 94, 95, 98)}
+    | {str(n) for n in range(211, 300)} - {"214", "215", "217", "219", "259"}
+    - {str(n) for n in range(292, 297)}
+    | {str(n) for n in range(350, 360)}
+    | {str(n) for n in range(370, 390) if n not in (384, 388)}
+    | {"420", "421", "423", "850", "852", "853", "855", "856", "880", "886"}
+    | {str(n) for n in range(500, 510)}
+    | {str(n) for n in range(590, 600)}
+    | {str(n) for n in range(670, 693) if n not in (671, 684)}
+    | {str(n) for n in range(960, 969)}
+    | {str(n) for n in range(970, 978)}
+    | {"992", "993", "994", "995", "996", "998"}
+)
+MIN_PHONE_DIGITS = 8
+MAX_PHONE_DIGITS = 15
 MAX_LABEL_LENGTH = 63
 IPV6 = 6
 MAX_IPV6_PREFIX = 128
@@ -84,6 +103,8 @@ BIC_RE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
 MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}")
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
+PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
+TRUNK_ZERO_RE = re.compile(r"\(0\)")
 CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
 DE_SSN_RE = re.compile(r"\d{2}\d{6}[A-Z]\d{3}")
@@ -215,6 +236,17 @@ def phone_valid(s: str) -> bool:
     return 7 <= sum(char.isdigit() for char in s) <= 15
 
 
+def phone_international_valid(s: str) -> bool:
+    """E.164 shape: `+`, a known country code, 8 to 15 digits; `(0)` is not dialled."""
+    value = s.strip()
+    if PHONE_INTERNATIONAL_RE.fullmatch(value) is None:
+        return False
+    digits = "".join(char for char in TRUNK_ZERO_RE.sub("", value) if char.isdigit())
+    if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
+        return False
+    return any(digits[:length] in DIALING_CODES for length in (1, 2, 3))
+
+
 def date_valid(s: str) -> bool:
     """A real calendar date in DD.MM.YYYY, DD/MM/YYYY or YYYY-MM-DD between 1900 and 2100."""
     match = DATE_RE.fullmatch(s.strip())
@@ -293,6 +325,7 @@ VALIDATORS: dict[str, Callable[[str], bool]] = {
     "mac": mac_valid,
     "vin": vin_valid,
     "phone": phone_valid,
+    "phone_international": phone_international_valid,
     "date": date_valid,
     "tax_id": tax_id_valid,
     "ssn": ssn_valid,
