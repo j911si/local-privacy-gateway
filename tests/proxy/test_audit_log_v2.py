@@ -119,7 +119,7 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     assert entry["path"] == "/v1/messages"
     assert entry["streaming"] is False
     assert entry["verdict"] == "ok_with_unchecked_findings"
-    assert entry["coverage"] == {"checked_fields": 2, "unchecked_fields": 1}
+    assert entry["coverage"] == {"checked_fields": 2, "checked_keys": 0, "unchecked_fields": 1}
 
     notice = field(entry, "messages[0].content[0].text")
     assert notice["status"] == "checked"

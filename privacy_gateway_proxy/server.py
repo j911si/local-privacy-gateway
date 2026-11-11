@@ -12,6 +12,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from starlette.applications import Starlette
@@ -29,7 +30,7 @@ from privacy_gateway_proxy.settings import (
     is_loopback,
     is_normal_path,
 )
-from privacy_gateway_proxy.transform import KeyCollisionError
+from privacy_gateway_proxy.transform import TextRef
 
 TRANSFORMED_PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
 QUERY_NAMES = frozenset({"beta", "limit", "before_id", "after_id"})
@@ -53,6 +54,8 @@ SESSION_CACHE_SIZE = 64
 DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+LOGGED_SEGMENTS = 2
+UUID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 _transform: Any
 _stream_restorer_factory: Any
@@ -101,8 +104,16 @@ class _QueryRedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
-            record.args = (*args[:2], args[2].partition("?")[0], *args[3:])
+            record.args = (*args[:2], short_path(args[2].partition("?")[0]), *args[3:])
         return True
+
+
+def short_path(path: str) -> str:
+    """The first two segments of a path plus `/…` when more follow; known paths unchanged."""
+    segments = path.split("/")
+    if len(segments) <= LOGGED_SEGMENTS + 1 or path in TRANSFORMED_PATHS:
+        return path
+    return "/".join(segments[: LOGGED_SEGMENTS + 1]) + "/…"
 
 
 def _redact_access_log() -> None:
@@ -133,6 +144,13 @@ async def _dispatch(
         )
     if not _query_allowed(request.url.query):
         return _malformed(gateway, settings, trail, path, "query string is not allowed")
+    if not (request.method == "POST" and path in TRANSFORMED_PATHS):
+        blocked = _path_findings(request, settings, gateway, sessions)
+        if blocked:
+            return _malformed(
+                gateway, settings, trail, short_path(path),
+                f"request path contains sensitive data ({blocked})",
+            )
     if request.method in CONTENT_METHODS:
         if request.method == "POST" and path in TRANSFORMED_PATHS:
             if request.headers.get("content-encoding"):
@@ -159,6 +177,22 @@ async def _dispatch(
             gateway, request, settings, trail, path, "request must not carry a body"
         )
     return await _passthrough(request, raw, settings, client)
+
+
+def _path_findings(
+    request: Request, settings: ProxySettings, gateway: Any, sessions: OrderedDict[str, Any]
+) -> str:
+    """Classes found in the decoded path segments by the read-only scan, comma-joined."""
+    key = session_key_for(request.headers, None, settings)
+    if not is_valid_key(key):
+        return ""
+    leaves = [
+        TextRef(("path", index), segment)
+        for index, segment in enumerate(unquote(request.url.path).split("/"))
+        if segment and UUID_SEGMENT_RE.fullmatch(segment) is None
+    ]
+    hits = audit_trail.scan(_session_for(gateway, sessions, key), leaves) or []
+    return ", ".join(sorted({hit.data_class for hit in hits}))
 
 
 def _query_allowed(query: str) -> bool:
@@ -223,16 +257,6 @@ async def _transformed(
             recorder,
             include_system=include_system,
             notice=notice,
-        )
-    except KeyCollisionError:
-        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
-        unchecked = audit_trail.unchecked_refs(_transform, body, include_system)
-        observed = audit_trail.scan(session, audit_trail.unchecked_leaves(unchecked))
-        record("blocked", "fail", unchecked=unchecked, observed=observed)
-        return _error(
-            "privacy_gateway_key_collision",
-            "fail-closed: two object keys became equal after replacement",
-            422,
         )
     except LeakageError as exc:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
