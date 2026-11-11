@@ -91,11 +91,19 @@ DIALING_CODES = frozenset(
     | {"992", "993", "994", "995", "996", "998"}
 )
 MIN_PHONE_DIGITS = 8
+MIN_SUBSCRIBER_DIGITS = 5
+# Countries whose national numbers always have the same length (E.164, without trunk zero).
+NATIONAL_DIGITS = {
+    "1": 10, "31": 9, "33": 9, "34": 9, "41": 9, "48": 9, "90": 10, "420": 9,
+}
 MAX_PHONE_DIGITS = 15
 MAX_LABEL_LENGTH = 63
 IPV6 = 6
 MAX_IPV6_PREFIX = 128
 MAX_SLICE_DIGITS = 2
+MIN_HEX_ONLY_COLONS = 3
+MIN_HEX_ONLY_DIGITS = 8
+MIN_SCOPE_GROUP = 4
 MIN_LABELS = 2
 
 IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
@@ -104,8 +112,10 @@ MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
 PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
+PHONE_GROUP_SPLIT_RE = re.compile(r"[ ()/\-]+")
 TRUNK_ZERO_RE = re.compile(r"\(0\)")
 CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
+CODE_CALL_RE = re.compile(r"[A-Za-z_][\w.]*[(\[]")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
 DE_SSN_RE = re.compile(r"\d{2}\d{6}[A-Z]\d{3}")
 US_SSN_RE = re.compile(r"\d{9}")
@@ -178,11 +188,21 @@ def _parse_ip(s: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
 
 
 def _ipv6_plausible(base: str) -> bool:
-    """Reject `::`, scope operators like `a::b` or `::2` and anything without a decimal digit."""
-    if not any(char.isdigit() for char in base) or base == "::":
+    """Reject `::`, scope operators like `a1::b2` or `::2` and hex-only look-alikes like `a::b`."""
+    plain = base.split("%")[0]
+    if plain == "::":
         return False
-    digits = base.split("%")[0].replace(":", "")
-    return len(digits) > MAX_SLICE_DIGITS or base == "::1"
+    if plain == "::1":
+        return True
+    digits = plain.replace(":", "")
+    if len(digits) <= MAX_SLICE_DIGITS:
+        return False
+    if not any(char.isdigit() for char in plain):
+        return plain.count(":") >= MIN_HEX_ONLY_COLONS and len(digits) >= MIN_HEX_ONLY_DIGITS
+    if ":" not in plain.replace("::", ""):
+        left = plain.split("::")[0]
+        return left == "" or len(left) >= MIN_SCOPE_GROUP
+    return True
 
 
 def ip_scope(s: str) -> str | None:
@@ -237,14 +257,29 @@ def phone_valid(s: str) -> bool:
 
 
 def phone_international_valid(s: str) -> bool:
-    """E.164 shape: `+`, a known country code, 8 to 15 digits; `(0)` is not dialled."""
+    """E.164 shape in written form: `+`, a country code as its own group, then separated groups.
+
+    The country code is the first digit group and must be a known one. At least one separator
+    must follow it (`+4917123456789` is not recognised without a context word). The national part
+    has to look like a number: a fixed length for countries that have one, and at least five
+    digits after the first group, which keeps lists like `+255 255 255 0` out.
+    """
     value = s.strip()
     if PHONE_INTERNATIONAL_RE.fullmatch(value) is None:
         return False
-    digits = "".join(char for char in TRUNK_ZERO_RE.sub("", value) if char.isdigit())
-    if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
+    cleaned = TRUNK_ZERO_RE.sub(" ", value[1:])
+    groups = [group for group in PHONE_GROUP_SPLIT_RE.split(cleaned) if group]
+    if len(groups) < 2 or groups[0] not in DIALING_CODES:
         return False
-    return any(digits[:length] in DIALING_CODES for length in (1, 2, 3))
+    national = groups[1:]
+    digits = len(groups[0]) + sum(len(group) for group in national)
+    if not MIN_PHONE_DIGITS <= digits <= MAX_PHONE_DIGITS:
+        return False
+    national_digits = digits - len(groups[0])
+    if NATIONAL_DIGITS.get(groups[0], national_digits) != national_digits:
+        return False
+    subscriber = national[1:] or national
+    return sum(len(group) for group in subscriber) >= MIN_SUBSCRIBER_DIGITS
 
 
 def date_valid(s: str) -> bool:
@@ -313,7 +348,10 @@ def secret_has_digit(s: str) -> bool:
 
 
 def secret_value_valid(s: str) -> bool:
-    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`."""
+    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`
+    and no call or subscript such as `hashlib.sha256(data` or `os.environ[`."""
+    if CODE_CALL_RE.match(s) is not None:
+        return False
     return any(char.isdigit() for char in s) or CODE_REFERENCE_RE.fullmatch(s) is None
 
 

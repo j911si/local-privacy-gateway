@@ -13,6 +13,7 @@ from privacy_gateway.detect.validators import (
     luhn_valid,
     mac_valid,
     phone_valid,
+    secret_value_valid,
     ssn_valid,
     tax_id_valid,
     vin_valid,
@@ -200,3 +201,12 @@ def test_fqdn_accepts_dotted_host_names_in_any_case(value: str) -> None:
 )
 def test_fqdn_rejects_file_names_single_labels_and_bad_shapes(value: str) -> None:
     assert fqdn_valid(value) is False
+
+
+@pytest.mark.parametrize("value", ["hashlib.sha256(data", "os.environ[", "generate_csrf(", "get1("])
+def test_secret_value_rejects_calls_and_subscripts_even_with_digits(value: str) -> None:
+    assert not secret_value_valid(value)
+
+
+def test_secret_value_accepts_a_random_string() -> None:
+    assert secret_value_valid("Zm9vYmFyYmF6cXV4MTIz")
