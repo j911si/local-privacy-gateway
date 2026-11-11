@@ -55,7 +55,7 @@ DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 LOGGED_SEGMENTS = 2
-UUID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\d+")
 
 _transform: Any
 _stream_restorer_factory: Any
@@ -189,7 +189,7 @@ def _path_findings(
     leaves = [
         TextRef(("path", index), segment)
         for index, segment in enumerate(unquote(request.url.path).split("/"))
-        if segment and UUID_SEGMENT_RE.fullmatch(segment) is None
+        if segment and ID_SEGMENT_RE.fullmatch(segment) is None
     ]
     hits = audit_trail.scan(_session_for(gateway, sessions, key), leaves) or []
     return ", ".join(sorted({hit.data_class for hit in hits}))

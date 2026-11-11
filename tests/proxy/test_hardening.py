@@ -709,6 +709,7 @@ KNOWN_PATHS = [
     ("GET", "/v1/messages/msg_01AbCdEfGhIjKlMnOpQrStUv"),
     ("GET", "/v1/organizations/0b1c2d3e-1111-2222-3333-444444444444"),
     ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions"),
+    ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions/1759178010641129"),
 ]
 
 
