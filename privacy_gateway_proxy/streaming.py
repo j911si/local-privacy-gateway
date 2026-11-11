@@ -11,7 +11,10 @@ from typing import Any
 from privacy_gateway_proxy.transform import restore_json as _restore_json
 
 _SEPARATOR = re.compile(rb"\r?\n\r?\n")
-_HOLDBACK = re.compile(r"(?:<[^>\s]{0,80}|[A-Z][A-Z_]{0,72}(?:_\d{0,2})?)$")
+_HOLDBACK = re.compile(
+    r"[`\"']?(?:<[^>\s]{0,80}|[A-Z][A-Z0-9_]{0,72}(?:_\d{0,2})?)$"
+    r"|(?P<q>[`\"'])(?:[A-Za-z][A-Za-z0-9_]{0,72}(?P=q)?)?$"
+)
 
 
 @dataclass
