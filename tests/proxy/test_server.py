@@ -334,6 +334,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
                 "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
                 "user-agent": "claude-cli/2.0.0",
                 "x-unknown-header": "keep-me",
+                "x-pgw-session": "abc",
                 "accept-encoding": "gzip",
             },
         )
@@ -345,6 +346,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
     assert headers["anthropic-beta"] == "claude-code-20250219,oauth-2025-04-20"
     assert headers["user-agent"] == "claude-cli/2.0.0"
     assert headers["x-unknown-header"] == "keep-me"
+    assert "x-pgw-session" not in headers
     assert headers["accept-encoding"] == "identity"
     assert headers["host"] == "upstream.test"
     assert headers["content-length"] == str(len(seen[0].content))

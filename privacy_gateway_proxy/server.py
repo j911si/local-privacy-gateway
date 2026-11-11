@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -22,10 +23,16 @@ from privacy_gateway.audit import RequestAuditLog
 from privacy_gateway.model import LeakageError
 from privacy_gateway_proxy import audit_trail
 from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
-from privacy_gateway_proxy.settings import ProxySettings, audit_dir_for, is_loopback
+from privacy_gateway_proxy.settings import (
+    ProxySettings,
+    audit_dir_for,
+    is_loopback,
+    is_normal_path,
+)
 
 TRANSFORMED_PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
-MESSAGES_PREFIX = "/v1/messages"
+CONTENT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+AUTH_HEADER = "x-pgw-auth"
 MAX_BODY_BYTES = 32 * 1024 * 1024
 PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 REQUEST_DROP_HEADERS = {
@@ -34,6 +41,8 @@ REQUEST_DROP_HEADERS = {
     "connection",
     "transfer-encoding",
     "accept-encoding",
+    "x-pgw-session",
+    AUTH_HEADER,
 }
 RESPONSE_DROP_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 UPSTREAM_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
@@ -92,16 +101,51 @@ async def _dispatch(
 ) -> Response:
     if is_loopback(settings.listen_host) and not _host_allowed(request.headers.get("host", "")):
         return _error("privacy_gateway_forbidden", "host header is not loopback", 403)
+    if not _authorized(request, settings):
+        return _error("privacy_gateway_unauthorized", "missing or wrong auth token", 401)
     raw = await request.body()
     if len(raw) > MAX_BODY_BYTES:
         return _error("privacy_gateway_too_large", "request body is too large", 413)
-    if request.method == "POST" and request.url.path.startswith(MESSAGES_PREFIX):
-        encoded = bool(request.headers.get("content-encoding"))
-        body = None if encoded else _parse_json(raw)
-        if not isinstance(body, dict) or request.url.path not in TRANSFORMED_PATHS:
-            return _rejected(gateway, request, settings, trail)
-        return await _transformed(request, body, settings, gateway, client, sessions, trail)
+    path = _normal_path(request)
+    if path is None:
+        return _rejected(
+            gateway, request, settings, trail, "-", "request path is not in normal form", 400
+        )
+    if request.method in CONTENT_METHODS:
+        if request.method == "POST" and path in TRANSFORMED_PATHS:
+            encoded = bool(request.headers.get("content-encoding"))
+            body = None if encoded else _parse_json(raw)
+            if not isinstance(body, dict):
+                return _rejected(
+                    gateway, request, settings, trail, path,
+                    "request body is not a transformable JSON object",
+                )
+            return await _transformed(request, body, settings, gateway, client, sessions, trail)
+        if path not in settings.passthrough_paths:
+            return _rejected(
+                gateway, request, settings, trail, path,
+                "request method or path is not allowed",
+            )
+    elif raw:
+        return _rejected(
+            gateway, request, settings, trail, path, "request must not carry a body"
+        )
     return await _passthrough(request, raw, settings, client)
+
+
+def _authorized(request: Request, settings: ProxySettings) -> bool:
+    if not settings.auth_token:
+        return True
+    given = request.headers.get(AUTH_HEADER, "").encode("utf-8")
+    return hmac.compare_digest(given, settings.auth_token.encode("utf-8"))
+
+
+def _normal_path(request: Request) -> str | None:
+    """The request path when raw and decoded form agree and are normal, else None."""
+    raw_path = request.scope.get("raw_path")
+    raw = raw_path.decode("latin-1") if raw_path else request.url.path
+    path = request.url.path
+    return path if raw == path and is_normal_path(path) else None
 
 
 async def _transformed(
@@ -165,7 +209,7 @@ async def _transformed(
         "POST",
         _upstream_url(request, settings),
         content=payload,
-        headers=_request_headers(request.headers, len(payload)),
+        headers=_request_headers(request.headers, len(payload), settings),
     )
     try:
         response = await client.send(upstream_request, stream=True)
@@ -237,7 +281,7 @@ async def _passthrough(
         request.method,
         _upstream_url(request, settings),
         content=raw or None,
-        headers=_request_headers(request.headers, len(raw) if raw else None),
+        headers=_request_headers(request.headers, len(raw) if raw else None, settings),
     )
     try:
         response = await client.send(upstream_request, stream=True)
@@ -338,12 +382,11 @@ def _upstream_url(request: Request, settings: ProxySettings) -> str:
     return f"{url}?{query}" if query else url
 
 
-def _request_headers(headers: Mapping[str, str], content_length: int | None) -> dict[str, str]:
-    forwarded = {
-        name: value
-        for name, value in headers.items()
-        if name.lower() not in REQUEST_DROP_HEADERS
-    }
+def _request_headers(
+    headers: Mapping[str, str], content_length: int | None, settings: ProxySettings
+) -> dict[str, str]:
+    dropped = REQUEST_DROP_HEADERS | {settings.header_name.lower()}
+    forwarded = {name: value for name, value in headers.items() if name.lower() not in dropped}
     forwarded["accept-encoding"] = "identity"
     if content_length is not None:
         forwarded["content-length"] = str(content_length)
@@ -358,7 +401,6 @@ def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-# ponytail: kein Auth-Token; ergänzen, wenn mehrere lokale Accounts den Proxy teilen
 def _host_allowed(value: str) -> bool:
     host = value.strip().lower()
     if host.startswith("["):
@@ -375,18 +417,19 @@ def _error(kind: str, message: str, status: int) -> Response:
 
 
 def _rejected(
-    gateway: Any, request: Request, settings: ProxySettings, trail: RequestAuditLog
+    gateway: Any,
+    request: Request,
+    settings: ProxySettings,
+    trail: RequestAuditLog,
+    path: str,
+    message: str,
+    status: int = 422,
 ) -> Response:
-    """Refuse a `/v1/messages` POST the proxy cannot transform, without an upstream call."""
+    """Refuse a request the proxy must not forward, without an upstream call."""
     started = time.perf_counter()
-    _audit(
-        gateway, "-", request.url.path, 0, None, "rejected", False,
-        started, settings.transform_system,
-    )
-    _record(trail, "-", request.url.path, False, started, "error", "ok", [], None)
-    return _error(
-        "privacy_gateway_rejected", "request body is not a transformable JSON object", 422
-    )
+    _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
+    _record(trail, "-", path, False, started, "error", "ok", [], None)
+    return _error("privacy_gateway_rejected", message, status)
 
 
 def _leak_response(exc: LeakageError) -> Response:

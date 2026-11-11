@@ -28,7 +28,7 @@ RestartSec=10
 # Loopback is the safe default: the Host header check stays on.
 Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
 # Binding to a non-loopback address turns the Host header check off (the proxy
-# logs a warning at startup) and the proxy has no auth token. Only bind to an
+# logs a warning at startup) and, without PGW_PROXY_AUTH_TOKEN_FILE, has no auth token. Only bind to an
 # address that nothing but trusted devices can reach, for example the address
 # of a private VPN interface. Never bind to 0.0.0.0.
 # Environment=PGW_PROXY_LISTEN=<vpn-interface-address>:8787
@@ -48,6 +48,9 @@ Environment=PGW_AUDIT_LOG_DIR=%h/.local/state/privacy-gateway/audit
 Environment=PYTHONDONTWRITEBYTECODE=1
 # Uncomment when the client logs in with OAuth instead of an API key:
 # Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
+# Auth token: keep it in a file with mode 0600, never in this unit. Clients send it as the
+# header x-pgw-auth. A file that group or others can read stops the proxy at start.
+# Environment=PGW_PROXY_AUTH_TOKEN_FILE=%h/.config/privacy-gateway/proxy-auth-token
 
 # Hardening that works in the user manager without extra privileges.
 UMask=0077

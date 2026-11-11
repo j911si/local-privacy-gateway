@@ -269,7 +269,10 @@ stored token is lost.
 | `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
 | `PGW_PROXY_PLACEHOLDER_NOTICE` | `1` | `0`/`false`/`no`/`off` suppresses the short notice that explains the placeholder format to the model. |
 | `PGW_PROXY_DEBUG_DIR` | unset | Directory for one JSON dump per transformed request (mode `0600` in a `0700` directory). Contains the **pseudonymized** body. |
-| `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take. Past it the request fails with 503 and nothing is sent. |
+| `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take; must be finite and above zero. Past it the request fails with 503 and nothing is sent. |
+| `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
+| `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
+| `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
 
 ---
@@ -589,6 +592,8 @@ Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
 Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
 # Uncomment when the client logs in with OAuth instead of an API key:
 # Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
+# Auth token (mode 0600 file, never the token itself in this unit):
+# Environment=PGW_PROXY_AUTH_TOKEN_FILE=%h/.config/privacy-gateway/proxy-auth-token
 
 [Install]
 WantedBy=default.target
@@ -811,9 +816,11 @@ Limits of this setup:
 | Code | `error.type` | When |
 |---|---|---|
 | 400 | `privacy_gateway_session` | The session key does not match `[A-Za-z0-9._-]{1,64}`. |
+| 400 | `privacy_gateway_rejected` | The path is not in normal form: dot segments, `//` or percent-encoded characters. Nothing is sent upstream. |
+| 401 | `privacy_gateway_unauthorized` | `PGW_PROXY_AUTH_TOKEN` is set and `x-pgw-auth` is missing or wrong. Nothing is sent upstream. |
 | 403 | `privacy_gateway_forbidden` | `Host` header is not loopback while bound to loopback. |
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
-| 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: unparsable body, non-object body, `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Nothing is sent upstream. |
+| 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: unparsable body, non-object body, `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Also any `POST`/`PUT`/`PATCH`/`DELETE` to another path not listed in `PGW_PROXY_PASSTHROUGH_PATHS`, and a `GET`/`HEAD`/`OPTIONS` with a body. Nothing is sent upstream. |
 | 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 | 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |

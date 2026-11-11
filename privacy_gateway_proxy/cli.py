@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from privacy_gateway.model import PrivacyGatewayError
+from privacy_gateway.model import ConfigError, PrivacyGatewayError
 from privacy_gateway_proxy import launchd
 from privacy_gateway_proxy.settings import ProxySettings, is_loopback, load_settings, parse_listen
 
@@ -34,6 +34,11 @@ def program_args(repo_root: Path = REPO_ROOT) -> list[str]:
 
 def launchd_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The `PGW_*` variables of the installing shell, plus `PATH` so `uv` is found."""
+    if environ.get("PGW_PROXY_AUTH_TOKEN"):
+        raise ConfigError(
+            "PGW_PROXY_AUTH_TOKEN would be written to the plist in plain text; "
+            "put the token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE instead"
+        )
     env = {name: value for name, value in environ.items() if name.startswith("PGW_")}
     path = environ.get("PATH")
     if path is not None:
@@ -57,7 +62,7 @@ def log_startup(settings: ProxySettings) -> None:
     log = logging.getLogger("privacy_gateway_proxy")
     log.info(
         "settings listen=%s:%s upstream=%s transform_system=%s placeholder_notice=%s "
-        "debug_dir=%s debug_originals=%s",
+        "debug_dir=%s debug_originals=%s auth_token=%s",
         settings.listen_host,
         settings.listen_port,
         settings.upstream_base_url,
@@ -65,12 +70,15 @@ def log_startup(settings: ProxySettings) -> None:
         settings.placeholder_notice,
         settings.debug_dir,
         settings.debug_originals,
+        "set" if settings.auth_token else "unset",
     )
     if not is_loopback(settings.listen_host):
         log.warning(
             "listening on the non-loopback address %s: the host header check is off",
             settings.listen_host,
         )
+        if not settings.auth_token:
+            log.warning("listening on a non-loopback address with no auth token")
 
 
 def _serve(args: argparse.Namespace) -> int:
