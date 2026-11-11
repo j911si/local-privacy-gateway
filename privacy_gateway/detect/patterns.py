@@ -114,6 +114,8 @@ def _at_line_start(text: str, start: int) -> bool:
 
 
 def _span_of(match: re.Match[str]) -> Span:
+    if "value" in match.re.groupindex:
+        return Span(*match.span("value"))
     if match.re.groups >= 1 and match.group(1) is not None:
         return Span(*match.span(1))
     return Span(*match.span(0))
@@ -151,7 +153,8 @@ class PatternStage:
         value = text[span.start : span.end]
         if data_class.name == GENERIC_ID_CLASS and _is_standard_reference(value):
             return []
-        if validator is not None and not validator(value):
+        labelled = "label" in match.re.groupindex and match.group("label") is not None
+        if validator is not None and not labelled and not validator(value):
             return []
         if (
             data_class.name == PHONE_INTERNATIONAL_CLASS
@@ -160,7 +163,7 @@ class PatternStage:
         ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)
-        if data_class.context_required and not has_context:
+        if data_class.context_required and not has_context and not labelled:
             return []
         confidence = VALIDATED_CONFIDENCE if validator is not None else BASE_CONFIDENCE
         if has_context:
