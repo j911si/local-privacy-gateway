@@ -157,3 +157,26 @@ def test_text_without_ipv6_is_unchanged(gateway: Gateway) -> None:
     text = "std::vector<int> v; x = a[::2]; Zeit 12:30:45; MAC aa:bb:cc:dd:ee:ff?"
     result = gateway.pseudonymize(text)
     assert "std::vector<int>" in result.text and "a[::2]" in result.text
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("resolver dead:beef::cafe antwortet nicht", "dead:beef::cafe"),
+        ("2a02:8108:8ac0:5d00:a1b2:c3d4:e5f6:7890:443 timeout", "2a02:8108:8ac0:5d00:a1b2:c3d4:e5f6:7890"),
+    ],
+)
+def test_hex_only_address_and_full_address_with_a_port_are_found(
+    default_config: Config, text: str, value: str
+) -> None:
+    assert stage_values(text, default_config) == [value]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["namespace a1::b2 {", "c::f1()", "Typ A::B2C", "dead::beef", "Face::Cafe", "ab::cd"],
+)
+def test_two_short_names_around_a_scope_operator_are_no_ipv6(
+    default_config: Config, text: str
+) -> None:
+    assert pipeline_ip_values(text, default_config) == []

@@ -101,6 +101,9 @@ MAX_LABEL_LENGTH = 63
 IPV6 = 6
 MAX_IPV6_PREFIX = 128
 MAX_SLICE_DIGITS = 2
+MIN_HEX_ONLY_COLONS = 3
+MIN_HEX_ONLY_DIGITS = 8
+MIN_SCOPE_GROUP = 4
 MIN_LABELS = 2
 
 IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
@@ -185,11 +188,21 @@ def _parse_ip(s: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
 
 
 def _ipv6_plausible(base: str) -> bool:
-    """Reject `::`, scope operators like `a::b` or `::2` and anything without a decimal digit."""
-    if not any(char.isdigit() for char in base) or base == "::":
+    """Reject `::`, scope operators like `a1::b2` or `::2` and hex-only look-alikes like `a::b`."""
+    plain = base.split("%")[0]
+    if plain == "::":
         return False
-    digits = base.split("%")[0].replace(":", "")
-    return len(digits) > MAX_SLICE_DIGITS or base == "::1"
+    if plain == "::1":
+        return True
+    digits = plain.replace(":", "")
+    if len(digits) <= MAX_SLICE_DIGITS:
+        return False
+    if not any(char.isdigit() for char in plain):
+        return plain.count(":") >= MIN_HEX_ONLY_COLONS and len(digits) >= MIN_HEX_ONLY_DIGITS
+    if ":" not in plain.replace("::", ""):
+        left = plain.split("::")[0]
+        return left == "" or len(left) >= MIN_SCOPE_GROUP
+    return True
 
 
 def ip_scope(s: str) -> str | None:
