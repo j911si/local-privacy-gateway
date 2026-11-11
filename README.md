@@ -907,8 +907,20 @@ Each line lists every field of the request:
   `original_value` (a value the session stored is still in the text), `residual_finding` (the
   detection finds something that is not a token) or `unknown_token` (a token this session never
   issued).
-- `verdict` is `ok`, `blocked` or `error` (upstream connection failed, rescan timeout, or the
-  body was rejected).
+- `verdict` is `ok`, `ok_with_unchecked_findings`, `blocked` or `error` (upstream connection
+  failed, rescan timeout, or a request was rejected). `ok_with_unchecked_findings` means nothing
+  was blocked, but the read-only scan found something in at least one unchecked field (`tools`,
+  `metadata`, an untransformed system prompt, images, thinking, unknown blocks); look at the
+  `observed` lists of the `unchecked` fields. A request with a body that is not a JSON object, a
+  wrong basic form (`messages`, a message, `content`, a block, `system`) or a query string outside
+  the allowed parameters gets HTTP 400 (`invalid_request_error`) and `verdict: blocked`.
+- The keys of the objects inside `tool_use.input` are checked like values. A key field has the
+  path of its object plus `{n}#key`; objects are addressed by position, so a key never appears in
+  a path. If two keys of one object become equal after replacement the request gets HTTP 422
+  (`privacy_gateway_key_collision`) and `verdict: blocked`.
+- Query strings are forwarded only with the parameters `beta`, `limit`, `before_id` and `after_id`
+  and values of letters, digits and `_.:-` (up to 128 characters); anything else is refused with
+  HTTP 400. The access log of uvicorn never shows the query.
 
 `session` is the first 12 hex characters of `sha256(session_key)`. Values, parts of values and
 error texts never appear.
