@@ -74,6 +74,9 @@ FILE_EXTENSIONS = frozenset(
 )
 
 MAX_LABEL_LENGTH = 63
+IPV6 = 6
+MAX_IPV6_PREFIX = 128
+MAX_SLICE_DIGITS = 2
 MIN_LABELS = 2
 
 IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
@@ -139,11 +142,32 @@ def bic_valid(s: str) -> bool:
     return compact[4:6] in COUNTRY_CODES
 
 
+def _parse_ip(s: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse an address; an IPv6 may carry a zone id and a /prefix, a look-alike is rejected."""
+    base, slash, prefix = s.strip().partition("/")
+    if slash and (":" not in base or not prefix.isdigit() or int(prefix) > MAX_IPV6_PREFIX):
+        return None
+    try:
+        address = ipaddress.ip_address(base)
+    except ValueError:
+        return None
+    if address.version == IPV6 and not _ipv6_plausible(base):
+        return None
+    return address
+
+
+def _ipv6_plausible(base: str) -> bool:
+    """Reject `::`, scope operators like `a::b` or `::2` and anything without a decimal digit."""
+    if not any(char.isdigit() for char in base) or base == "::":
+        return False
+    digits = base.split("%")[0].replace(":", "")
+    return len(digits) > MAX_SLICE_DIGITS or base == "::1"
+
+
 def ip_scope(s: str) -> str | None:
     """Return "private", "public" or None when the address is invalid."""
-    try:
-        address = ipaddress.ip_address(s.strip())
-    except ValueError:
+    address = _parse_ip(s)
+    if address is None:
         return None
     for network in PRIVATE_NETWORKS:
         if address.version == network.version and address in network:
