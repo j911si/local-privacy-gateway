@@ -98,7 +98,7 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Values never appear in findings, reports, audit events or exception messages — only class names,
   spans and counts.
 - Commit per task with a conventional message; end the body with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`.
 
 ## Documentation
 
