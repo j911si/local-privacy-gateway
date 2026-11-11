@@ -446,7 +446,8 @@ classes:
   API_KEY:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\b(?:api[_-]?key|x-api-key)["'']?\s*[:=]\s*["'']?([A-Za-z0-9_\-]{16,})']
+    patterns: ['(?i)(?<![A-Za-z0-9])(?:api|access|account|shared[_-]?access)[_-]?key["'']?[ \t]*[:=][ \t]*["'']?(?![/.])([A-Za-z0-9_\-.+/=~]{15,}[A-Za-z0-9_\-+/=~])']
+    validator: secret_value
   ANTHROPIC_API_KEY:
     category: SECRET
     policy: redact
@@ -462,18 +463,19 @@ classes:
   API_SECRET:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\bapi[_-]?secret\s*[:=]\s*["'']?([A-Za-z0-9_\-]{12,})']
+    patterns: ['(?i)(?<![A-Za-z0-9])(?<!client[_-])(?:api[_-]?)?secret(?:[_-]?key)?["'']?[ \t]*[:=][ \t]*["'']?(?![/.])([A-Za-z0-9_\-.+/=~]{11,}[A-Za-z0-9_\-+/=~])']
+    validator: secret_value
   CLIENT_SECRET:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\bclient[_-]?secret\s*[:=]\s*["'']?([A-Za-z0-9_\-~.]{12,})']
+    patterns: ['(?i)(?<![A-Za-z0-9])client[_-]?secret["'']?[ \t]*[:=][ \t]*["'']?(?![/.])([A-Za-z0-9_\-.+/=~]{11,}[A-Za-z0-9_\-+/=~])']
   PASSWORD:
     category: SECRET
     policy: redact
     patterns:
-      - '(?i)\b(?:password|passwd|pwd|kennwort|passwort)["'']?\s*[:=]\s*"([^"\n]{4,})"'
-      - '(?i)\b(?:password|passwd|pwd|kennwort|passwort)["'']?\s*[:=]\s*''([^''\n]{4,})'''
-      - '(?i)\b(?:password|passwd|pwd|kennwort|passwort)["'']?\s*[:=]\s*(?!["''])(\S[^\n]{3,}?)\s*[.,;:)\]]*$'
+      - '(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|kennwort|passwort)["'']?[ \t]*[:=][ \t]*"([^"\n]{4,})"'
+      - '(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|kennwort|passwort)["'']?[ \t]*[:=][ \t]*''([^''\n]{4,})'''
+      - '(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|kennwort|passwort)["'']?[ \t]*[:=][ \t]*(?!["'']|\$|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|optional|secretstr)\b|[\w.]+[(\[])(\S[^\n]{3,}?)[ \t]*[.,;:)\]]*$'
   PIN:
     category: SECRET
     policy: redact
@@ -491,11 +493,12 @@ classes:
     policy: redact
     patterns:
       - '(?i)bearer\s+([A-Za-z0-9._\-]{16,})'
-      - '(?i)access[_-]?token\s*[:=]\s*["'']?([A-Za-z0-9._\-]{16,})'
+      - '(?i)(?<![A-Za-z0-9])(?<!refresh[_-])(?<!csrf[_-])(?<!xsrf[_-])(?:access[_-]?)?token["'']?[ \t]*[:=][ \t]*["'']?(?![/.])(?![A-Za-z_]+(?:\.[A-Za-z_]+)+(?![\w\-.+/=~])|[a-z]+(?:_[a-z]+)+(?![\w\-.+/=~]))([A-Za-z0-9_\-.+/=~]{15,}[A-Za-z0-9_\-+/=~])'
   REFRESH_TOKEN:
     category: SECRET
     policy: redact
-    patterns: ['(?i)refresh[_-]?token\s*[:=]\s*["'']?([A-Za-z0-9._\-]{16,})']
+    validator: secret_value
+    patterns: ['(?i)(?<![A-Za-z0-9])refresh[_-]?token["'']?[ \t]*[:=][ \t]*["'']?(?![/.])([A-Za-z0-9_\-.+/=~]{15,}[A-Za-z0-9_\-+/=~])']
   JWT:
     category: SECRET
     policy: redact
@@ -507,7 +510,7 @@ classes:
   SESSION_ID:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\b(?:session[_-]?id|sessionid|jsessionid|phpsessid)\s*[:=]\s*["'']?([A-Za-z0-9._\-]{8,})']
+    patterns: ['(?i)(?<![A-Za-z0-9])(?:session[_-]?id|sessionid|jsessionid|phpsessid)\s*[:=]\s*["'']?([A-Za-z0-9._\-]{8,})']
   SESSION_COOKIE:
     category: SECRET
     policy: redact
@@ -517,10 +520,12 @@ classes:
   CSRF_TOKEN:
     category: SECRET
     policy: redact
-    patterns: ['(?i)\b(?:csrf[_-]?token|x-csrf-token|_csrf)\s*[:=]\s*["'']?([A-Za-z0-9._\-]{8,})']
+    patterns: ['(?i)(?<![A-Za-z0-9])(?:csrf[_-]?token|x-csrf-token|_csrf)\s*[:=]\s*["'']?([A-Za-z0-9._\-]{8,})']
   PRIVATE_KEY:
     category: SECRET
     policy: redact
+    patterns: ['(?i)(?<![A-Za-z0-9])private[_-]?key["'']?[ \t]*[:=][ \t]*["'']?(?!-{3})(?![/.])([A-Za-z0-9_\-.+/=~]{15,}[A-Za-z0-9_\-+/=~])']
+    validator: secret_value
   SSH_PRIVATE_KEY:
     category: SECRET
     policy: redact

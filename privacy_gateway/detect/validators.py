@@ -81,6 +81,7 @@ BIC_RE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
 MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}")
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
+CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
 DE_SSN_RE = re.compile(r"\d{2}\d{6}[A-Z]\d{3}")
 US_SSN_RE = re.compile(r"\d{9}")
@@ -255,6 +256,11 @@ def secret_has_digit(s: str) -> bool:
     return any(char.isdigit() for char in s)
 
 
+def secret_value_valid(s: str) -> bool:
+    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`."""
+    return any(char.isdigit() for char in s) or CODE_REFERENCE_RE.fullmatch(s) is None
+
+
 VALIDATORS: dict[str, Callable[[str], bool]] = {
     "luhn": luhn_valid,
     "iban": iban_valid,
@@ -268,4 +274,5 @@ VALIDATORS: dict[str, Callable[[str], bool]] = {
     "ssn": ssn_valid,
     "fqdn": fqdn_valid,
     "secret_digit": secret_has_digit,
+    "secret_value": secret_value_valid,
 }

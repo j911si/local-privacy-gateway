@@ -31,6 +31,7 @@ EXPECTED_KEYS = {
     "ssn",
     "fqdn",
     "secret_digit",
+    "secret_value",
 }
 
 
