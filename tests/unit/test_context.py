@@ -67,6 +67,19 @@ def test_male_salutation_with_academic_title(default_config: Config) -> None:
     assert last_name[0].attributes["gender"] == "male"
 
 
+def test_a_one_or_two_letter_name_after_a_salutation_is_not_learned(
+    default_config: Config,
+) -> None:
+    text = "Herr Li und Frau Ng schrieben, Frau Müller antwortete."
+    findings = detect(text, default_config)
+    assert [value_of(text, f) for f in of_class(findings, "PERSON_LAST_NAME")] == ["Müller"]
+    assert [value_of(text, f) for f in of_class(findings, "SALUTATION")] == [
+        "Herr",
+        "Frau",
+        "Frau",
+    ]
+
+
 def test_two_token_name_becomes_full_name(default_config: Config) -> None:
     text = "Sehr geehrter Herr Max Mustermann,"
     findings = detect(text, default_config)

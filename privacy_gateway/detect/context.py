@@ -171,6 +171,7 @@ HEALTH_MARKERS = (
 HEALTH_MARKER_WINDOW = 60
 SENTENCE_BOUNDARIES = ".\n"
 
+MIN_SALUTATION_NAME_LENGTH = 3
 SALUTATION_RE = re.compile(
     r"(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
     r"\b(Frau|Herr|Herrn|Mrs\.?|Mr\.?|Ms\.?|Mx\.?)\s+"
@@ -346,6 +347,8 @@ class ContextStage:
                 )
             name_span = _group_span(text, match, 3)
             name = text[name_span.start : name_span.end]
+            if len(name) < MIN_SALUTATION_NAME_LENGTH:
+                continue
             data_class = "PERSON_FULL_NAME" if " " in name else "PERSON_LAST_NAME"
             self._emit(config, out, name_span, data_class, 0.95, attributes)
 
