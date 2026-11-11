@@ -58,6 +58,12 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.
 - Gender comes only from an explicit salutation word or from config, never from a first name.
+- `detect/session.py:known_forms` is the one derivation of a session's known values, used by
+  `GatewaySession._known` and `leakage.check_leakage` alike. It adds the first and last word of
+  every `PERSON_FULL_NAME` as exact, whole-word forms (`KnownForms.exact`,
+  `context.learnable_name_part` decides); `SubstringSweep` skips them.
+- A pattern with the named groups `label` and `value` skips the class validator and
+  `context_required`, and `value` is the span (`TAX_ID` behind `Steuer-ID:`).
 - Policies, patterns, validators, context words and dictionaries live in
   `privacy_gateway/data/default_config.yaml`; user YAML overrides it field by field.
 - Network code lives **only** in `privacy_gateway_proxy/` (`transform` and `streaming` are pure,
