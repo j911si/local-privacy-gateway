@@ -28,19 +28,13 @@ EXACT = [
     "host_db01.intern.kanzlei-sommerfeld.de_key",
 ]
 
-# The text already differs before the model sees it (a detected span swallowed "Rechnung" or the
-# genitive "s", one token stands for several spellings), so only the canonical value comes back.
-CANONICAL = [
-    ("mv Rechnung48151623.pdf /home/annika/archiv/", "mv 48151623.pdf /home/annika/archiv/"),
-    ("ls /home/annika/Annika/ANNIKA", "ls /home/annika/annika/annika"),
-    (
-        "scp x annika@192.168.178.23:/home/annika/annikas-ordner/",
-        "scp x annika@192.168.178.23:/home/annika/annika-ordner/",
-    ),
-    (
-        "IBAN=DE02120300000000202051; iban_fmt='DE02 1203 0000 0000 2020 51'",
-        "IBAN=DE02 1203 0000 0000 2020 51; iban_fmt='DE02 1203 0000 0000 2020 51'",
-    ),
+# Another spelling of a known value gets a token of its own, so these come back byte-identical too.
+SPELLINGS = [
+    "mv Rechnung48151623.pdf /home/annika/archiv/",
+    "ls /home/annika/Annika/ANNIKA",
+    "scp x annika@192.168.178.23:/home/annika/annikas-ordner/",
+    "IBAN=DE02120300000000202051; iban_fmt='DE02 1203 0000 0000 2020 51'",
+    "sed -i 's/annika/Annika/g' /home/annika/a.txt",
 ]
 
 
@@ -65,8 +59,6 @@ def test_string_comes_back_byte_identical(gateway: Gateway, text: str) -> None:
     assert _echo(gateway, text) == text
 
 
-@pytest.mark.parametrize(("text", "expected"), CANONICAL)
-def test_string_comes_back_with_canonical_values(
-    gateway: Gateway, text: str, expected: str
-) -> None:
-    assert _echo(gateway, text) == expected
+@pytest.mark.parametrize("text", SPELLINGS)
+def test_another_spelling_comes_back_byte_identical(gateway: Gateway, text: str) -> None:
+    assert _echo(gateway, text) == text

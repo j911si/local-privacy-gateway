@@ -106,10 +106,10 @@ def test_lenient_result_does_not_depend_on_how_often_or_in_which_order_tokens_co
     assert reordered.restored_count == 3
 
 
-def test_strict_keeps_the_spellings_of_the_unchanged_text_in_order() -> None:
+def test_strict_ignores_the_recorded_surface_forms() -> None:
     text = "<PERSON_001> <PERSON_001> <PERSON_001> <PERSON_001>"
 
-    assert restore_text(text, SPELLINGS, STRICT).text == "annika Annika ANNIKA annika"
+    assert restore_text(text, SPELLINGS, STRICT).text == "annika annika annika annika"
 
 
 _CHARS = st.text(alphabet=st.characters(blacklist_categories=("Cs",)), max_size=12)

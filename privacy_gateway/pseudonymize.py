@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from dataclasses import dataclass, field
 
 from privacy_gateway.classes import PERSON_LABEL, ClassRegistry, Policy
@@ -15,7 +13,6 @@ from privacy_gateway.tokens import NUMBERED_TOKEN
 GENDER_SUFFIXES = ("female", "male")
 REUSED_ATTRIBUTE = "reused"
 
-_WHITESPACE = re.compile(r"\s+")
 _GENDER_LABELS = tuple(f"{PERSON_LABEL}_{suffix.upper()}" for suffix in GENDER_SUFFIXES)
 
 
@@ -36,10 +33,6 @@ class PseudonymizedText:
 
     text: str
     assignments: list[TokenAssignment]
-
-
-def _normalize(value: str) -> str:
-    return _WHITESPACE.sub(" ", unicodedata.normalize("NFKC", value).casefold()).strip()
 
 
 def _attributes_for(finding: Finding, report: DetectionReport) -> dict[str, str]:
@@ -79,19 +72,12 @@ def _allocate_token(
     return f"<{label}_{number:03d}>"
 
 
-def _entity_key(text: str, finding: Finding) -> object:
+def _key(text: str, finding: Finding) -> tuple[str | None, str, str]:
+    """One token per entity and exact spelling, so the token restores to those exact bytes."""
+    spelling = text[finding.span.start : finding.span.end]
     if finding.entity_id is not None:
-        return finding.entity_id
-    return (finding.data_class, _normalize(text[finding.span.start : finding.span.end]))
-
-
-def _known_tokens(text: str, report: DetectionReport) -> dict[object, str]:
-    tokens: dict[object, str] = {}
-    for finding in report.findings:
-        token = finding.attributes.get(TOKEN_ATTRIBUTE)
-        if token is not None:
-            tokens.setdefault(_entity_key(text, finding), token)
-    return tokens
+        return (finding.entity_id, "", spelling)
+    return (None, finding.data_class, spelling)
 
 
 def pseudonymize_text(
@@ -104,9 +90,8 @@ def pseudonymize_text(
     """Rewrite every non-ignored finding into a token or a redaction marker."""
     registry = config.registry
     counters = {} if counters is None else counters
-    known_tokens = _known_tokens(text, report)
     reserved = _reserved_numbers(text)
-    by_key: dict[object, TokenAssignment] = {}
+    by_key: dict[tuple[str | None, str, str], TokenAssignment] = {}
     assignments: list[TokenAssignment] = []
     replacements: list[tuple[Span, str]] = []
 
@@ -118,10 +103,10 @@ def pseudonymize_text(
             replacements.append((finding.span, f"<{data_class.name}_REDACTED>"))
             continue
         attributes = _attributes_for(finding, report)
-        key = _entity_key(text, finding)
+        key = _key(text, finding)
         assignment = by_key.get(key)
         if assignment is None:
-            token = known_tokens.get(key)
+            token = finding.attributes.get(TOKEN_ATTRIBUTE)
             if token is None:
                 token = _allocate_token(
                     registry, data_class.name, attributes, counters, reserved

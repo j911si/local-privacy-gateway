@@ -220,18 +220,19 @@ def test_text_without_numbers_is_unchanged(gateway: Gateway) -> None:
     assert gateway.pseudonymize(text).text == text
 
 
-def test_one_number_in_two_spellings_gets_one_token(gateway: Gateway) -> None:
+def test_one_number_in_two_spellings_gets_one_token_per_spelling(gateway: Gateway) -> None:
     session = gateway.session()
     first = session.pseudonymize("Telefon: +49 171 2345678 ist erreichbar.")
     second = session.pseudonymize("Ruf an unter +49 171 2345678 oder +491712345678.")
     assert first == "Telefon: <PHONE_001> ist erreichbar."
-    assert second == "Ruf an unter <PHONE_001> oder <PHONE_001>."
+    assert second == "Ruf an unter <PHONE_001> oder <PHONE_002>."
+    assert session.restore_text(second) == "Ruf an unter +49 171 2345678 oder +491712345678."
 
 
-def test_compact_spelling_of_a_known_number_gets_the_same_token(gateway: Gateway) -> None:
-    """The compact form is no longer found by the pattern; the session stage still replaces it."""
+def test_compact_spelling_of_a_known_number_gets_its_own_token(gateway: Gateway) -> None:
+    """The compact form is found by the session stage and restores to its exact spelling."""
     session = gateway.session()
     session.pseudonymize("Telefon: +49 171 2345678 ist erreichbar.")
     second = session.pseudonymize("Ruf an unter +49 171 2345678 oder +491712345678.")
     assert "2345678" not in second
-    assert second.count("<PHONE_001>") == 2 and "<PHONE_002>" not in second
+    assert second.count("<PHONE_001>") == 1 and second.count("<PHONE_002>") == 1

@@ -53,7 +53,7 @@ def test_leakage_on_a_later_call_keeps_the_earlier_mappings(
 
     assert set(session.entries()) == set(before)
     for token, entry in before.items():
-        assert session.entries()[token].surface_forms == entry.surface_forms
+        assert session.entries()[token].value == entry.value
     monkeypatch.undo()
     assert session.pseudonymize(TEXT_C) == f"Die Überweisung auf {IBAN_TOKEN} ist raus."
 
@@ -91,8 +91,9 @@ def test_a_full_name_around_a_known_last_name_is_tokenized_as_a_whole(gateway: G
 
     result = session.pseudonymize("Anna Müller ruft an.")
 
-    assert result == f"{PERSON_TOKEN} ruft an."
-    assert set(session.entries()) == {PERSON_TOKEN, IBAN_TOKEN}
+    assert result == "<PERSON_002> ruft an."
+    assert set(session.entries()) == {PERSON_TOKEN, IBAN_TOKEN, "<PERSON_002>"}
+    assert session.restore_text(result) == "Anna Müller ruft an."
 
 
 def test_a_known_full_name_keeps_its_token_for_the_bare_last_name(gateway: Gateway) -> None:
@@ -106,15 +107,16 @@ def test_a_known_full_name_keeps_its_token_for_the_bare_last_name(gateway: Gatew
     assert set(session.entries()) == {"<PERSON_001>"}
 
 
-def test_the_same_iban_in_another_spelling_keeps_its_token(gateway: Gateway) -> None:
+def test_the_same_iban_in_another_spelling_gets_its_own_token(gateway: Gateway) -> None:
     session = gateway.session("conversation-6")
     first = session.pseudonymize(f"Ihre IBAN {IBAN} ist vorgemerkt.")
 
     second = session.pseudonymize("Konto DE89 3704 0044 0532 0130 00 bitte prüfen.")
 
     assert first == f"Ihre IBAN {IBAN_TOKEN} ist vorgemerkt."
-    assert second == f"Konto {IBAN_TOKEN} bitte prüfen."
-    assert set(session.entries()) == {IBAN_TOKEN}
+    assert second == "Konto <IBAN_002> bitte prüfen."
+    assert set(session.entries()) == {IBAN_TOKEN, "<IBAN_002>"}
+    assert session.restore_text(second) == "Konto DE89 3704 0044 0532 0130 00 bitte prüfen."
 
 
 def test_a_url_around_a_known_hostname_is_tokenized_as_a_whole(gateway: Gateway) -> None:
