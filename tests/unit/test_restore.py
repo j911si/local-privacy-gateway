@@ -59,7 +59,7 @@ def test_lenient_restores_wrapped_and_lowercase_tokens() -> None:
 
     result = restore_text(text, FEMALE_ENTRIES, mode="lenient")
 
-    assert result.text == "Anna and ANNA and Anna"
+    assert result.text == '"Anna" and `Anna` and `Anna`'
     assert result.restored_count == 3
     assert result.unknown_tokens == []
 
