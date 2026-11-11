@@ -112,6 +112,7 @@ PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
 PHONE_GROUP_SPLIT_RE = re.compile(r"[ ()/\-]+")
 TRUNK_ZERO_RE = re.compile(r"\(0\)")
 CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
+CODE_CALL_RE = re.compile(r"[A-Za-z_][\w.]*[(\[]")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
 DE_SSN_RE = re.compile(r"\d{2}\d{6}[A-Z]\d{3}")
 US_SSN_RE = re.compile(r"\d{9}")
@@ -334,7 +335,10 @@ def secret_has_digit(s: str) -> bool:
 
 
 def secret_value_valid(s: str) -> bool:
-    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`."""
+    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`
+    and no call or subscript such as `hashlib.sha256(data` or `os.environ[`."""
+    if CODE_CALL_RE.match(s) is not None:
+        return False
     return any(char.isdigit() for char in s) or CODE_REFERENCE_RE.fullmatch(s) is None
 
 
