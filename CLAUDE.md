@@ -44,8 +44,16 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Each stage receives the accumulated findings read-only and returns **only its new findings**
   (`detect/base.py`). The shared interfaces in the plan are a contract — do not change a signature
   without updating the plan's "Shared interfaces" section.
-- `correlate()` gives every occurrence of the same value one `entity_id`, so the pseudonymizer
-  emits one token per entity, not per occurrence.
+- `correlate()` gives every occurrence of the same value one `entity_id`. The pseudonymizer emits
+  one token per (entity, exact span text), so each spelling restores byte for byte; `restore_text`
+  always replaces a token by its `entry.value`.
+- Replacement and leak check share one search for known values (`known_occurrences` /
+  `KnownMatcher` in `detect/session.py`); `SubstringSweep` is the independent second search that
+  re-replaces and blocks only when something remains. Do not add a second matcher to `leakage.py`.
+- The proxy replaces and rescans the keys of objects inside `tool_use.input` (audit paths
+  `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
+  `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
+  `verdict: ok_with_unchecked_findings` when only unchecked fields have findings.
 - `api.py` fails closed: any exception or `LeakageError` purges the session and re-raises; no
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.
