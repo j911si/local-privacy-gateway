@@ -11,6 +11,7 @@ from privacy_gateway.classes import DataClass
 from privacy_gateway.detect.runs import FQDN_PATTERN, fqdn_finditer
 from privacy_gateway.detect.validators import VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
+from privacy_gateway.tokens import NUMBERED_TOKEN
 
 if TYPE_CHECKING:
     from privacy_gateway.config import Config
@@ -64,13 +65,10 @@ def _context_re(words: tuple[str, ...]) -> re.Pattern[str]:
     )
 
 
-TOKEN_NAME_RE = re.compile(r"<[A-Z][A-Z0-9_]*_\d{3,}>")
-
-
 def _has_context(text: str, start: int, words: tuple[str, ...]) -> bool:
     if not words:
         return False
-    window = TOKEN_NAME_RE.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
+    window = NUMBERED_TOKEN.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
     return _context_re(words).search(window) is not None
 
 

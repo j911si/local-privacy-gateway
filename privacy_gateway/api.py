@@ -17,7 +17,7 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
-from privacy_gateway.leakage import _ANY_TOKEN, check_leakage, glued_to_token, numbered_tokens
+from privacy_gateway.leakage import check_leakage, glued_to_token, numbered_tokens
 from privacy_gateway.model import (
     DetectionReport,
     FieldFinding,
@@ -31,6 +31,7 @@ from privacy_gateway.model import (
 )
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
 from privacy_gateway.restore import restore_text
+from privacy_gateway.tokens import ANY_TOKEN
 from privacy_gateway.vault import Vault
 
 PSEUDONYMIZE_STAGE = "pseudonymize"
@@ -243,7 +244,7 @@ class GatewaySession:
         registry = self._gateway.config.registry
         tokens = [
             Span(match.start(), match.end())
-            for match in _ANY_TOKEN.finditer(text)
+            for match in ANY_TOKEN.finditer(text)
             if match.group(0) in self._entries or match.group(0).endswith(REDACTED_SUFFIX)
         ]
         leaks: list[Leak] = []

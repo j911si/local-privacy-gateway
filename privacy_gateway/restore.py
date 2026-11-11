@@ -6,11 +6,11 @@ import re
 from collections.abc import Mapping
 
 from privacy_gateway.model import RestoreError, RestoreResult, VaultEntry
+from privacy_gateway.tokens import NUMBERED_TOKEN
 
 STRICT = "strict"
 LENIENT = "lenient"
 
-_STRICT_TOKEN = re.compile(r"<(?P<name>[A-Z][A-Z_]*?_\d{3,})>")
 _LENIENT_TOKEN = re.compile(
     r"(?<![\w>])(?=[`\"'<])(?P<quote>[`\"'])?(?P<bracket><)?"
     r"(?P<name>[A-Za-z][A-Za-z_]*?_\d{3,})(?(bracket)>)"
@@ -24,7 +24,7 @@ def restore_text(
     """Replace tokens with their recorded surface forms."""
     if mode not in (STRICT, LENIENT):
         raise RestoreError(f"unknown restore mode: {mode}")
-    pattern = _STRICT_TOKEN if mode == STRICT else _LENIENT_TOKEN
+    pattern = NUMBERED_TOKEN if mode == STRICT else _LENIENT_TOKEN
     occurrences: dict[str, int] = {}
     unknown: list[str] = []
     restored = 0

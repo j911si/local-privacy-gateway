@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -10,11 +9,12 @@ from privacy_gateway.detect.base import Stage
 from privacy_gateway.detect.context import ContextStage
 from privacy_gateway.detect.correlation import correlate
 from privacy_gateway.detect.dictionaries import DictionaryStage
+from privacy_gateway.detect.normalize import OffsetMap, offset_map
 from privacy_gateway.detect.patterns import PatternStage
 from privacy_gateway.detect.session import SessionStage
 from privacy_gateway.detect.spans import resolve_overlaps
 from privacy_gateway.detect.structured import StructuredStage
-from privacy_gateway.model import DetectionReport, Entity, Finding, Span
+from privacy_gateway.model import DetectionReport, Entity, Finding
 
 if TYPE_CHECKING:
     from privacy_gateway.config import Config
@@ -24,48 +24,7 @@ STAGE_TYPES = (StructuredStage, PatternStage, DictionaryStage, ContextStage)
 __all__ = ["Pipeline", "Stage"]
 
 
-class _OffsetMap:
-    """Normalized text plus, per normalized character, the original cluster it came from."""
-
-    def __init__(self, text: str) -> None:
-        chars: list[str] = []
-        self.starts: list[int] = []
-        self.ends: list[int] = []
-        index = 0
-        while index < len(text):
-            char = text[index]
-            if unicodedata.category(char) == "Cf":
-                # ponytail: "Cf" already covers U+00AD and every zero-width character.
-                index += 1
-                continue
-            cluster_end = index + 1
-            while cluster_end < len(text) and unicodedata.combining(text[cluster_end]):
-                cluster_end += 1
-            if unicodedata.category(char) == "Zs":
-                # ponytail: a spacing separator never carries combining marks.
-                chunk = " "
-            else:
-                chunk = unicodedata.normalize("NFC", text[index:cluster_end])
-            chars.extend(chunk)
-            self.starts.extend([index] * len(chunk))
-            self.ends.extend([cluster_end] * len(chunk))
-            index = cluster_end
-        self.text = "".join(chars)
-
-    def original(self, span: Span) -> Span:
-        return Span(self.starts[span.start], self.ends[span.end - 1])
-
-
-def _offset_map(text: str) -> _OffsetMap | None:
-    """Return the map, or None when the text needs no normalization."""
-    if text.isascii():
-        # ponytail: every character we would touch is non-ASCII.
-        return None
-    mapping = _OffsetMap(text)
-    return None if mapping.text == text else mapping
-
-
-def _remap(mapping: _OffsetMap, findings: list[Finding], entities: dict[str, Entity]) -> None:
+def _remap(mapping: OffsetMap, findings: list[Finding], entities: dict[str, Entity]) -> None:
     for finding in findings:
         finding.span = mapping.original(finding.span)
         _remap(mapping, finding.children, {})
@@ -93,7 +52,7 @@ class Pipeline:
         self, text: str, known: Mapping[str, tuple[str, str]] | None = None
     ) -> DetectionReport:
         """Return the resolved detection report for one text."""
-        mapping = _offset_map(text)
+        mapping = offset_map(text)
         if mapping is not None:
             text = mapping.text
         findings: list[Finding] = []
