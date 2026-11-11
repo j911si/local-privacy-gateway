@@ -84,7 +84,7 @@ classes:
     policy: tokenize
     token_label: PHONE
     priority: 179
-    patterns: ['(?<![\w+=])\+[1-9]\d*(?:(?: ?[\-/] ?| )?\(\d{1,5}\)(?: ?[\-/] ?| )?\d*)?(?:(?: ?[\-/] ?| )\d+)*(?!\w|[.,]\d)']
+    patterns: ['(?<![\w+=])(?:\+[1-9]\d*|\(\+[1-9]\d*\)|(?<![.,])00[1-9]\d*)(?:(?: ?[\-/] ?| )?\(\d{1,5}\)(?: ?[\-/] ?| )?\d*)?(?:(?: ?[\-/] ?| )\d+)*(?!\w|[.,]\d)']
     validator: phone_international
   FAX:
     category: CONTACT

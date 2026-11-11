@@ -195,6 +195,40 @@ def test_logs_numbers_and_dates_are_no_phone(default_config: Config, text: str) 
         assert phone_classes(variant, default_config) == []
 
 
+@pytest.mark.parametrize(
+    "number",
+    ["(+49) 30 1234567", "(+49) 30 12345678", "0049 30 1234567", "0049 30 12345678", "0041 44 668 18 00"],
+)
+def test_bracketed_plus_and_double_zero_prefix_are_found(
+    default_config: Config, number: str
+) -> None:
+    for text in (f"Rückruf {number} bitte", f"contact: {number}", number):
+        assert stage_values(text, default_config) == [number]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "0049",
+        "0049 30",
+        "00 49 30",
+        "1.0049 30 1234567",
+        "x0049 30 1234567",
+        "0099 30 1234567",
+        "00123456789",
+        "0049 30 1234567890123",
+        "(+49) 30",
+        "(+49)",
+        "f(+49) 30 1234567",
+        "(+999) 30 1234567",
+        "002026 11 10 12 00",
+        "000 111 222 333",
+    ],
+)
+def test_bracketed_plus_and_double_zero_negatives(default_config: Config, text: str) -> None:
+    assert stage_values(text, default_config) == []
+
+
 def test_national_number_still_needs_a_context_word(default_config: Config) -> None:
     assert phone_classes("Rückruf 0171 2345678", default_config) == []
     assert [c for c, _ in phone_classes("Tel. 0171 2345678", default_config)] == ["PHONE"]

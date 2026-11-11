@@ -113,6 +113,7 @@ VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
 PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
 PHONE_GROUP_SPLIT_RE = re.compile(r"[ ()/\-]+")
+BRACKETED_PLUS_RE = re.compile(r"^\(\+([1-9]\d*)\)")
 TRUNK_ZERO_RE = re.compile(r"\(0\)")
 CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
 CODE_CALL_RE = re.compile(r"[A-Za-z_][\w.]*[(\[]")
@@ -257,7 +258,7 @@ def phone_valid(s: str) -> bool:
 
 
 def phone_international_valid(s: str) -> bool:
-    """E.164 shape in written form: `+`, a country code as its own group, then separated groups.
+    """E.164 shape in written form: `+` (or `(+`..`)` or `00`), a country code as its own group, then separated groups.
 
     The country code is the first digit group and must be a known one. At least one separator
     must follow it (`+4917123456789` is not recognised without a context word). The national part
@@ -265,6 +266,9 @@ def phone_international_valid(s: str) -> bool:
     digits after the first group, which keeps lists like `+255 255 255 0` out.
     """
     value = s.strip()
+    if value.startswith("00"):
+        value = "+" + value[2:]
+    value = BRACKETED_PLUS_RE.sub(r"+\1", value, count=1)
     if PHONE_INTERNATIONAL_RE.fullmatch(value) is None:
         return False
     cleaned = TRUNK_ZERO_RE.sub(" ", value[1:])
