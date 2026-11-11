@@ -12,6 +12,7 @@ from typing import Any
 from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.transform import (
+    KeyAt,
     Path,
     TextRef,
     UncheckedRef,
@@ -130,8 +131,12 @@ def entry(
 ) -> dict[str, object]:
     """The `proxy_request` v2 fields (without `v`, `event`, `ts`); never carries a value."""
     fields: list[dict[str, object]] = []
+    clean_keys = 0
     for index, ref in enumerate(checked):
         field_findings = findings[index] if index < len(findings) else []
+        if isinstance(ref.path[-1], KeyAt) and not field_findings and index != failed_index:
+            clean_keys += 1
+            continue
         item: dict[str, object] = {
             "path": format_path(ref.path),
             "status": "checked",
@@ -155,7 +160,11 @@ def entry(
         "streaming": streaming,
         "duration_ms": duration_ms,
         "verdict": verdict,
-        "coverage": {"checked_fields": len(checked), "unchecked_fields": len(unchecked)},
+        "coverage": {
+            "checked_fields": len(checked) - clean_keys,
+            "checked_keys": clean_keys,
+            "unchecked_fields": len(unchecked),
+        },
         "fields": fields,
         "outgoing": {
             "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,

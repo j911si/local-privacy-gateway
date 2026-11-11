@@ -11,7 +11,6 @@ import pytest
 from privacy_gateway_proxy.transform import (
     NOTICE_TEXT,
     KeyAt,
-    KeyCollisionError,
     Slot,
     TextRef,
     collect_request_texts,
@@ -460,23 +459,74 @@ def test_keys_without_a_finding_keep_their_bytes_and_order(fake_session: FakeSes
     assert json.dumps(new_body) == json.dumps(body)
 
 
-def test_a_key_collision_raises(fake_session: FakeSession) -> None:
-    body = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "input": {"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2},
-                    }
-                ],
-            }
-        ]
+def _tool_body(payload: dict) -> dict:
+    return {"messages": [{"role": "user", "content": [{"type": "tool_use", "input": payload}]}]}
+
+
+def _sent_keys(body: dict, session: FakeSession) -> list[str]:
+    new_body, _ = pseudonymize_request(body, session)
+    return list(new_body["messages"][0]["content"][0]["input"])
+
+
+def test_a_key_collision_gets_an_ordinal_suffix(fake_session: FakeSession) -> None:
+    body = _tool_body({"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2})
+
+    new_body, _ = pseudonymize_request(body, fake_session)
+
+    sent = new_body["messages"][0]["content"][0]["input"]
+    assert sent == {"Frau <PERSON_FEMALE_001>#2": 1, "Frau <PERSON_FEMALE_001>": 2}
+    assert "Müller" not in json.dumps(new_body)
+
+
+def test_the_suffix_is_stable_across_requests(fake_session: FakeSession) -> None:
+    body = _tool_body({"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2})
+
+    first = json.dumps(pseudonymize_request(body, fake_session)[0])
+    second = json.dumps(pseudonymize_request(copy.deepcopy(body), fake_session)[0])
+
+    assert first == second
+
+
+def test_the_suffix_skips_ordinals_that_already_exist(fake_session: FakeSession) -> None:
+    body = _tool_body(
+        {"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2, "Frau <PERSON_FEMALE_001>#2": 3}
+    )
+
+    keys = _sent_keys(body, fake_session)
+
+    assert keys == ["Frau <PERSON_FEMALE_001>#3", "Frau <PERSON_FEMALE_001>", "Frau <PERSON_FEMALE_001>#2"]
+    assert len(set(keys)) == 3
+
+
+def test_suffixed_keys_restore_without_the_suffix() -> None:
+    restore = lambda text: text.replace("<PERSON_001>", "Anna")
+
+    assert restore_json({"<PERSON_001>#2": 2}, restore) == {"Anna": 2}
+    assert restore_json({"<PERSON_001>": 1, "<PERSON_001>#2": 2}, restore) == {
+        "Anna": 1,
+        "<PERSON_001>#2": 2,
     }
 
-    with pytest.raises(KeyCollisionError):
-        pseudonymize_request(body, fake_session)
+
+def test_a_suffixed_key_never_takes_the_place_of_the_plain_one() -> None:
+    restore = lambda text: text.replace("<PERSON_001>", "Anna")
+
+    restored = restore_json({"<PERSON_001>#2": 2, "<PERSON_001>": 1}, restore)
+
+    assert restored == {"<PERSON_001>#2": 2, "Anna": 1}
+
+
+def test_a_collision_on_restore_loses_no_entry() -> None:
+    table = {"<A_001>": "Anna", "<B_001>": "Anna", "<C_001>": "Anna"}
+    restore = lambda text: table.get(text, text)
+
+    restored = restore_json({"<A_001>": 1, "<B_001>": 2, "<C_001>": 3}, restore)
+
+    assert restored == {"Anna": 1, "<B_001>": 2, "<C_001>": 3}
+
+
+def test_a_plain_hash_key_without_a_token_is_not_a_suffix() -> None:
+    assert restore_json({"item#2": 1, "item": 2}, lambda text: text) == {"item#2": 1, "item": 2}
 
 
 def test_key_paths_render_by_position_without_the_key() -> None:

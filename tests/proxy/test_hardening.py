@@ -398,21 +398,25 @@ async def test_a_token_key_in_the_response_is_restored(make_proxy: Callable[...,
 
 
 @pytest.mark.asyncio
-async def test_a_key_collision_is_refused_and_audited(make_proxy: Callable[..., Proxy]) -> None:
+async def test_a_key_collision_is_suffixed_stable_and_leaks_nothing(
+    make_proxy: Callable[..., Proxy],
+) -> None:
     proxy = make_proxy()
     await proxy.call("POST", "/v1/messages", message_with([tool_use({SECRET_MAIL: "1"})]))
     (token,) = sent_input(proxy)
     proxy.seen.clear()
-    clash = message_with([tool_use({SECRET_MAIL: "1", token: "2"})])
+    upper = SECRET_MAIL.upper()
+    clash = message_with([tool_use({SECRET_MAIL: "1", token: "2", "x": upper})])
 
-    status, data = await proxy.call("POST", "/v1/messages", clash)
+    status, _ = await proxy.call("POST", "/v1/messages", clash)
+    again, _ = await proxy.call("POST", "/v1/messages", clash)
 
-    assert status == 422
-    assert error_type(data) == "privacy_gateway_key_collision"
-    assert proxy.seen == []
-    last = proxy.entries()[-1]
-    assert last["verdict"] == "blocked"
+    assert (status, again) == (200, 200)
+    assert SECRET_MAIL not in proxy.seen[0].content.decode()
+    assert len(sent_input(proxy)) == 3
+    assert proxy.seen[0].content == proxy.seen[1].content
     assert SECRET_MAIL not in proxy.log_text()
+    assert proxy.entries()[-1]["verdict"] != "blocked"
 
 
 @pytest.mark.asyncio
@@ -689,3 +693,160 @@ def test_the_access_log_drops_the_query_string(make_proxy: Callable[..., Proxy])
     assert logging.getLogger("uvicorn.access").filter(record)
     assert SECRET_MAIL not in record.getMessage()
     assert "/v1/models" in record.getMessage()
+
+
+KNOWN_PATHS = [
+    ("GET", "/v1/models"),
+    ("GET", "/v1/models/claude-sonnet-4-5-20250929"),
+    ("GET", "/v1/models/claude-opus-4-1"),
+    ("GET", "/api/hello"),
+    ("HEAD", "/api/hello"),
+    ("GET", "/health-check"),
+    ("GET", "/v1/messages/batches/msgbatch_01HkcTjaV5uDC8jWR4ZsDV8d"),
+    ("GET", "/v1/files/file_011CNha8iCJcU1wXNR6q4V8w"),
+    ("GET", "/v1/files/file_011CNha8iCJcU1wXNR6q4V8w/content"),
+    ("GET", "/v1/messages/batches/msgbatch_01HkcTjaV5uDC8jWR4ZsDV8d/results"),
+    ("GET", "/v1/messages/msg_01AbCdEfGhIjKlMnOpQrStUv"),
+    ("GET", "/v1/organizations/0b1c2d3e-1111-2222-3333-444444444444"),
+    ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "path"), KNOWN_PATHS)
+async def test_known_id_shaped_paths_are_still_forwarded(
+    make_proxy: Callable[..., Proxy], method: str, path: str
+) -> None:
+    proxy = make_proxy()
+
+    status, _ = await proxy.call(method, path)
+
+    assert status == 200
+    assert len(proxy.seen) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/v1/files/{SECRET_MAIL}",
+        f"/v1/files/{SECRET_IBAN}",
+        f"/v1/models/x/{SECRET_MAIL}/content",
+    ],
+)
+async def test_a_sensitive_path_segment_is_refused_and_never_logged(
+    make_proxy: Callable[..., Proxy], path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    proxy = make_proxy()
+    caplog.set_level(logging.DEBUG)
+
+    status, data = await proxy.call("GET", path)
+
+    assert status == 400
+    assert error_type(data) == "invalid_request_error"
+    assert proxy.seen == []
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "blocked"
+    assert entry["path"].endswith("/…")
+    assert SECRET_MAIL not in proxy.log_text() + data.decode() + caplog.text
+    assert SECRET_IBAN not in proxy.log_text() + data.decode() + caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_sensitive_path_hit_does_not_teach_the_session(
+    make_proxy: Callable[..., Proxy], gateway: Gateway
+) -> None:
+    proxy = make_proxy()
+
+    await proxy.call("GET", f"/v1/files/{SECRET_MAIL}")
+
+    session = gateway.session("default")
+    assert dict(session.entries()) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_url_encoded_sensitive_segment_never_reaches_upstream(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+
+    status, _ = await proxy.call("GET", "/v1/files/geheim.person%40beispiel-firma.de")
+
+    assert status == 400
+    assert proxy.seen == []
+    assert "beispiel-firma" not in proxy.log_text()
+
+
+@pytest.mark.parametrize(
+    ("path", "short"),
+    [
+        ("/v1/files/geheim.person@beispiel-firma.de", "/v1/files/…"),
+        ("/v1/models", "/v1/models"),
+        ("/health", "/health"),
+        ("/a/b/c/d", "/a/b/…"),
+    ],
+)
+def test_logged_paths_are_shortened_to_two_segments(path: str, short: str) -> None:
+    assert server.short_path(path) == short
+
+
+def test_the_access_log_shortens_the_path(make_proxy: Callable[..., Proxy]) -> None:
+    make_proxy()
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1", "GET", f"/v1/files/{SECRET_MAIL}?x=1", "1.1", 400),
+        None,
+    )
+
+    assert logging.getLogger("uvicorn.access").filter(record)
+    assert SECRET_MAIL not in record.getMessage()
+    assert "/v1/files/…" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_sensitive_path_on_a_rejected_method_is_cut_in_the_log(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+
+    status, _ = await proxy.call("PATCH", f"/v1/files/{SECRET_MAIL}", b'{"x": 1}')
+
+    assert status == 400
+    assert proxy.seen == []
+    assert SECRET_MAIL not in proxy.log_text()
+    assert proxy.entries()[0]["path"] == "/v1/files/…"
+
+
+@pytest.mark.asyncio
+async def test_clean_keys_are_counted_not_listed_in_the_audit_line(
+    make_proxy: Callable[..., Proxy],
+) -> None:
+    proxy = make_proxy()
+    blocks = [
+        {
+            "type": "tool_use",
+            "id": f"toolu_{index}",
+            "name": "Edit",
+            "input": {"file_path": "a.py", "old_string": "a", "new_string": "b", "n": 1},
+        }
+        for index in range(20)
+    ]
+    blocks[3]["input"][SECRET_MAIL] = "x"
+
+    status, _ = await proxy.call("POST", "/v1/messages", message_with(blocks))
+
+    assert status == 200
+    entry = proxy.entries()[-1]
+    key_fields = [f for f in entry["fields"] if f["path"].endswith("#key")]
+    assert len(key_fields) == 1
+    assert key_fields[0]["findings"]
+    coverage = entry["coverage"]
+    assert coverage["checked_keys"] == 20 * 4
+    assert coverage["checked_fields"] == len(
+        [f for f in entry["fields"] if f["status"] == "checked"]
+    )
+    assert SECRET_MAIL not in proxy.log_text()

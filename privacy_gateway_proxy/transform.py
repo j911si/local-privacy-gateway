@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -47,8 +48,7 @@ CHECKED_BLOCK_KEYS = {
 WHOLE_BLOCK_REASONS = {"thinking": "thinking", "redacted_thinking": "thinking", "image": "image"}
 
 
-class KeyCollisionError(Exception):
-    """Two keys of one JSON object became equal after replacement."""
+KEY_SUFFIX_RE = re.compile(r"(?P<base>.*<[A-Z][A-Z0-9_]*_\d{3,}>.*)#(?P<number>\d+)", re.DOTALL)
 
 
 @runtime_checkable
@@ -243,10 +243,43 @@ def restore_json(value: Any, restore: Callable[[str], str]) -> Any:
     if isinstance(value, str):
         return restore(value)
     if isinstance(value, dict):
-        return {restore(key): restore_json(item, restore) for key, item in value.items()}
+        keys = _restored_keys(list(value), restore)
+        return {key: restore_json(item, restore) for key, item in zip(keys, value.values(), strict=True)}
     if isinstance(value, list):
         return [restore_json(item, restore) for item in value]
     return value
+
+
+def _restored_keys(keys: list[str], restore: Callable[[str], str]) -> list[str]:
+    """Restore object keys without losing one: a key that would collide stays as it came.
+
+    Keys with a `#n` suffix (added by `_rename_keys`) are restored last, without the suffix.
+    """
+    restored: list[str] = [""] * len(keys)
+    taken: set[str] = set()
+    suffixed: list[int] = []
+    for index, key in enumerate(keys):
+        if KEY_SUFFIX_RE.fullmatch(key):
+            suffixed.append(index)
+        else:
+            restored[index] = _claim(key, restore(key), taken)
+    for index in suffixed:
+        key = keys[index]
+        match = KEY_SUFFIX_RE.fullmatch(key)
+        base = match.group("base") if match else key
+        candidate = restore(base)
+        restored[index] = _claim(key, candidate if candidate != base else restore(key), taken)
+    return restored
+
+
+def _claim(key: str, candidate: str, taken: set[str]) -> str:
+    if candidate in taken:
+        candidate, number = key, 2
+        while candidate in taken:
+            candidate = f"{key}#{number}"
+            number += 1
+    taken.add(candidate)
+    return candidate
 
 
 def _prepared(body: dict, include_system: bool, notice: bool) -> tuple[dict, list[TextRef]]:
@@ -452,10 +485,14 @@ def _rename_keys(target: dict, names: dict[int, str]) -> None:
     changed = {index: text for index, text in names.items() if keys[index] != text}
     if not changed:
         return
+    taken = {key for index, key in enumerate(keys) if index not in changed}
     for index, text in changed.items():
-        keys[index] = text
-    if len(set(keys)) != len(keys):
-        raise KeyCollisionError("two keys of one object became equal after replacement")
+        candidate, number = text, 2
+        while candidate in taken:
+            candidate = f"{text}#{number}"
+            number += 1
+        taken.add(candidate)
+        keys[index] = candidate
     values = list(target.values())
     target.clear()
     target.update(zip(keys, values, strict=True))
