@@ -31,7 +31,8 @@ claude --model "sonnet[1m]"                          # else Claude Code assumes 
 Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY_UPSTREAM`,
 `PGW_PROXY_SESSION_STRATEGY`, `PGW_PROXY_TRANSFORM_SYSTEM`, `PGW_PROXY_PLACEHOLDER_NOTICE`,
 `PGW_PROXY_DEBUG_DIR`, `PGW_PROXY_DEBUG_ORIGINALS`, `PGW_AUDIT_LOG_DIR`,
-`PGW_PROXY_RESCAN_BUDGET`.
+`PGW_PROXY_RESCAN_BUDGET`, `PGW_PROXY_PASSTHROUGH_PATHS`, `PGW_PROXY_AUTH_TOKEN`,
+`PGW_PROXY_AUTH_TOKEN_FILE`.
 
 ## Architecture
 
@@ -43,8 +44,21 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Each stage receives the accumulated findings read-only and returns **only its new findings**
   (`detect/base.py`). The shared interfaces in the plan are a contract — do not change a signature
   without updating the plan's "Shared interfaces" section.
-- `correlate()` gives every occurrence of the same value one `entity_id`, so the pseudonymizer
-  emits one token per entity, not per occurrence.
+- `correlate()` gives every occurrence of the same value one `entity_id`. The pseudonymizer emits
+  one token per (entity, exact span text), so each spelling restores byte for byte; `restore_text`
+  always replaces a token by its `entry.value`.
+- Replacement and leak check share one search for known values (`known_occurrences` /
+  `KnownMatcher` in `detect/session.py`); `SubstringSweep` is the independent second search that
+  re-replaces and blocks only when something remains. Do not add a second matcher to `leakage.py`.
+- A pattern with the named groups `label` and `value` skips the class validator and
+  `context_required`, and `value` is the span (`TAX_ID` behind `Steuer-ID:`).
+- `context.LABEL_NAME_RE` takes names behind person labels; behind the generic label `name`
+  (group `generic`) a match needs a word from the first-name list. Deriving single name parts
+  from a full name was tried twice and removed: it made the leak check block valid requests.
+- The proxy replaces and rescans the keys of objects inside `tool_use.input` (audit paths
+  `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
+  `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
+  `verdict: ok_with_unchecked_findings` when only unchecked fields have findings.
 - `api.py` fails closed: any exception or `LeakageError` purges the session and re-raises; no
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.
@@ -89,7 +103,7 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Values never appear in findings, reports, audit events or exception messages — only class names,
   spans and counts.
 - Commit per task with a conventional message; end the body with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`.
 
 ## Documentation
 

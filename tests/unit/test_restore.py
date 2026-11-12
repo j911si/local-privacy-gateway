@@ -23,19 +23,12 @@ FEMALE_ENTRIES = {
 }
 
 
-def test_strict_restores_surface_forms_in_occurrence_order() -> None:
-    result = restore_text("<PERSON_001> und <PERSON_001>", PERSON_ENTRIES)
-
-    assert result.text == "Müller und MÜLLER"
-    assert result.restored_count == 2
-    assert result.unknown_tokens == []
-
-
-def test_occurrence_beyond_surface_forms_uses_canonical_value() -> None:
+def test_a_token_restores_to_its_value_however_often_it_occurs() -> None:
     result = restore_text("<PERSON_001> <PERSON_001> <PERSON_001>", PERSON_ENTRIES)
 
-    assert result.text == "Müller MÜLLER Müller"
+    assert result.text == "Müller Müller Müller"
     assert result.restored_count == 3
+    assert result.unknown_tokens == []
 
 
 def test_strict_unknown_token_raises_with_token_name_only() -> None:
@@ -59,7 +52,7 @@ def test_lenient_restores_wrapped_and_lowercase_tokens() -> None:
 
     result = restore_text(text, FEMALE_ENTRIES, mode="lenient")
 
-    assert result.text == "Anna and ANNA and Anna"
+    assert result.text == '"Anna" and `Anna` and `Anna`'
     assert result.restored_count == 3
     assert result.unknown_tokens == []
 

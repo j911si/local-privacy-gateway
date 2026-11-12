@@ -334,6 +334,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
                 "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
                 "user-agent": "claude-cli/2.0.0",
                 "x-unknown-header": "keep-me",
+                "x-pgw-session": "abc",
                 "accept-encoding": "gzip",
             },
         )
@@ -345,6 +346,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
     assert headers["anthropic-beta"] == "claude-code-20250219,oauth-2025-04-20"
     assert headers["user-agent"] == "claude-cli/2.0.0"
     assert headers["x-unknown-header"] == "keep-me"
+    assert "x-pgw-session" not in headers
     assert headers["accept-encoding"] == "identity"
     assert headers["host"] == "upstream.test"
     assert headers["content-length"] == str(len(seen[0].content))
@@ -547,12 +549,27 @@ def _recording_handler(calls: list[httpx.Request]) -> Callable[[httpx.Request], 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"{not json", b'["a"]', b""])
+async def test_a_message_body_that_is_not_a_json_object_gets_400_without_upstream(
+    monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    called: list[httpx.Request] = []
+    client, gateway, _ = build(monkeypatch, _recording_handler(called))
+    async with client:
+        response = await client.post(
+            "/v1/messages", content=content, headers={"content-type": "application/json"}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert called == []
+    assert gateway.audit.events[0]["leakage"] == "rejected"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "headers"),
     [
-        ("/v1/messages", b"{not json", {"content-type": "application/json"}),
-        ("/v1/messages", b'["a"]', {"content-type": "application/json"}),
-        ("/v1/messages", b"", {"content-type": "application/json"}),
         (
             "/v1/messages",
             b'{"messages":[]}',

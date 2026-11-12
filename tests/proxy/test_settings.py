@@ -161,3 +161,78 @@ def test_env_defaults_to_process_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PGW_PROXY_LISTEN", "127.0.0.1:1234")
 
     assert load_settings().listen_port == 1234
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1", "-0.5", "abc"])
+def test_an_unusable_rescan_budget_is_an_error(value: str) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_RESCAN_BUDGET": value})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0.0, -1.0])
+def test_an_unusable_rescan_budget_override_is_an_error(value: float) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env={}, rescan_budget_s=value)
+
+
+def test_a_finite_positive_rescan_budget_is_kept() -> None:
+    assert load_settings(env={"PGW_PROXY_RESCAN_BUDGET": "2.5"}).rescan_budget_s == 2.5
+
+
+def test_passthrough_paths_default_to_empty_and_parse_a_list() -> None:
+    assert load_settings(env={}).passthrough_paths == ()
+    parsed = load_settings(env={"PGW_PROXY_PASSTHROUGH_PATHS": "/v1/files, /v1/x ,"})
+    assert parsed.passthrough_paths == ("/v1/files", "/v1/x")
+
+
+@pytest.mark.parametrize("value", ["v1/files", "/v1/../files", "/v1//files", "/v1/%66iles"])
+def test_a_passthrough_path_must_be_a_normal_absolute_path(value: str) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_PASSTHROUGH_PATHS": value})
+
+
+def test_the_auth_token_comes_from_env_and_stays_out_of_repr() -> None:
+    settings = load_settings(env={"PGW_PROXY_AUTH_TOKEN": "tok-canary-123"})
+
+    assert settings.auth_token == "tok-canary-123"
+    assert "tok-canary-123" not in repr(settings)
+    assert load_settings(env={}).auth_token == ""
+
+
+def _token_file(tmp_path: Path, text: str, mode: int = 0o600) -> Path:
+    path = tmp_path / "token"
+    path.write_text(text, encoding="utf-8")
+    path.chmod(mode)
+    return path
+
+
+def test_the_auth_token_file_is_read_and_stripped(tmp_path: Path) -> None:
+    path = _token_file(tmp_path, "tok-from-file\n")
+
+    assert load_settings(env={"PGW_PROXY_AUTH_TOKEN_FILE": str(path)}).auth_token == "tok-from-file"
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o666])
+def test_an_open_token_file_is_an_error(tmp_path: Path, mode: int) -> None:
+    path = _token_file(tmp_path, "tok-from-file\n", mode)
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env={"PGW_PROXY_AUTH_TOKEN_FILE": str(path)})
+
+    assert "tok-from-file" not in str(caught.value)
+
+
+def test_a_missing_or_empty_token_file_is_an_error(tmp_path: Path) -> None:
+    empty = _token_file(tmp_path, "\n")
+
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_AUTH_TOKEN_FILE": str(tmp_path / "missing")})
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_AUTH_TOKEN_FILE": str(empty)})
+
+
+def test_token_and_token_file_together_are_an_error(tmp_path: Path) -> None:
+    path = _token_file(tmp_path, "a\n")
+
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_AUTH_TOKEN": "b", "PGW_PROXY_AUTH_TOKEN_FILE": str(path)})

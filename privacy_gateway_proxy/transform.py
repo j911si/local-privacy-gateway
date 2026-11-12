@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-Path = tuple[str | int, ...]
+
+@dataclass(frozen=True)
+class Slot:
+    """The value at one position of a JSON object, addressed by position so no key is rendered."""
+
+    index: int
+
+
+@dataclass(frozen=True)
+class KeyAt:
+    """The key text at one position of a JSON object."""
+
+    index: int
+
+
+Path = tuple[str | int | Slot | KeyAt, ...]
 
 NOTICE_MARKER = "<privacy-gateway>"
 NOTICE_TEXT = (
@@ -30,6 +46,11 @@ CHECKED_BLOCK_KEYS = {
     "document": frozenset({"source"}),
 }
 WHOLE_BLOCK_REASONS = {"thinking": "thinking", "redacted_thinking": "thinking", "image": "image"}
+
+
+KEY_SUFFIX_RE = re.compile(
+    r"(?P<base>.*<[A-Z][A-Z0-9_]*_(?:\d{3,}|REDACTED)>.*)#(?P<number>\d+)", re.DOTALL
+)
 
 
 @runtime_checkable
@@ -106,6 +127,54 @@ def collect_unchecked(body: dict, *, include_system: bool = True) -> list[Unchec
     return refs
 
 
+def request_shape_error(body: dict) -> str | None:
+    """A value-free message when the body lacks the basic Messages API form, else None."""
+    if "system" in body:
+        system = body["system"]
+        if isinstance(system, list):
+            for index, block in enumerate(system):
+                problem = _block_error(block, ("system", index))
+                if problem:
+                    return problem
+        elif not isinstance(system, str):
+            return "system must be a string or a list of content blocks"
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return "messages must be a list"
+    for index, message in enumerate(messages):
+        path: Path = ("messages", index)
+        if not isinstance(message, dict):
+            return f"{format_path(path)} must be an object"
+        content = message.get("content")
+        if isinstance(content, str):
+            continue
+        if not isinstance(content, list):
+            return f"{format_path((*path, 'content'))} must be a string or a list"
+        for position, block in enumerate(content):
+            problem = _block_error(block, (*path, "content", position))
+            if problem:
+                return problem
+    return None
+
+
+def _block_error(block: Any, path: Path) -> str | None:
+    if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+        return f"{format_path(path)} must be an object with a string type"
+    block_type = block["type"]
+    if block_type == "text" and not isinstance(block.get("text"), str):
+        return f"{format_path((*path, 'text'))} must be a string"
+    if block_type == "tool_result" and "content" in block:
+        content = block["content"]
+        if isinstance(content, list):
+            for index, item in enumerate(content):
+                problem = _block_error(item, (*path, "content", index))
+                if problem:
+                    return problem
+        elif not isinstance(content, str):
+            return f"{format_path((*path, 'content'))} must be a string or a list"
+    return None
+
+
 def collect_strings(value: Any, path: Path = ()) -> list[TextRef]:
     """Every non-empty string leaf below `value`, with its path."""
     refs: list[TextRef] = []
@@ -113,11 +182,22 @@ def collect_strings(value: Any, path: Path = ()) -> list[TextRef]:
     return refs
 
 
+def collect_keyed(value: Any, path: Path = ()) -> list[TextRef]:
+    """Every non-empty string leaf and every key below `value`; objects are addressed by position."""
+    refs: list[TextRef] = []
+    _collect_keyed(value, path, refs)
+    return refs
+
+
 def format_path(path: Path) -> str:
-    """Render a path as `messages[0].content[1].text`."""
+    """Render a path as `messages[0].content[1].text`; object keys as `{position}`."""
     rendered = ""
     for part in path:
-        if isinstance(part, int):
+        if isinstance(part, Slot):
+            rendered += f"{{{part.index}}}"
+        elif isinstance(part, KeyAt):
+            rendered += f"{{{part.index}}}#key"
+        elif isinstance(part, int):
             rendered += f"[{part}]"
         else:
             rendered += f".{part}" if rendered else str(part)
@@ -132,8 +212,15 @@ def pseudonymize_request(
     if not refs:
         return new_body, 0
     replaced = sess.pseudonymize_many([ref.text for ref in refs])
+    renames: dict[Path, dict[int, str]] = {}
     for ref, text in zip(refs, replaced, strict=True):
-        _set_at(new_body, ref.path, text)
+        last = ref.path[-1]
+        if isinstance(last, KeyAt):
+            renames.setdefault(ref.path[:-1], {})[last.index] = text
+        else:
+            _set_at(new_body, ref.path, text)
+    for parent_path, names in renames.items():
+        _rename_keys(_at(new_body, parent_path), names)
     return new_body, len(refs)
 
 
@@ -154,14 +241,47 @@ def restore_response(body: dict, sess: TextSession) -> dict:
 
 
 def restore_json(value: Any, restore: Callable[[str], str]) -> Any:
-    """Apply `restore` to every string leaf, leaving other types untouched."""
+    """Apply `restore` to every string leaf and key, leaving other types untouched."""
     if isinstance(value, str):
         return restore(value)
     if isinstance(value, dict):
-        return {key: restore_json(item, restore) for key, item in value.items()}
+        keys = _restored_keys(list(value), restore)
+        return {key: restore_json(item, restore) for key, item in zip(keys, value.values(), strict=True)}
     if isinstance(value, list):
         return [restore_json(item, restore) for item in value]
     return value
+
+
+def _restored_keys(keys: list[str], restore: Callable[[str], str]) -> list[str]:
+    """Restore object keys without losing one: a key that would collide stays as it came.
+
+    Keys with a `#n` suffix (added by `_rename_keys`) are restored last, without the suffix.
+    """
+    restored: list[str] = [""] * len(keys)
+    taken: set[str] = set()
+    suffixed: list[int] = []
+    for index, key in enumerate(keys):
+        if KEY_SUFFIX_RE.fullmatch(key):
+            suffixed.append(index)
+        else:
+            restored[index] = _claim(key, restore(key), taken)
+    for index in suffixed:
+        key = keys[index]
+        match = KEY_SUFFIX_RE.fullmatch(key)
+        base = match.group("base") if match else key
+        candidate = restore(base)
+        restored[index] = _claim(key, candidate if candidate != base else restore(key), taken)
+    return restored
+
+
+def _claim(key: str, candidate: str, taken: set[str]) -> str:
+    if candidate in taken:
+        candidate, number = key, 2
+        while candidate in taken:
+            candidate = f"{key}#{number}"
+            number += 1
+    taken.add(candidate)
+    return candidate
 
 
 def _prepared(body: dict, include_system: bool, notice: bool) -> tuple[dict, list[TextRef]]:
@@ -289,7 +409,7 @@ def _collect_content(content: Any, path: Path, refs: list[TextRef]) -> None:
         elif block_type == "tool_result":
             _collect_tool_result(block.get("content"), (*path, index, "content"), refs)
         elif block_type == "tool_use":
-            _collect_strings(block.get("input"), (*path, index, "input"), refs)
+            _collect_keyed(block.get("input"), (*path, index, "input"), refs)
         elif block_type == "document":
             _collect_document(block.get("source"), (*path, index, "source"), refs)
 
@@ -321,6 +441,18 @@ def _collect_strings(value: Any, path: Path, refs: list[TextRef]) -> None:
             _collect_strings(item, (*path, index), refs)
 
 
+def _collect_keyed(value: Any, path: Path, refs: list[TextRef]) -> None:
+    if isinstance(value, str):
+        _add(refs, path, value)
+    elif isinstance(value, dict):
+        for index, (key, item) in enumerate(value.items()):
+            _add(refs, (*path, KeyAt(index)), key)
+            _collect_keyed(item, (*path, Slot(index)), refs)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _collect_keyed(item, (*path, index), refs)
+
+
 def _add(refs: list[TextRef], path: Path, text: str) -> None:
     if text:
         refs.append(TextRef(path, text))
@@ -331,8 +463,38 @@ def _add_if_str(refs: list[TextRef], path: Path, text: Any) -> None:
         _add(refs, path, text)
 
 
+def _child(target: Any, part: str | int | Slot | KeyAt) -> Any:
+    if isinstance(part, Slot):
+        return target[list(target)[part.index]]
+    return target[part]
+
+
+def _at(body: Any, path: Path) -> Any:
+    target = body
+    for part in path:
+        target = _child(target, part)
+    return target
+
+
 def _set_at(body: dict, path: Path, text: str) -> None:
-    target: Any = body
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = text
+    target = _at(body, path[:-1])
+    last = path[-1]
+    target[list(target)[last.index] if isinstance(last, Slot) else last] = text
+
+
+def _rename_keys(target: dict, names: dict[int, str]) -> None:
+    keys = list(target)
+    changed = {index: text for index, text in names.items() if keys[index] != text}
+    if not changed:
+        return
+    taken = {key for index, key in enumerate(keys) if index not in changed}
+    for index, text in changed.items():
+        candidate, number = text, 2
+        while candidate in taken:
+            candidate = f"{text}#{number}"
+            number += 1
+        taken.add(candidate)
+        keys[index] = candidate
+    values = list(target.values())
+    target.clear()
+    target.update(zip(keys, values, strict=True))

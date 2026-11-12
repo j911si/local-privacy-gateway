@@ -11,7 +11,7 @@ from privacy_gateway.model import ConfigError
 
 SKIP_USER = {"PGW_SKIP_USER_CONFIG": "1"}
 
-EXPECTED_CLASS_COUNT = 140
+EXPECTED_CLASS_COUNT = 141
 
 
 def write_config(tmp_path: Path, body: str, name: str = "user.yaml") -> Path:

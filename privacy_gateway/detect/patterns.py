@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from functools import cache
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
 from privacy_gateway.detect.runs import FQDN_PATTERN, fqdn_finditer
 from privacy_gateway.detect.validators import VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
+from privacy_gateway.tokens import NUMBERED_TOKEN
 
 if TYPE_CHECKING:
     from privacy_gateway.config import Config
@@ -23,6 +24,12 @@ MAX_CONFIDENCE = 0.99
 IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
+PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
+DIFF_HEADER_RE = re.compile(
+    r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
+)
+DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
+DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
 LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
 STANDARD_PREFIXES = frozenset(
     {
@@ -64,13 +71,10 @@ def _context_re(words: tuple[str, ...]) -> re.Pattern[str]:
     )
 
 
-TOKEN_NAME_RE = re.compile(r"<[A-Z][A-Z0-9_]*_\d{3,}>")
-
-
 def _has_context(text: str, start: int, words: tuple[str, ...]) -> bool:
     if not words:
         return False
-    window = TOKEN_NAME_RE.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
+    window = NUMBERED_TOKEN.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
     return _context_re(words).search(window) is not None
 
 
@@ -78,7 +82,40 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
+@lru_cache(maxsize=8)
+def _diff_lines(text: str) -> frozenset[int]:
+    """Start offsets of the lines below a diff header, up to the first blank or non-diff line."""
+    covered: set[int] = set()
+    inside = False
+    offset = 0
+    lines = text.split("\n")
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if not line.strip():
+            inside = False
+        elif DIFF_HEADER_RE.match(line) or DIFF_FILE_HEADER_RE.match(f"{line}\n{following}"):
+            inside = True
+        elif inside and DIFF_LINE_RE.match(line):
+            covered.add(offset)
+        else:
+            inside = False
+        offset += len(raw) + 1
+    return frozenset(covered)
+
+
+def _in_diff_block(text: str, start: int) -> bool:
+    """A diff header above the line at `start`, with only diff lines and no blank line between."""
+    return text.rfind("\n", 0, start) + 1 in _diff_lines(text)
+
+
+def _at_line_start(text: str, start: int) -> bool:
+    return start == 0 or text[start - 1] in "\r\n"
+
+
 def _span_of(match: re.Match[str]) -> Span:
+    if "value" in match.re.groupindex:
+        return Span(*match.span("value"))
     if match.re.groups >= 1 and match.group(1) is not None:
         return Span(*match.span(1))
     return Span(*match.span(0))
@@ -116,10 +153,17 @@ class PatternStage:
         value = text[span.start : span.end]
         if data_class.name == GENERIC_ID_CLASS and _is_standard_reference(value):
             return []
-        if validator is not None and not validator(value):
+        labelled = "label" in match.re.groupindex and match.group("label") is not None
+        if validator is not None and not labelled and not validator(value):
+            return []
+        if (
+            data_class.name == PHONE_INTERNATIONAL_CLASS
+            and _at_line_start(text, span.start)
+            and _in_diff_block(text, span.start)
+        ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)
-        if data_class.context_required and not has_context:
+        if data_class.context_required and not has_context and not labelled:
             return []
         confidence = VALIDATED_CONFIDENCE if validator is not None else BASE_CONFIDENCE
         if has_context:

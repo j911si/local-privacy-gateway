@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-CLASS_COUNT = 140
+CLASS_COUNT = 141
 FIXTURE = "customer_letter_de"
 IBAN = "DE89370400440532013000"
 REPO_ROOT = Path(__file__).resolve().parents[2]

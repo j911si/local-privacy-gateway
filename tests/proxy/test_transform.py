@@ -6,11 +6,17 @@ import copy
 import json
 from typing import Any
 
+import pytest
+
 from privacy_gateway_proxy.transform import (
     NOTICE_TEXT,
+    KeyAt,
+    Slot,
     TextRef,
     collect_request_texts,
+    format_path,
     pseudonymize_request,
+    request_shape_error,
     restore_json,
     restore_response,
 )
@@ -22,10 +28,15 @@ EXPECTED_PATHS = [
     ("system", 1, "text"),
     ("messages", 0, "content"),
     ("messages", 1, "content", 1, "text"),
-    ("messages", 1, "content", 2, "input", "file_path"),
+    ("messages", 1, "content", 2, "input", KeyAt(0)),
+    ("messages", 1, "content", 2, "input", Slot(0)),
     ("messages", 2, "content", 0, "content", 0, "text"),
-    ("messages", 3, "content", 0, "input", "file_path"),
-    ("messages", 3, "content", 0, "input", "content"),
+    ("messages", 3, "content", 0, "input", KeyAt(0)),
+    ("messages", 3, "content", 0, "input", Slot(0)),
+    ("messages", 3, "content", 0, "input", KeyAt(1)),
+    ("messages", 3, "content", 0, "input", Slot(1)),
+    ("messages", 3, "content", 0, "input", KeyAt(2)),
+    ("messages", 3, "content", 0, "input", KeyAt(3)),
 ]
 
 
@@ -54,7 +65,7 @@ def test_collect_request_texts_returns_the_text_at_each_path(request_body: dict)
 
     expected = TextRef(("messages", 0, "content"), "Lies bitte die Notizen und schreibe den Brief.")
     assert refs[2] == expected
-    assert refs[5].text == "Sehr geehrte Frau Müller, IBAN DE89370400440532013000"
+    assert refs[6].text == "Sehr geehrte Frau Müller, IBAN DE89370400440532013000"
 
 
 def test_collect_request_texts_handles_string_system_and_tool_result() -> None:
@@ -94,7 +105,11 @@ def test_collect_request_texts_skips_empty_strings() -> None:
 
     refs = collect_request_texts(body)
 
-    assert [ref.path for ref in refs] == [("messages", 0, "content", 1, "input", "b")]
+    assert [ref.path for ref in refs] == [
+        ("messages", 0, "content", 1, "input", KeyAt(0)),
+        ("messages", 0, "content", 1, "input", KeyAt(1)),
+        ("messages", 0, "content", 1, "input", Slot(1)),
+    ]
 
 
 def test_collect_request_texts_skips_unknown_block_types() -> None:
@@ -369,14 +384,14 @@ def test_restore_json_recurses_and_keeps_non_string_leaves() -> None:
     restored = restore_json(value, lambda text: text.upper())
 
     assert restored == {
-        "a": "X",
-        "b": [1, True, None, 2.5, "X", {"c": "X"}],
-        "d": {"e": {"f": ["X"]}},
+        "A": "X",
+        "B": [1, True, None, 2.5, "X", {"C": "X"}],
+        "D": {"E": {"F": ["X"]}},
     }
 
 
-def test_restore_json_does_not_touch_dict_keys() -> None:
-    assert restore_json({"x": "x"}, lambda text: text.upper()) == {"x": "X"}
+def test_restore_json_restores_dict_keys_too() -> None:
+    assert restore_json({"x": "x"}, lambda text: text.upper()) == {"X": "X"}
 
 
 def test_text_document_blocks_are_collected() -> None:
@@ -402,3 +417,164 @@ def test_text_document_blocks_are_collected() -> None:
     refs = collect_request_texts(body)
 
     assert refs == [TextRef(("messages", 0, "content", 0, "source", "data"), "IBAN")]
+
+
+TOOL_BODY = {
+    "messages": [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t",
+                    "name": "W",
+                    "input": {"Frau Müller": "x", "keep": {"Alpenbank AG": [{"Frau Müller": 1}]}},
+                }
+            ],
+        }
+    ]
+}
+
+
+def test_pseudonymize_request_replaces_keys_at_every_depth(fake_session: FakeSession) -> None:
+    new_body, _ = pseudonymize_request(TOOL_BODY, fake_session)
+
+    tool_input = new_body["messages"][0]["content"][0]["input"]
+    assert tool_input == {
+        "Frau <PERSON_FEMALE_001>": "x",
+        "keep": {"<CUSTOMER_NAME_001>": [{"Frau <PERSON_FEMALE_001>": 1}]},
+    }
+    assert list(tool_input) == ["Frau <PERSON_FEMALE_001>", "keep"]
+
+
+def test_keys_without_a_finding_keep_their_bytes_and_order(fake_session: FakeSession) -> None:
+    body = {
+        "messages": [
+            {"role": "user", "content": [{"type": "tool_use", "input": {"z": 1, "a": {"y": 2}}}]}
+        ]
+    }
+
+    new_body, _ = pseudonymize_request(body, fake_session)
+
+    assert json.dumps(new_body) == json.dumps(body)
+
+
+def _tool_body(payload: dict) -> dict:
+    return {"messages": [{"role": "user", "content": [{"type": "tool_use", "input": payload}]}]}
+
+
+def _sent_keys(body: dict, session: FakeSession) -> list[str]:
+    new_body, _ = pseudonymize_request(body, session)
+    return list(new_body["messages"][0]["content"][0]["input"])
+
+
+def test_a_key_collision_gets_an_ordinal_suffix(fake_session: FakeSession) -> None:
+    body = _tool_body({"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2})
+
+    new_body, _ = pseudonymize_request(body, fake_session)
+
+    sent = new_body["messages"][0]["content"][0]["input"]
+    assert sent == {"Frau <PERSON_FEMALE_001>#2": 1, "Frau <PERSON_FEMALE_001>": 2}
+    assert "Müller" not in json.dumps(new_body)
+
+
+def test_the_suffix_is_stable_across_requests(fake_session: FakeSession) -> None:
+    body = _tool_body({"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2})
+
+    first = json.dumps(pseudonymize_request(body, fake_session)[0])
+    second = json.dumps(pseudonymize_request(copy.deepcopy(body), fake_session)[0])
+
+    assert first == second
+
+
+def test_the_suffix_skips_ordinals_that_already_exist(fake_session: FakeSession) -> None:
+    body = _tool_body(
+        {"Frau Müller": 1, "Frau <PERSON_FEMALE_001>": 2, "Frau <PERSON_FEMALE_001>#2": 3}
+    )
+
+    keys = _sent_keys(body, fake_session)
+
+    assert keys == ["Frau <PERSON_FEMALE_001>#3", "Frau <PERSON_FEMALE_001>", "Frau <PERSON_FEMALE_001>#2"]
+    assert len(set(keys)) == 3
+
+
+def test_suffixed_keys_restore_without_the_suffix() -> None:
+    restore = lambda text: text.replace("<PERSON_001>", "Anna")
+
+    assert restore_json({"<PERSON_001>#2": 2}, restore) == {"Anna": 2}
+    assert restore_json({"<PERSON_001>": 1, "<PERSON_001>#2": 2}, restore) == {
+        "Anna": 1,
+        "<PERSON_001>#2": 2,
+    }
+
+
+def test_a_suffixed_key_never_takes_the_place_of_the_plain_one() -> None:
+    restore = lambda text: text.replace("<PERSON_001>", "Anna")
+
+    restored = restore_json({"<PERSON_001>#2": 2, "<PERSON_001>": 1}, restore)
+
+    assert restored == {"<PERSON_001>#2": 2, "Anna": 1}
+
+
+def test_a_collision_on_restore_loses_no_entry() -> None:
+    table = {"<A_001>": "Anna", "<B_001>": "Anna", "<C_001>": "Anna"}
+    restore = lambda text: table.get(text, text)
+
+    restored = restore_json({"<A_001>": 1, "<B_001>": 2, "<C_001>": 3}, restore)
+
+    assert restored == {"Anna": 1, "<B_001>": 2, "<C_001>": 3}
+
+
+def test_a_plain_hash_key_without_a_token_is_not_a_suffix() -> None:
+    assert restore_json({"item#2": 1, "item": 2}, lambda text: text) == {"item#2": 1, "item": 2}
+
+
+def test_key_paths_render_by_position_without_the_key() -> None:
+    assert format_path(("messages", 0, "content", 1, "input", Slot(2), KeyAt(0))) == (
+        "messages[0].content[1].input{2}{0}#key"
+    )
+
+
+def test_restore_response_restores_tool_use_keys(fake_session: FakeSession) -> None:
+    body = {
+        "content": [
+            {"type": "tool_use", "id": "t", "name": "W", "input": {"<IBAN_001>": "<IBAN_001>"}}
+        ]
+    }
+
+    restored = restore_response(body, fake_session)
+
+    assert restored["content"][0]["input"] == {"DE89370400440532013000": "DE89370400440532013000"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"messages": "x"},
+        {"messages": ["x"]},
+        {"messages": [{"role": "user"}]},
+        {"messages": [{"role": "user", "content": {}}]},
+        {"messages": [{"role": "user", "content": ["x"]}]},
+        {"messages": [{"role": "user", "content": [{"text": "x"}]}]},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": 1}]}]},
+        {"messages": [], "system": 3},
+        {"messages": [], "system": [1]},
+    ],
+)
+def test_a_malformed_body_has_a_shape_error(body: dict) -> None:
+    assert request_shape_error(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"messages": []},
+        {"messages": [{"role": "user", "content": "x"}], "system": "s"},
+        {"messages": [{"role": "user", "content": [{"type": "future", "x": 1}]}]},
+        {"messages": [{"role": "user", "content": [{"type": "tool_result"}]}]},
+        {"messages": [], "system": [{"type": "text", "text": "s"}]},
+    ],
+)
+def test_a_wellformed_body_has_no_shape_error(body: dict) -> None:
+    assert request_shape_error(body) is None

@@ -73,7 +73,37 @@ FILE_EXTENSIONS = frozenset(
     )
 )
 
+DIALING_CODES = frozenset(
+    {"1", "7"}
+    | {str(n) for n in (20, 27, 30, 31, 32, 33, 34, 36, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49)}
+    | {str(n) for n in (51, 52, 53, 54, 55, 56, 57, 58, 60, 61, 62, 63, 64, 65, 66)}
+    | {str(n) for n in (81, 82, 84, 86, 90, 91, 92, 93, 94, 95, 98)}
+    | {str(n) for n in range(211, 300)} - {"214", "215", "217", "219", "259"}
+    - {str(n) for n in range(292, 297)}
+    | {str(n) for n in range(350, 360)}
+    | {str(n) for n in range(370, 390) if n not in (384, 388)}
+    | {"420", "421", "423", "850", "852", "853", "855", "856", "880", "886"}
+    | {str(n) for n in range(500, 510)}
+    | {str(n) for n in range(590, 600)}
+    | {str(n) for n in range(670, 693) if n not in (671, 684)}
+    | {str(n) for n in range(960, 969)}
+    | {str(n) for n in range(970, 978)}
+    | {"992", "993", "994", "995", "996", "998"}
+)
+MIN_PHONE_DIGITS = 8
+MIN_SUBSCRIBER_DIGITS = 5
+# Countries whose national numbers always have the same length (E.164, without trunk zero).
+NATIONAL_DIGITS = {
+    "1": 10, "31": 9, "33": 9, "34": 9, "41": 9, "48": 9, "90": 10, "420": 9,
+}
+MAX_PHONE_DIGITS = 15
 MAX_LABEL_LENGTH = 63
+IPV6 = 6
+MAX_IPV6_PREFIX = 128
+MAX_SLICE_DIGITS = 2
+MIN_HEX_ONLY_COLONS = 3
+MIN_HEX_ONLY_DIGITS = 8
+MIN_SCOPE_GROUP = 4
 MIN_LABELS = 2
 
 IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
@@ -81,6 +111,12 @@ BIC_RE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
 MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}")
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 PHONE_RE = re.compile(r"[\d+()/ .\-]+")
+PHONE_INTERNATIONAL_RE = re.compile(r"\+[1-9][\d ()/\-]*")
+PHONE_GROUP_SPLIT_RE = re.compile(r"[ ()/\-]+")
+BRACKETED_PLUS_RE = re.compile(r"^\(\+([1-9]\d*)\)")
+TRUNK_ZERO_RE = re.compile(r"\(0\)")
+CODE_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z]+(?:_[a-z]+)+")
+CODE_CALL_RE = re.compile(r"[A-Za-z_][\w.]*[(\[]")
 VAT_RE = re.compile(r"[A-Z]{2}[0-9A-Z]{8,12}")
 DE_SSN_RE = re.compile(r"\d{2}\d{6}[A-Z]\d{3}")
 US_SSN_RE = re.compile(r"\d{9}")
@@ -138,11 +174,42 @@ def bic_valid(s: str) -> bool:
     return compact[4:6] in COUNTRY_CODES
 
 
+def _parse_ip(s: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse an address; an IPv6 may carry a zone id and a /prefix, a look-alike is rejected."""
+    base, slash, prefix = s.strip().partition("/")
+    if slash and (":" not in base or not prefix.isdigit() or int(prefix) > MAX_IPV6_PREFIX):
+        return None
+    try:
+        address = ipaddress.ip_address(base)
+    except ValueError:
+        return None
+    if address.version == IPV6 and not _ipv6_plausible(base):
+        return None
+    return address
+
+
+def _ipv6_plausible(base: str) -> bool:
+    """Reject `::`, scope operators like `a1::b2` or `::2` and hex-only look-alikes like `a::b`."""
+    plain = base.split("%")[0]
+    if plain == "::":
+        return False
+    if plain == "::1":
+        return True
+    digits = plain.replace(":", "")
+    if len(digits) <= MAX_SLICE_DIGITS:
+        return False
+    if not any(char.isdigit() for char in plain):
+        return plain.count(":") >= MIN_HEX_ONLY_COLONS and len(digits) >= MIN_HEX_ONLY_DIGITS
+    if ":" not in plain.replace("::", ""):
+        left = plain.split("::")[0]
+        return left == "" or len(left) >= MIN_SCOPE_GROUP
+    return True
+
+
 def ip_scope(s: str) -> str | None:
     """Return "private", "public" or None when the address is invalid."""
-    try:
-        address = ipaddress.ip_address(s.strip())
-    except ValueError:
+    address = _parse_ip(s)
+    if address is None:
         return None
     for network in PRIVATE_NETWORKS:
         if address.version == network.version and address in network:
@@ -188,6 +255,35 @@ def phone_valid(s: str) -> bool:
     if PHONE_RE.fullmatch(s.strip()) is None:
         return False
     return 7 <= sum(char.isdigit() for char in s) <= 15
+
+
+def phone_international_valid(s: str) -> bool:
+    """E.164 shape in written form: `+` (or `(+`..`)` or `00`), a country code as its own group, then separated groups.
+
+    The country code is the first digit group and must be a known one. At least one separator
+    must follow it (`+4917123456789` is not recognised without a context word). The national part
+    has to look like a number: a fixed length for countries that have one, and at least five
+    digits after the first group, which keeps lists like `+255 255 255 0` out.
+    """
+    value = s.strip()
+    if value.startswith("00"):
+        value = "+" + value[2:]
+    value = BRACKETED_PLUS_RE.sub(r"+\1", value, count=1)
+    if PHONE_INTERNATIONAL_RE.fullmatch(value) is None:
+        return False
+    cleaned = TRUNK_ZERO_RE.sub(" ", value[1:])
+    groups = [group for group in PHONE_GROUP_SPLIT_RE.split(cleaned) if group]
+    if len(groups) < 2 or groups[0] not in DIALING_CODES:
+        return False
+    national = groups[1:]
+    digits = len(groups[0]) + sum(len(group) for group in national)
+    if not MIN_PHONE_DIGITS <= digits <= MAX_PHONE_DIGITS:
+        return False
+    national_digits = digits - len(groups[0])
+    if NATIONAL_DIGITS.get(groups[0], national_digits) != national_digits:
+        return False
+    subscriber = national[1:] or national
+    return sum(len(group) for group in subscriber) >= MIN_SUBSCRIBER_DIGITS
 
 
 def date_valid(s: str) -> bool:
@@ -255,6 +351,14 @@ def secret_has_digit(s: str) -> bool:
     return any(char.isdigit() for char in s)
 
 
+def secret_value_valid(s: str) -> bool:
+    """A secret value is no variable reference such as `process.env.KEY` or `get_token_value`
+    and no call or subscript such as `hashlib.sha256(data` or `os.environ[`."""
+    if CODE_CALL_RE.match(s) is not None:
+        return False
+    return any(char.isdigit() for char in s) or CODE_REFERENCE_RE.fullmatch(s) is None
+
+
 VALIDATORS: dict[str, Callable[[str], bool]] = {
     "luhn": luhn_valid,
     "iban": iban_valid,
@@ -263,9 +367,11 @@ VALIDATORS: dict[str, Callable[[str], bool]] = {
     "mac": mac_valid,
     "vin": vin_valid,
     "phone": phone_valid,
+    "phone_international": phone_international_valid,
     "date": date_valid,
     "tax_id": tax_id_valid,
     "ssn": ssn_valid,
     "fqdn": fqdn_valid,
     "secret_digit": secret_has_digit,
+    "secret_value": secret_value_valid,
 }

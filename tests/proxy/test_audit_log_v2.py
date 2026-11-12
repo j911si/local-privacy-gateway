@@ -118,8 +118,8 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     assert entry["session"] == hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
     assert entry["path"] == "/v1/messages"
     assert entry["streaming"] is False
-    assert entry["verdict"] == "ok"
-    assert entry["coverage"] == {"checked_fields": 2, "unchecked_fields": 1}
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+    assert entry["coverage"] == {"checked_fields": 2, "checked_keys": 0, "unchecked_fields": 1}
 
     notice = field(entry, "messages[0].content[0].text")
     assert notice["status"] == "checked"
@@ -210,7 +210,7 @@ async def test_unchecked_fields_are_listed_with_observed_and_left_unchanged(
     assert sent["messages"][1]["content"][0] == thinking
     assert sent["messages"][0]["content"][2] == image
     (entry,) = entries(audit_dir)
-    assert entry["verdict"] == "ok"
+    assert entry["verdict"] == "ok_with_unchecked_findings"
     tool = field(entry, "tools[0]")
     assert tool == {
         "path": "tools[0]",
@@ -319,6 +319,24 @@ async def test_an_upstream_failure_is_logged_as_error(gateway: Gateway, audit_di
     assert response.status_code == 502
     (entry,) = entries(audit_dir)
     assert entry["verdict"] == "error"
+    assert entry["outgoing"]["upstream_status"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 400, 429])
+async def test_the_upstream_status_is_logged(
+    gateway: Gateway, audit_dir: Path, status: int
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"type": "error", "error": {"type": "x", "message": "y"}})
+
+    async with build(gateway, audit_dir, handler) as client:
+        response = await client.post("/v1/messages", json=body_with("Hallo"))
+
+    assert response.status_code == status
+    (entry,) = entries(audit_dir)
+    assert entry["outgoing"]["upstream_status"] == status
+    assert entry["verdict"] in ("ok", "ok_with_unchecked_findings")
 
 
 @pytest.mark.asyncio
@@ -419,7 +437,7 @@ async def test_a_value_found_in_a_later_field_is_hidden_in_earlier_fields(
     first_entry, _ = entries(audit_dir)
     callback = field(first_entry, "messages[0].content[1].text")
     assert [item["cls"] for item in callback["findings"]] == ["PERSON_LAST_NAME"]
-    assert first_entry["verdict"] == "ok"
+    assert first_entry["verdict"] == "ok_with_unchecked_findings"
 
 
 @pytest.mark.asyncio
@@ -462,7 +480,7 @@ async def test_an_untransformed_system_prompt_is_unchecked_with_observed(
     assert response.status_code == 200
     assert json.loads(seen[0].content)["system"] == system
     (entry,) = entries(audit_dir)
-    assert entry["verdict"] == "ok"
+    assert entry["verdict"] == "ok_with_unchecked_findings"
     prompt = field(entry, path)
     assert prompt["status"] == "unchecked"
     assert prompt["reason"] == "system"

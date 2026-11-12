@@ -12,9 +12,12 @@ from typing import Any
 from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.transform import (
+    KEY_SUFFIX_RE,
+    KeyAt,
     Path,
     TextRef,
     UncheckedRef,
+    collect_keyed,
     collect_strings,
     format_path,
 )
@@ -23,6 +26,8 @@ SESSION_HASH_CHARS = 12
 REDACT_POLICY = "redact"
 BASE64_TYPE = "base64"
 TIMEOUT = "timeout"
+OK = "ok"
+OK_WITH_UNCHECKED_FINDINGS = "ok_with_unchecked_findings"
 
 
 @dataclass(frozen=True)
@@ -124,11 +129,16 @@ def entry(
     rescan: Rescan,
     failed_index: int | None = None,
     failed_leaks: list[Leak] | None = None,
+    upstream_status: int | None = None,
 ) -> dict[str, object]:
     """The `proxy_request` v2 fields (without `v`, `event`, `ts`); never carries a value."""
     fields: list[dict[str, object]] = []
+    clean_keys = 0
     for index, ref in enumerate(checked):
         field_findings = findings[index] if index < len(findings) else []
+        if isinstance(ref.path[-1], KeyAt) and not field_findings and index != failed_index:
+            clean_keys += 1
+            continue
         item: dict[str, object] = {
             "path": format_path(ref.path),
             "status": "checked",
@@ -143,6 +153,8 @@ def entry(
         fields.append(item)
     for ref in unchecked:
         fields.append(_unchecked(ref, observed or []))
+    if verdict == OK and any(item["observed"] for item in fields if item["status"] == "unchecked"):
+        verdict = OK_WITH_UNCHECKED_FINDINGS
     return {
         "request_id": str(uuid.uuid4()),
         "session": hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:SESSION_HASH_CHARS],
@@ -150,12 +162,17 @@ def entry(
         "streaming": streaming,
         "duration_ms": duration_ms,
         "verdict": verdict,
-        "coverage": {"checked_fields": len(checked), "unchecked_fields": len(unchecked)},
+        "coverage": {
+            "checked_fields": len(checked) - clean_keys,
+            "checked_keys": clean_keys,
+            "unchecked_fields": len(unchecked),
+        },
         "fields": fields,
         "outgoing": {
             "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
             "bytes": len(payload) if payload is not None else 0,
             "leakage": leakage,
+            "upstream_status": upstream_status,
             "rescan": {
                 "status": rescan.status,
                 **({"reason": rescan.reason} if rescan.reason is not None else {}),
@@ -182,11 +199,17 @@ def unchecked_leaves(unchecked: list[UncheckedRef]) -> list[TextRef]:
 
 
 def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
-    """String leaves except the `data` of a base64 source, which detection cannot scan fast."""
+    """String leaves except the `data` of a base64 source, which detection cannot scan fast.
+
+    The input of a `tool_use` block is scanned with its keys, addressed by position.
+    """
     if isinstance(value, dict):
         leaves: list[TextRef] = []
         for key, item in value.items():
             if key == "data" and value.get("type") == BASE64_TYPE:
+                continue
+            if key == "input" and value.get("type") == "tool_use":
+                leaves.extend(collect_keyed(item, (*path, key)))
                 continue
             leaves.extend(scannable_strings(item, (*path, key)))
         return leaves
@@ -210,9 +233,20 @@ def scan(
     for leaf in leaves:
         if deadline is not None and time.perf_counter() > deadline:
             break
-        for leak in rescan(leaf.text):
+        for leak in rescan(_scanned_text(leaf)):
             hits.append(Hit(leaf.path, leak.data_class, leak.start, leak.end))
     return hits
+
+
+MAX_SUFFIX_DIGITS = 3
+
+
+def _scanned_text(leaf: TextRef) -> str:
+    """The leaf text, without the `#n` suffix the proxy itself added to a colliding key."""
+    match = KEY_SUFFIX_RE.fullmatch(leaf.text) if isinstance(leaf.path[-1], KeyAt) else None
+    if match is None or len(match.group("number")) > MAX_SUFFIX_DIGITS:
+        return leaf.text
+    return match.group("base")
 
 
 def _finding(log: RequestAuditLog, text: str, item: FieldFinding) -> dict[str, object]:

@@ -32,6 +32,7 @@ pgw-proxy = "privacy_gateway_proxy.cli:main"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.15",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.5",
