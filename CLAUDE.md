@@ -50,6 +50,11 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Replacement and leak check share one search for known values (`known_occurrences` /
   `KnownMatcher` in `detect/session.py`); `SubstringSweep` is the independent second search that
   re-replaces and blocks only when something remains. Do not add a second matcher to `leakage.py`.
+- A pattern with the named groups `label` and `value` skips the class validator and
+  `context_required`, and `value` is the span (`TAX_ID` behind `Steuer-ID:`).
+- `context.LABEL_NAME_RE` takes names behind person labels; behind the generic label `name`
+  (group `generic`) a match needs a word from the first-name list. Deriving single name parts
+  from a full name was tried twice and removed: it made the leak check block valid requests.
 - The proxy replaces and rescans the keys of objects inside `tool_use.input` (audit paths
   `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
   `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
