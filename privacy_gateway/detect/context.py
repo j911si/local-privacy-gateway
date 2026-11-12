@@ -212,7 +212,7 @@ _LABEL_COLON = r"[ \t]*:[ \t]*"
 _LABEL_OPTIONAL = r"(?:[ \t]*:[ \t]*|[ \t]+)"
 LABEL_NAME_RE = re.compile(
     r"(?<![\w-])(?i:"
-    r"(?:name|full name|vor- und nachname|kunde|customer|patient)" + _LABEL_COLON + r"|"
+    r"(?:(?P<generic>name)|full name|vor- und nachname|kunde|customer|patient)" + _LABEL_COLON + r"|"
     r"(?:kontoinhaber(?:in)?|inhaber(?:in)?|karteninhaber(?:in)?|patientin|versicherte[r]?"
     r"|kundin|empfänger(?:in)?|ansprechpartner(?:in)?|mitarbeiter(?:in)?"
     r"|account holder|cardholder)" + _LABEL_OPTIONAL + r")" + _NAME_BODY
@@ -301,6 +301,15 @@ def _cities() -> frozenset[str]:
 @cache
 def _common_name_words() -> frozenset[str]:
     return frozenset(term.lower() for term in load_terms("common_name_words.txt"))
+
+
+@cache
+def _first_names() -> frozenset[str]:
+    return frozenset(term.lower() for term in load_terms("first_names_de_en.txt"))
+
+
+def _has_first_name(name: str) -> bool:
+    return any(word.lower() in _first_names() for word in re.split(r"[\s-]+", name))
 
 
 def _trimmed_span(text: str, start: int, end: int) -> Span:
@@ -494,8 +503,10 @@ class ContextStage:
     def _label_names(self, text: str, config: Config, out: list[Finding]) -> None:
         organizations = [f.span for f in out if f.data_class == "ORGANIZATION_NAME"]
         for match in LABEL_NAME_RE.finditer(text):
-            span = _group_span(text, match, 1)
+            span = _group_span(text, match, 2)
             if any(span.overlaps(org) for org in organizations):
+                continue
+            if match.group("generic") and not _has_first_name(text[span.start : span.end]):
                 continue
             if self._label_name_allowed(text[span.start : span.end]):
                 self._emit(config, out, span, "PERSON_FULL_NAME", 0.9, {"source": "label"})

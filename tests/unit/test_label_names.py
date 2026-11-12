@@ -65,6 +65,25 @@ KEPT = [
     "Der Patient Max Test",
 ]
 
+GENERIC_NAME_LABEL_KEPT = [
+    "name: Run Unit Tests",
+    "Model Name: MacBook Pro",
+    "name: Deploy To Production",
+    "- name: Install Python Dependencies",
+    "name: Nightly Regression Run",
+    "Name: Red Hat Enterprise Linux",
+    "{name: React Native Paper, version: 5}",
+    "### Name: Session Handoff Skill",
+    "Name: Mac Mini Worker",
+    "Package Name: Google Chrome Stable",
+    "Host Name: Build Agent Seven",
+    "Display Name: Guest Network",
+    "Service Name: Print Spooler",
+    "File Name: Annual Report Final.docx",
+    "Profile Name: Home Office Wifi",
+    "DEBUG Name: Cache Warmup Job finished in 3s",
+]
+
 
 @pytest.mark.parametrize(("line", "word"), NAMED)
 def test_label_name_is_replaced(gateway: Gateway, line: str, word: str) -> None:
@@ -81,6 +100,12 @@ def test_a_redacted_pin_and_a_labelled_name_in_one_line(gateway: Gateway) -> Non
 
 @pytest.mark.parametrize("line", KEPT)
 def test_non_person_label_values_stay(gateway: Gateway, line: str) -> None:
+    out = _round(gateway, line)
+    assert "PERSON" not in out
+
+
+@pytest.mark.parametrize("line", GENERIC_NAME_LABEL_KEPT)
+def test_generic_name_label_needs_a_known_first_name(gateway: Gateway, line: str) -> None:
     out = _round(gateway, line)
     assert "PERSON" not in out
 
