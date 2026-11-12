@@ -64,7 +64,7 @@ Text runs through a fixed stage order, defined in exactly one place
 | **StructuredStage** | Parses first, classifies components second: URLs (host, path, query parameters, embedded credentials, signature parameters), e-mail addresses, JWTs, PEM private-key blocks, database connection strings, HTTP headers and cookies. |
 | **PatternStage** | One regex set per class where a format exists: IBAN, BIC, credit card, IPv4/IPv6, MAC, GPS, phone numbers, dates, tax and social-security IDs, VIN, vehicle registration, cloud keys (`AKIA…`, `ghp_…`, `glpat-…`, `sk-ant-…`, `xox…`). Each candidate must pass its validator — Luhn, IBAN MOD-97, `ipaddress`, VIN check digit, calendar date — or it is dropped. |
 | **DictionaryStage** | Exact and case-insensitive multi-word matching against configured lists plus bundled first/last-name and city lists. Bundled name hits are low-confidence candidates; they only become findings when a context rule or correlation confirms them. |
-| **ContextStage** | Deterministic markers: salutations (`Frau`, `Herr`, `Mr`, `Mrs`, `Ms`), `Kundennummer:`, `Konto`, `Vertrag`, `Ticket`, `namespace:`, `pod/`, `password`, `pin`, person labels (`Name:`, `Kontoinhaber`, `Customer:`), a birth date in front of `geboren`/`born`, address grammar, job and department markers. |
+| **ContextStage** | Deterministic markers: salutations (`Frau`, `Herr`, `Mr`, `Mrs`, `Ms`), `Kundennummer:`, `Konto`, `Vertrag`, `Ticket`, `namespace:`, `pod/`, `password`, `pin`, address grammar, job and department markers. |
 | **`correlate()`** | Gives every occurrence of the same value one `entity_id`, so repeated occurrences share a token. Each spelling of an entity gets its own token (`Anna`, `ANNA` and `anna` are one entity with three tokens), so every occurrence is restored byte for byte. |
 | **`min_confidence` filter** | Drops everything below the configured threshold (default `0.5`). |
 | **`resolve_overlaps()`** | Resolves overlapping findings by class priority, then span length, then stage order. |
@@ -1123,21 +1123,11 @@ Supporting properties:
   `Müller` without a salutation or a known full name is not. A single first name or a single city
   name on its own falls below `min_confidence` and is dropped, because treating every occurrence of
   a common first name as a person produces unusable false positives.
-- **Name parts across turns.** From a full name a session also learns the first and the last word
-  as words of their own: after `Frau Anna Hollerbach`, a later `Hollerbach` or `Anna` is replaced
-  with its own token. A part matches only in its exact spelling and only as a whole word, so
-  `hollerbach.py`, `/srv/hollerbach/` and `x.Hollerbach` stay as they are. Parts shorter than four
-  letters, hyphenated parts, middle names, particles (`von`, `de`) and common words (`Max`,
-  `Stein`, city and country names) are not learned.
-- **Names behind a label.** `Name:`, `Kontoinhaber`, `Customer:`, `Patient:` and similar labels
-  turn the two or three capitalized words behind them into a person name. A single word behind such
-  a label is not taken (`Kontoinhaber Müller`), and an unknown two-word product or company name
-  behind `Name:` or `Kunde:` is replaced like a person.
-- **Labelled numbers.** `PIN`, `TAN` and `OTP` are redacted when the digits follow the word directly
-  or after up to 40 characters and a `:` or `=` on the same line, so `PIN-Länge: 123456` is redacted
-  too. An 11-digit number directly behind `Steuer-ID`, `Steuernummer`, `IdNr`, `TIN` or `Tax ID` is
-  replaced without a valid check digit; without such a label the check digit decides. German tax
-  numbers written with slashes are not covered by this rule.
+- **Name parts across turns.** A session recognizes only the surface forms it has stored. If turn 1
+  contains `Frau Anna Müller` and turn 2 contains only `Müller`, turn 2 may go out in the clear or
+  receive a second token. Within one document `correlate()` joins them; across turns it does not.
+  (An automatic derivation of name parts was implemented and removed again: it made the leak check
+  reject legitimate requests.)
 - **Images, PDFs and base64.** `image` blocks and `document` blocks with a base64 or PDF source
   pass through unchanged and are never scanned. Screenshots and scanned invoices are not protected.
 - **`thinking` blocks keep their tokens.** They are signed by Anthropic, so the proxy cannot rewrite
