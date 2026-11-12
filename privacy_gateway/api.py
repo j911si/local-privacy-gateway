@@ -17,7 +17,6 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
-from privacy_gateway.detect.session import known_forms
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
 from privacy_gateway.leakage import check_leakage, exempt_from_residual, numbered_tokens
 from privacy_gateway.model import (
@@ -309,7 +308,11 @@ class GatewaySession:
     def _known(self) -> dict[str, tuple[str, str]]:
         if self._known_cache is not None:
             return self._known_cache
-        known = known_forms(self._entries)
+        known: dict[str, tuple[str, str]] = {}
+        for token, entry in self._entries.items():
+            for form in [entry.value, *entry.surface_forms]:
+                if form:
+                    known.setdefault(form, (entry.data_class, token))
         self._known_cache = known
         return known
 

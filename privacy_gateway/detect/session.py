@@ -9,11 +9,10 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import ClassRegistry
-from privacy_gateway.detect.context import learnable_name_part
 from privacy_gateway.detect.dictionaries import TrieMatcher, allows_genitive
 from privacy_gateway.detect.normalize import normalized, offset_map
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, compact_digit_run, mostly_digits
-from privacy_gateway.model import Finding, Span, VaultEntry
+from privacy_gateway.model import Finding, Span
 from privacy_gateway.tokens import ANY_TOKEN
 
 if TYPE_CHECKING:
@@ -28,44 +27,9 @@ MIN_DIGITS_FOR_SWEEP = 6
 MIN_LENGTH_FOR_GLUED = 3
 LITERAL_ESCAPE_LETTERS = "ntr"
 PATTERN_CACHE_SIZE = 4096
-FULL_NAME = "PERSON_FULL_NAME"
-FIRST_NAME = "PERSON_FIRST_NAME"
-LAST_NAME = "PERSON_LAST_NAME"
 
 Known = tuple[str, str]
 Hit = tuple[Span, Known]
-
-
-class KnownForms(dict[str, Known]):
-    """Known forms; `exact` lists name parts that match only in their own spelling."""
-
-    exact: frozenset[str] = frozenset()
-
-
-def known_forms(entries: Mapping[str, VaultEntry]) -> KnownForms:
-    """Every known form of a session's entries, plus the first and last name of full names."""
-    known = KnownForms()
-    for token, entry in entries.items():
-        for form in [entry.value, *entry.surface_forms]:
-            if form:
-                known.setdefault(form, (entry.data_class, token))
-    exact: set[str] = set()
-    for token, entry in entries.items():
-        words = entry.value.split()
-        if entry.data_class != FULL_NAME or len(words) < 2:
-            continue
-        for part, data_class in ((words[0], FIRST_NAME), (words[-1], LAST_NAME)):
-            if learnable_name_part(part):
-                exact.add(part)
-                known.setdefault(part, (data_class, token))
-    known.exact = frozenset(exact)
-    return known
-
-
-@lru_cache(maxsize=PATTERN_CACHE_SIZE)
-def _exact_pattern(word: str, genitive: bool) -> re.Pattern[str]:
-    ending = "s?" if genitive else ""
-    return re.compile(rf"(?<![\w/\\@.-]){re.escape(word)}{ending}(?![\w@/\\])(?![.-]\w)")
 
 
 @lru_cache(maxsize=PATTERN_CACHE_SIZE)
@@ -125,12 +89,7 @@ class KnownMatcher:
         self._substrings: list[_Substring] = []
         self._by_digits: dict[str, Known] = {}
         self._signed_digits: set[str] = set()
-        self._exact: list[tuple[re.Pattern[str], Known]] = []
-        exact = getattr(known, "exact", frozenset())
         for form, value in known.items():
-            if form in exact:
-                self._exact.append((_exact_pattern(form, allows_genitive(registry, value[0])), value))
-                continue
             words = normalized(form).split()
             if not words:
                 continue
@@ -188,8 +147,6 @@ class KnownMatcher:
             for span, folded in self._trie.find(work):
                 candidates.append((span.start, span.end, self._values[folded]))
         for pattern, value in self._spaced:
-            candidates.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
-        for pattern, value in self._exact:
             candidates.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
         candidates.extend((s.start, s.end, v) for s, v in self._digit_hits(work))
         for substring in self._substrings:
@@ -283,10 +240,7 @@ class SubstringSweep:
         self._spaced: list[tuple[re.Pattern[str], Known]] = []
         self._short_mixed: set[str] = set()
         self._glued_only: set[str] = set()
-        exact = getattr(known, "exact", frozenset())
         for form, value in known.items():
-            if form in exact:
-                continue
             words = normalized(form).split()
             key = _lower(" ".join(words))
             if key in self._values or not self._long_enough(key):
@@ -378,8 +332,9 @@ class SessionStage:
     name = "session"
 
     def __init__(self, known: Mapping[str, Known]) -> None:
-        self._known = KnownForms((form, value) for form, value in known.items() if form)
-        self._known.exact = getattr(known, "exact", frozenset())
+        # ponytail: no name-part derivation; a stored part ("Alex") makes the
+        # case-insensitive leak check reject every "/home/alex/" in later text
+        self._known = {form: value for form, value in known.items() if form}
         self._matcher: KnownMatcher | None = None
         self._sweep: SubstringSweep | None = None
 
