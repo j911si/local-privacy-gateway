@@ -21,6 +21,7 @@ LOCAL_UPSTREAM_PREFIXES = ("http://127.0.0.1", "http://localhost")
 PROCESS_SESSION_KEY = secrets.token_hex(8)
 AUDIT_DIR_ENV = "PGW_AUDIT_LOG_DIR"
 DEFAULT_AUDIT_DIR = Path("~/.local/state/privacy-gateway/audit")
+ALLOW_UNAUTHENTICATED_ENV = "PGW_PROXY_ALLOW_UNAUTHENTICATED"
 
 
 @dataclass
@@ -44,6 +45,7 @@ class ProxySettings:
     auth_token: str = field(default="", repr=False)
     tool_restore_rules: tuple[ToolRule, ...] = ()
     tool_restore_on_deny: str = KEEP_TOKEN
+    allow_unauthenticated: bool = False
 
 
 def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
@@ -57,6 +59,18 @@ def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None)
 def is_loopback(host: str) -> bool:
     """True when the host part addresses this machine only."""
     return host.strip().lower() in LOOPBACK_HOSTS
+
+
+def check_bind(settings: ProxySettings) -> None:
+    """Refuse a non-loopback bind without an auth token unless the opt-out is set."""
+    if is_loopback(settings.listen_host) or settings.auth_token or settings.allow_unauthenticated:
+        return
+    raise ConfigError(
+        f"refusing to listen on the non-loopback address {settings.listen_host} without an "
+        "auth token: anyone who reaches the port could restore pseudonymized values. Put a "
+        "token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE (clients send it as x-pgw-auth), "
+        f"or set {ALLOW_UNAUTHENTICATED_ENV}=1 to accept the risk"
+    )
 
 
 def _upstream_allowed(url: str) -> bool:
@@ -156,6 +170,9 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     on_deny = environment.get("PGW_PROXY_TOOL_RESTORE_ON_DENY")
     if on_deny is not None:
         values["tool_restore_on_deny"] = on_deny
+    allow_unauthenticated = environment.get(ALLOW_UNAUTHENTICATED_ENV)
+    if allow_unauthenticated is not None:
+        values["allow_unauthenticated"] = allow_unauthenticated.strip().lower() in TRUTHY_VALUES
     audit_dir = environment.get(AUDIT_DIR_ENV)
     if audit_dir:
         values["audit_dir"] = Path(audit_dir)
@@ -180,4 +197,5 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
         raise ConfigError(f"unknown session strategy: {settings.session_strategy!r}")
     if not _upstream_allowed(settings.upstream_base_url):
         raise ConfigError(f"upstream must be https or loopback: {settings.upstream_base_url!r}")
+    check_bind(settings)
     return settings

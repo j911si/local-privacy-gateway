@@ -82,6 +82,13 @@ def log_startup(settings: ProxySettings) -> None:
         )
         if not settings.auth_token:
             log.warning("listening on a non-loopback address with no auth token")
+        if not settings.auth_token and settings.allow_unauthenticated:
+            log.warning(
+                "UNAUTHENTICATED proxy on %s because PGW_PROXY_ALLOW_UNAUTHENTICATED is set: "
+                "anyone who reaches the port and knows a session key can restore that "
+                "session's original values; set PGW_PROXY_AUTH_TOKEN_FILE instead",
+                settings.listen_host,
+            )
 
 
 def _serve(args: argparse.Namespace) -> int:

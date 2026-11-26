@@ -27,6 +27,7 @@ from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
 from privacy_gateway_proxy.settings import (
     ProxySettings,
     audit_dir_for,
+    check_bind,
     is_loopback,
     is_normal_path,
 )
@@ -72,6 +73,7 @@ except ImportError:
 
 def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient | None = None):
     """Build the proxy application for one gateway and one upstream client."""
+    check_bind(settings)
     upstream = client if client is not None else httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     sessions: OrderedDict[str, Any] = OrderedDict()
     trail = RequestAuditLog(audit_dir_for(settings))

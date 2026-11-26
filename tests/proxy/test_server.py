@@ -645,11 +645,15 @@ async def test_loopback_host_headers_are_accepted(
 async def test_no_host_check_when_bound_to_a_public_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = ProxySettings(upstream_base_url=UPSTREAM, listen_host="0.0.0.0")
+    settings = ProxySettings(
+        upstream_base_url=UPSTREAM, listen_host="0.0.0.0", auth_token="tok-test"
+    )
     client, _, _ = build(monkeypatch, _recording_handler([]), settings=settings)
     async with client:
         response = await client.post(
-            "/v1/messages", json=request_body(), headers={"host": "somewhere.test"}
+            "/v1/messages",
+            json=request_body(),
+            headers={"host": "somewhere.test", "x-pgw-auth": "tok-test"},
         )
 
     assert response.status_code == 200

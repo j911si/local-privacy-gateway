@@ -263,7 +263,7 @@ stored token is lost.
 | `PGW_RESTORE_MODE` | `strict` | Default restore mode, `strict` or `lenient`. |
 | `PGW_CONFIG` | unset | Extra configuration file, applied after the user config. |
 | `PGW_SKIP_USER_CONFIG` | unset | `1`/`true`/`yes` ignores `~/.config/privacy-gateway/config.yaml`. Useful for reproducible runs and tests. |
-| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. |
+| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` (also `0.0.0.0`, `[::]` and private addresses such as Tailscale's `100.x`) needs an auth token, else the proxy does not start. |
 | `PGW_PROXY_UPSTREAM` | `https://api.anthropic.com` | Upstream base URL. Only `https://` or `http://127.0.0.1` / `http://localhost` are accepted; anything else is a `ConfigError`. |
 | `PGW_PROXY_SESSION_STRATEGY` | `metadata` | How the vault session key is derived: `metadata`, `header` or `single`. |
 | `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
@@ -273,6 +273,7 @@ stored token is lost.
 | `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
 | `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
 | `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
+| `PGW_PROXY_ALLOW_UNAUTHENTICATED` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy start on a non-loopback address without an auth token, with a warning in the startup log. Anyone who reaches the port and knows a session key gets that session's original values back. |
 | `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
 | `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
@@ -620,8 +621,8 @@ uses `UMask=0077` and the sandboxing options a user manager allows (`NoNewPrivil
 
 If another machine has to reach the proxy, bind it only to an address that nothing but trusted
 devices can reach, such as a private VPN interface, never to `0.0.0.0`. On a non-loopback address
-the `Host` header check is off (the proxy logs a warning at startup). Set `PGW_PROXY_AUTH_TOKEN_FILE`
-there. Without a token, network reachability is the only access control.
+the `Host` header check is off (the proxy logs a warning at startup), and the proxy only starts
+with `PGW_PROXY_AUTH_TOKEN_FILE` set.
 
 ### Pointing a client at it
 
@@ -859,10 +860,13 @@ $ curl -s -H 'Host: evil.example' -X POST http://127.0.0.1:8787/v1/messages -d '
 {"type":"error","error":{"type":"privacy_gateway_forbidden","message":"host header is not loopback"}}
 ```
 
-The proxy auth token is optional and off by default. Without it, anything that can reach the port
+The proxy auth token is off by default on loopback. Without it, anything that can reach the port
 and knows or guesses a session key can have that session's tokens restored. On a single-user
-machine bound to loopback that is acceptable. On a shared machine or a network address, set
-`PGW_PROXY_AUTH_TOKEN_FILE`.
+machine bound to loopback that is acceptable; on a shared machine, set `PGW_PROXY_AUTH_TOKEN_FILE`.
+On any other address (`0.0.0.0`, `[::]`, a LAN or VPN address) the proxy refuses to start without
+a token. The check covers every route except `GET /health`, which answers `{"status":"ok"}` and
+nothing else. `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` overrides the refusal; that setup is unsafe and
+the startup log says so.
 
 The proxy holds no credentials of its own: `x-api-key` and `Authorization` are forwarded untouched.
 
@@ -875,24 +879,27 @@ on one host, bind it to that host's address on the private network and point the
 ships with a loopback bind. Its commented Tailscale variant reads the Tailscale IPv4 address when
 the service starts (`tailscale ip -4`), refuses to start when there is none and listens on that
 address only. Prompt B in [`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md) switches the unit to
-that variant for you, and Prompt C connects a client.
+that variant for you, and Prompt C connects a client. The proxy needs an auth token on that
+address.
 
 ```bash
 # on the proxy host
+umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token
+export PGW_PROXY_AUTH_TOKEN_FILE=~/.config/privacy-gateway/proxy-auth-token
 uv run pgw-proxy serve --listen "$(tailscale ip -4 | head -n1):8787"
 
-# on every client
+# on every client (the same token, sent as the x-pgw-auth header)
 export ANTHROPIC_BASE_URL=http://<proxy-host>:8787
+export ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: <token>"
 claude --model "sonnet[1m]"
 curl http://<proxy-host>:8787/health        # {"status":"ok"} when the proxy is reachable
 ```
 
 Limits of this setup:
 
-- The host check is off for a non-loopback bind and the proxy has no token. The only protection is
-  that devices outside the private network cannot reach the address. Limit it further with the
-  network's access rules (Tailscale ACLs, a firewall) to your own devices. Never bind `0.0.0.0` on a
-  host with a public interface.
+- The host check is off for a non-loopback bind; the auth token is the access control. Limit
+  reachability further with the network's access rules (Tailscale ACLs, a firewall) to your own
+  devices. Never bind `0.0.0.0` on a host with a public interface.
 - Between client and proxy the prompts travel as plain HTTP with real values. The private network
   encrypts that hop, nothing else does.
 - A client without a connection to the private network gets a connection error. There is no
@@ -1209,7 +1216,9 @@ Supporting properties:
   text the model reads back. Text answers are restored, so whatever you copy from them by hand
   carries the real value. Placeholders are numbered in order and easy to guess.
 - **Anything at the proxy port.** Without `PGW_PROXY_AUTH_TOKEN`, any local process that reaches
-  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle.
+  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle. A non-loopback
+  bind without a token is refused unless `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` is set; with it,
+  every device that reaches the port is such a process.
 - **Whatever the rules do not describe.** See below.
 
 ### Known limits
@@ -1315,8 +1324,8 @@ body was not transformable at all (see the status table above).
 
 The `Host` header is not loopback. Use `http://127.0.0.1:8787` or `http://localhost:8787` in
 `ANTHROPIC_BASE_URL`, not a LAN address or a hostname that resolves elsewhere. If you really need
-to bind to a non-loopback address, the check turns itself off — and so does your only access
-control, which the startup log warns about. For several machines use the private-network setup in
+to bind to a non-loopback address, the check turns itself off and the proxy needs an auth token
+to start. For several machines use the private-network setup in
 [Sharing one proxy across machines](#sharing-one-proxy-across-machines).
 
 ### Claude Code reports a connection error with a shared proxy
