@@ -57,7 +57,6 @@ class AuditLog:
 
     def proxy_request(
         self,
-        session_key: str,
         path: str,
         fields: int,
         tokens: int,
@@ -69,7 +68,6 @@ class AuditLog:
     ) -> None:
         self._write(
             "proxy_request",
-            session_key=session_key,
             path=path,
             fields=fields,
             tokens=tokens,

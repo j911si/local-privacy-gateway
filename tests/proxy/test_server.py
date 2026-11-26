@@ -1,4 +1,5 @@
 import json
+import re
 import stat
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ UPSTREAM = "https://upstream.test"
 SETTINGS = ProxySettings(upstream_base_url=UPSTREAM)
 SECRET = "Frau Müller"
 TOKEN = "<PERSON_FEMALE_001>"
+DUMP_STAMP_AND_ID = r"\d{8}T\d{6}\.\d{6}-[0-9a-f]{12}"
 
 
 class StubSession:
@@ -190,7 +192,7 @@ async def test_non_streaming_request_is_pseudonymized_and_restored(
     assert event["fields"] == 1
     assert event["leakage"] == "ok"
     assert event["streaming"] is False
-    assert event["session_key"] == "0b1c2d3e-1111-2222-3333-444444444444"
+    assert "session_key" not in event
     assert event["system_transformed"] is True
 
 
@@ -508,7 +510,8 @@ async def test_debug_dir_receives_the_transformed_body(
 
     dumps = sorted((tmp_path / "dumps").glob("*.json"))
     assert len(dumps) == 1
-    assert dumps[0].name.endswith("-0b1c2d3e-1111-2222-3333-444444444444.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"\.json", dumps[0].name)
+    assert "0b1c2d3e" not in dumps[0].name
     written = dumps[0].read_text(encoding="utf-8")
     assert json.loads(written)["messages"][0]["content"] == f"Hallo {TOKEN}"
     assert SECRET not in written
@@ -533,6 +536,7 @@ async def test_debug_dir_gets_only_the_failed_original_on_a_leak(
     dumps = list(tmp_path.glob("*.json"))
     assert len(dumps) == 1
     assert dumps[0].name.endswith("-FAILED-original.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"-FAILED-original\.json", dumps[0].name)
     assert json.loads(dumps[0].read_text(encoding="utf-8")) == request_body()
 
 
@@ -770,4 +774,5 @@ async def test_the_original_dump_needs_the_switch(
     dumps = list(tmp_path.glob("*.json"))
     assert len(dumps) == 1
     assert dumps[0].name.endswith("-FAILED-original.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"-FAILED-original\.json", dumps[0].name)
     assert stat.S_IMODE(dumps[0].stat().st_mode) == 0o600

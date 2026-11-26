@@ -7,11 +7,29 @@ import pytest
 from privacy_gateway.config import Config, load_config
 
 SKIP_USER_CONFIG_ENV = {"PGW_SKIP_USER_CONFIG": "1"}
+HOME_DIRS = {
+    "XDG_CONFIG_HOME": ".config",
+    "XDG_DATA_HOME": ".local/share",
+    "XDG_STATE_HOME": ".local/state",
+    "XDG_CACHE_HOME": ".cache",
+}
+UNSET_ENV = ("PGW_CONFIG", "PGW_PROXY_DEBUG_DIR", "PGW_PROXY_DEBUG_ORIGINALS")
 
 
 @pytest.fixture(autouse=True)
 def _audit_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep the daily proxy audit log of every test inside its tmp_path."""
+    """Keep the daily proxy audit log of every test inside its tmp_path.
+
+    HOME and the XDG directories point into tmp_path as well, so a test that drops one of
+    the PGW_* paths below falls back to a `~` default under tmp_path, never the user's own
+    vault, key or audit log.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for name, relative in HOME_DIRS.items():
+        monkeypatch.setenv(name, str(home / relative))
+    for name in UNSET_ENV:
+        monkeypatch.delenv(name, raising=False)
     directory = tmp_path / "audit-v2" / "audit"
     monkeypatch.setenv("PGW_AUDIT_LOG_DIR", str(directory))
     for name, value in _private_paths(tmp_path).items():

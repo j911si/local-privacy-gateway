@@ -1,11 +1,16 @@
 """Data minimization of the `proxy_request` v2 log: no value, no value hash, no salt file.
 
+The session key (here the conversation UUID from `metadata.user_id`) is a credential: whoever
+presents it to the proxy gets the session's tokens restored. No log and no debug file name may
+carry it, neither plain nor shortened nor hashed.
+
 Every key of every record is checked against an explicit allowlist, so a new field breaks
 this test and has to be reviewed for what it reveals.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterator
@@ -16,6 +21,7 @@ import httpx
 import pytest
 
 from privacy_gateway import Gateway
+from privacy_gateway.audit import AuditLog
 from privacy_gateway_proxy import server
 from privacy_gateway_proxy.settings import ProxySettings
 
@@ -146,8 +152,18 @@ def _check_keys(record: dict) -> None:
         assert set(hit) <= RESCAN_FINDING_KEYS
 
 
-async def _send(gateway: Gateway, audit_dir: Path) -> httpx.Response:
-    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir)
+def _derived(key: str) -> set[str]:
+    """The key in plain forms plus 8-character prefixes of common hex digests of them."""
+    forms = {key, key.lower(), key.replace("-", ""), key.lower().replace("-", "")}
+    derived = set(forms)
+    for form in forms:
+        for name in ("sha256", "sha1", "md5", "sha512", "blake2b", "sha3_256"):
+            derived.add(hashlib.new(name, form.encode("utf-8")).hexdigest()[:8])
+    return derived
+
+
+async def _send(gateway: Gateway, audit_dir: Path, **overrides: Any) -> httpx.Response:
+    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir, **overrides)
     upstream = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
@@ -182,7 +198,7 @@ async def test_the_audit_directory_holds_no_value_no_hash_and_no_salt(
     assert any(cls.startswith("PERSON") for cls in found)
     assert any(cls.startswith("HEALTH") for cls in found)
 
-    secrets = [*VALUES, CONVERSATION, CONVERSATION.replace("-", "")]
+    secrets = [*VALUES, *_derived(CONVERSATION)]
     strings = list(_strings(record))
     for value in secrets:
         for form in _normalized(value):
@@ -201,3 +217,27 @@ async def test_the_audit_directory_holds_no_value_no_hash_and_no_salt(
     assert not LONG_HEX.search(remainder)
     assert re.fullmatch(r"[0-9a-f]{12}", record["session"])
     assert re.fullmatch(r"[0-9a-f]{64}", record["outgoing"]["sha256"])
+
+
+@pytest.mark.asyncio
+async def test_no_log_and_no_debug_file_name_carries_the_session_key(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    old = tmp_path / "old" / "audit.jsonl"
+    gateway.audit = AuditLog(old)
+    audit_dir = tmp_path / "state" / "audit"
+    dumps = tmp_path / "dumps"
+    response = await _send(gateway, audit_dir, debug_dir=dumps)
+
+    assert response.status_code == 200
+    (dump,) = sorted(dumps.iterdir())
+    (record,) = [json.loads(line) for line in next(audit_dir.glob("*.jsonl")).open()]
+    events = [json.loads(line) for line in old.read_text(encoding="utf-8").splitlines()]
+    (event,) = [item for item in events if item["event"] == "proxy_request"]
+    assert "session_key" not in event
+    assert re.fullmatch(r"\d{8}T\d{6}\.\d{6}-[0-9a-f]{12}\.json", dump.name)
+    assert dump.name[23:35] == record["session"]
+    texts = [old.read_text(encoding="utf-8"), *(p.read_text() for p in audit_dir.iterdir())]
+    texts += [dump.name]
+    for form in _derived(CONVERSATION):
+        assert all(form not in text.lower() for text in texts), form

@@ -76,8 +76,14 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings (no value, no
   value hash, no salt file), unchecked fields with a read-only `observed` scan, `outgoing`
   sha256/bytes and a rescan of the sent body (`GatewaySession.rescan`); a rescan hit in a
-  checked field blocks the request. `verdict: ok` only means the rules found nothing. Tests
-  point `PGW_AUDIT_LOG_DIR` at `tmp_path`.
+  checked field blocks the request. `verdict: ok` only means the rules found nothing.
+- No log and no debug dump name carries the session key (plain, shortened or hashed): it
+  restores a session through the proxy. The v2 `session` is `audit_trail.audit_id(key)`, a
+  random 12-hex id held in memory per process; the old `proxy_request` event has no session
+  field. `tests/proxy/test_audit_data_minimization.py` checks this.
+- `tests/conftest.py` points `HOME`, the XDG directories, the vault, the key and both audit
+  logs into `tmp_path` for every test, so a test that drops a `PGW_*` path still never
+  writes the user's real files (`tests/unit/test_test_isolation.py`).
 - `GatewaySession` drops its result cache whenever the set of known values changes, and
   `pseudonymize_report_many` repeats the pass over a request's texts until no text adds a value.
   Inside one text `pseudonymize_report` repeats while the known values change (`MAX_PASSES`, 4),

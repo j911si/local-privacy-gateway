@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from collections.abc import Callable, Iterator
@@ -15,7 +14,7 @@ import httpx
 import pytest
 
 from privacy_gateway import Gateway
-from privacy_gateway_proxy import server
+from privacy_gateway_proxy import audit_trail, server
 from privacy_gateway_proxy.settings import ProxySettings
 
 UPSTREAM = "https://upstream.test"
@@ -876,7 +875,7 @@ def assert_session_refused(proxy: Proxy, status: int, data: bytes, method: str, 
     assert key not in text
     (entry,) = proxy.entries()
     assert entry["verdict"] == "error"
-    assert entry["session"] == hashlib.sha256(b"-").hexdigest()[:12]
+    assert entry["session"] == audit_trail.audit_id("-")
 
 
 @pytest.mark.asyncio

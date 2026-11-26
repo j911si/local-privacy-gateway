@@ -50,7 +50,6 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
 def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     AuditLog(path).proxy_request(
-        session_key="conv-1",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -60,7 +59,6 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
         system_transformed=False,
     )
     AuditLog(path).proxy_request(
-        session_key="conv-2",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -70,7 +68,7 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     )
     event, default_event = _read(path)
     assert event["event"] == "proxy_request"
-    assert event["session_key"] == "conv-1"
+    assert "session_key" not in event
     assert event["path"] == "/v1/messages"
     assert event["fields"] == 4
     assert event["tokens"] == 2
@@ -143,7 +141,7 @@ def test_disabled_log_writes_nothing(tmp_path: Path) -> None:
     log = AuditLog(None)
     log.pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     log.session_pseudonymize("s1", 1, 0, "ok", 1)
-    log.proxy_request("conv-1", "/v1/messages", 1, 1, "ok", False, 1)
+    log.proxy_request("/v1/messages", 1, 1, "ok", False, 1)
     log.restore("s1", 1, 0, "strict")
     log.vault_purge(1)
     log.error(exc_type="RuntimeError", stage="pattern")

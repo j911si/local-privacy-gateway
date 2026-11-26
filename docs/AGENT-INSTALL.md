@@ -239,7 +239,7 @@ Check that it is actually running through the proxy:
 tail -f ~/.local/share/privacy-gateway/audit.jsonl
 ```
 
-Every request produces one `proxy_request` line with the session key, the number of transformed
+Every request produces one `proxy_request` line with the path, the number of transformed
 fields, the token count and the leak result, never any content. The field-by-field request log
 is in `~/.local/state/privacy-gateway/audit/`, one file per UTC day. It shows which fields were
 replaced, which were forwarded unchecked and whether the final rescan of the outgoing body found

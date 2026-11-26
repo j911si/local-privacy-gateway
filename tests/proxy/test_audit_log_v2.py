@@ -17,7 +17,7 @@ from privacy_gateway import Gateway
 from privacy_gateway.config import Config
 from privacy_gateway.model import DetectionReport
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
-from privacy_gateway_proxy import server, transform
+from privacy_gateway_proxy import audit_trail, server, transform
 from privacy_gateway_proxy.settings import ProxySettings, audit_dir_for, load_settings
 
 UPSTREAM = "https://upstream.test"
@@ -118,7 +118,8 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     )
     assert entry["event"] == "proxy_request"
     assert re.fullmatch(r"[0-9a-f-]{36}", entry["request_id"])
-    assert entry["session"] == hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
+    assert re.fullmatch(r"[0-9a-f]{12}", entry["session"])
+    assert entry["session"] != hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
     assert entry["path"] == "/v1/messages"
     assert entry["streaming"] is False
     assert entry["verdict"] == "ok_with_unchecked_findings"
@@ -357,6 +358,8 @@ async def test_streaming_requests_are_logged(gateway: Gateway, audit_dir: Path) 
 async def test_the_old_audit_log_keeps_its_format(
     gateway: Gateway, audit_dir: Path, tmp_path: Path
 ) -> None:
+    # The format stays except for `session_key`: the key restores a session through the
+    # proxy, so it is a credential and no reader needs it in this log.
     old = tmp_path / "old.jsonl"
     gateway.audit = type(gateway.audit)(old)
     async with build(gateway, audit_dir, ok_handler([])) as client:
@@ -365,8 +368,34 @@ async def test_the_old_audit_log_keeps_its_format(
     events = [json.loads(line) for line in old.read_text(encoding="utf-8").splitlines()]
     (event,) = [item for item in events if item["event"] == "proxy_request"]
     assert "v" not in event
-    assert event["session_key"] == CONVERSATION
+    assert "session_key" not in event
+    assert set(event) == {
+        "ts", "event", "path", "fields", "tokens", "leakage", "streaming", "duration_ms",
+        "system_transformed",
+    }
+    assert CONVERSATION not in old.read_text(encoding="utf-8")
     assert len(entries(audit_dir)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_session_audit_id_is_random_and_stable_within_a_session(
+    gateway: Gateway, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = "9f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff"
+    second = body_with("Hallo")
+    second["metadata"] = {"user_id": f"user_abc_account_def_session_{other}"}
+    async with build(gateway, audit_dir, ok_handler([])) as client:
+        await client.post("/v1/messages", json=body_with("Hallo"))
+        await client.post("/v1/messages", json=body_with("Hallo"))
+        await client.post("/v1/messages", json=second)
+    monkeypatch.setattr(audit_trail, "_audit_ids", type(audit_trail._audit_ids)())
+    async with build(gateway, audit_dir, ok_handler([])) as client:
+        await client.post("/v1/messages", json=body_with("Hallo"))
+
+    first, again, foreign, restarted = (entry["session"] for entry in entries(audit_dir))
+    assert first == again
+    assert foreign != first
+    assert restarted != first
 
 
 def test_audit_dir_comes_from_the_environment(tmp_path: Path) -> None:

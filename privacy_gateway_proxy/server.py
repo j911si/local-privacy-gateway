@@ -53,7 +53,6 @@ UPSTREAM_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 SESSION_CACHE_SIZE = 64
 DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 LOGGED_SEGMENTS = 2
 ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\d+")
 
@@ -264,7 +263,7 @@ async def _transformed(
         observed = audit_trail.scan(session, audit_trail.unchecked_leaves(unchecked))
         record("blocked", "fail", unchecked=unchecked, observed=observed)
         if settings.debug_originals:
-            _debug_dump(settings, f"{key}-FAILED-original", body)
+            _debug_dump(settings, key, body, "-FAILED-original")
         return _leak_response(exc)
 
     payload = json.dumps(new_body).encode("utf-8")
@@ -432,14 +431,14 @@ def _field_count(body: dict, include_system: bool) -> int:
     return len(collect(body, include_system=include_system))
 
 
-def _debug_dump(settings: ProxySettings, session_key: str, body: dict) -> None:
+def _debug_dump(settings: ProxySettings, session_key: str, body: dict, suffix: str = "") -> None:
     directory = settings.debug_dir
     if directory is None:
         return
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%f")
-    name = f"{stamp}-{UNSAFE_NAME_CHARS.sub('_', session_key)}.json"
+    name = f"{stamp}-{audit_trail.audit_id(session_key)}{suffix}.json"
     descriptor = os.open(directory / name, DEBUG_FILE_FLAGS, DEBUG_FILE_MODE)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(body, handle, ensure_ascii=False)
@@ -597,7 +596,6 @@ def _audit(
     if event is None:
         return
     event(
-        session_key=session_key,
         path=path,
         fields=fields,
         tokens=_token_count(session),
