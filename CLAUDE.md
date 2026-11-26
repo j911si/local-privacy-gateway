@@ -59,8 +59,10 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
   `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
   `verdict: ok_with_unchecked_findings` when only unchecked fields have findings and
-  `PGW_PROXY_UNCHECKED_FIELDS=allow`; by default (`block`) a rescan hit in any unchecked field
-  except `metadata` blocks with 422 before the upstream call.
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`; by default (`block`) a rescan hit of a class in
+  `audit_trail.UNCHECKED_BLOCKING_CLASSES` in an unchecked field blocks with 422 before the
+  upstream call, except the exact Claude Code `metadata.user_id`
+  (`session_key.CLAUDE_CODE_USER_IDS`) and billing line in `system[0]` (`BILLING_LINE_RE`).
 - `api.py` fails closed: any exception or `LeakageError` purges the session and re-raises; no
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.

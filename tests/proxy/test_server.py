@@ -144,7 +144,7 @@ def request_body(stream: bool = False) -> dict:
     body = {
         "model": "claude-x",
         "max_tokens": 16,
-        "metadata": {"user_id": "user_a_session_0b1c2d3e-1111-2222-3333-444444444444"},
+        "metadata": {"user_id": "user_a_session_0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"},
         "messages": [{"role": "user", "content": f"Hallo {SECRET}"}],
     }
     if stream:
@@ -186,7 +186,7 @@ async def test_non_streaming_request_is_pseudonymized_and_restored(
     assert response.status_code == 200
     assert response.json()["content"][0]["text"] == f"Guten Tag {SECRET}"
     assert str(seen[0].url) == f"{UPSTREAM}/v1/messages"
-    assert gateway.keys == ["0b1c2d3e-1111-2222-3333-444444444444"]
+    assert gateway.keys == ["0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"]
     event = gateway.audit.events[0]
     assert event["path"] == "/v1/messages"
     assert event["fields"] == 1
@@ -434,7 +434,7 @@ async def test_one_session_instance_serves_a_whole_conversation(
         await client.post("/v1/messages", json=other)
 
     assert gateway.keys == [
-        "0b1c2d3e-1111-2222-3333-444444444444",
+        "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
         "99999999-1111-2222-3333-444444444444",
     ]
     assert len(gateway.sessions) == 2
@@ -473,7 +473,7 @@ async def test_the_session_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> 
             await client.post("/v1/messages", json=body)
         await client.post("/v1/messages", json=first)
 
-    assert gateway.keys.count("0b1c2d3e-1111-2222-3333-444444444444") == 2
+    assert gateway.keys.count("0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f") == 2
 
 
 @pytest.mark.asyncio

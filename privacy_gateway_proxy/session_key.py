@@ -9,12 +9,27 @@ from collections.abc import Mapping
 from privacy_gateway_proxy.settings import ProxySettings
 
 SESSION_PATTERN = re.compile(r"session_([0-9a-f-]{36})")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+CLAUDE_CODE_USER_IDS = (
+    re.compile(
+        rf'\{{"device_id":"[0-9a-f]{{64}}","account_uuid":"(?:{_UUID})?",'
+        rf'"session_id":"{_UUID}"\}}'
+    ),
+    re.compile(rf"user_[0-9a-f]{{64}}_account_(?:{_UUID})?_session_{_UUID}"),
+)
 KEY_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 
 
 def is_valid_key(key: str) -> bool:
     """True when the key is safe to use as a vault session id and a file name."""
     return KEY_PATTERN.match(key) is not None
+
+
+def is_claude_code_user_id(value: object) -> bool:
+    """True only for a `metadata.user_id` in one of the exact Claude Code formats."""
+    return isinstance(value, str) and any(
+        pattern.fullmatch(value) is not None for pattern in CLAUDE_CODE_USER_IDS
+    )
 
 
 def session_key_for(

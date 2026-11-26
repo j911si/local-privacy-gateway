@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import time
 import uuid
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
+from privacy_gateway_proxy.session_key import is_claude_code_user_id
 from privacy_gateway_proxy.transform import (
     KEY_SUFFIX_RE,
     KeyAt,
@@ -28,6 +30,25 @@ BASE64_TYPE = "base64"
 TIMEOUT = "timeout"
 OK = "ok"
 OK_WITH_UNCHECKED_FINDINGS = "ok_with_unchecked_findings"
+UNCHECKED_BLOCKING_CLASSES = frozenset(
+    {
+        "API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "STRIPE_SECRET_KEY", "API_SECRET",
+        "CLIENT_SECRET", "PASSWORD", "PIN", "TAN", "OTP", "ACCESS_TOKEN", "REFRESH_TOKEN", "JWT",
+        "OAUTH_CODE", "SESSION_ID", "SESSION_COOKIE", "AUTH_COOKIE", "CSRF_TOKEN", "PRIVATE_KEY",
+        "SSH_PRIVATE_KEY", "TLS_PRIVATE_KEY", "AWS_ACCESS_KEY", "AWS_SECRET_KEY", "AZURE_SECRET",
+        "GCP_CREDENTIAL", "KUBERNETES_SECRET", "GITHUB_TOKEN", "GITLAB_TOKEN",
+        "PERSONAL_ACCESS_TOKEN", "DATABASE_CONNECTION_STRING", "SIGNED_URL", "SAS_TOKEN",
+        "CUSTOM_HEADER", "HEADER_VALUE", "COOKIE", "COOKIE_VALUE",
+        "PERSON_FIRST_NAME", "PERSON_LAST_NAME", "PERSON_FULL_NAME", "PERSON_ALIAS",
+        "PERSON_USERNAME", "CARDHOLDER",
+        "EMAIL", "PHONE", "MOBILE_PHONE", "PHONE_INTERNATIONAL", "FAX",
+        "IBAN", "CREDIT_CARD", "DEBIT_CARD", "CVV", "TAX_ID",
+    }
+)
+BILLING_LINE_RE = re.compile(
+    r"x-anthropic-billing-header: cc_version=[0-9][A-Za-z0-9.]{0,31}; "
+    r"cc_entrypoint=[a-z0-9_-]{1,32};"
+)
 
 
 _audit_ids: OrderedDict[str, str] = OrderedDict()
@@ -109,6 +130,34 @@ def rescan_body(
     checked_paths = {ref.path for ref in checked}
     blocking = [hit for hit in hits if hit.path in checked_paths]
     return Rescan("findings" if hits else "clean", hits, blocking)
+
+
+def unchecked_blocking(hits: list[Hit], body: dict, include_system: bool) -> list[Hit]:
+    """Hits of a sensitive class outside a known client value; they block the request."""
+    return [
+        hit
+        for hit in hits
+        if hit.data_class in UNCHECKED_BLOCKING_CLASSES
+        and not _known_client_value(body, hit.path, include_system)
+    ]
+
+
+def _known_client_value(body: dict, path: Path, include_system: bool) -> bool:
+    """True for the exact Claude Code `metadata.user_id` and billing line in `system[0]`."""
+    if path == ("metadata", "user_id"):
+        metadata = body.get("metadata")
+        return isinstance(metadata, dict) and is_claude_code_user_id(metadata.get("user_id"))
+    if path == ("system", 0, "text") and not include_system:
+        system = body.get("system")
+        block = system[0] if isinstance(system, list) and system else None
+        return (
+            isinstance(block, dict)
+            and set(block) == {"type", "text"}
+            and block["type"] == "text"
+            and isinstance(block["text"], str)
+            and BILLING_LINE_RE.fullmatch(block["text"]) is not None
+        )
+    return False
 
 
 def as_leaks(hits: list[Hit]) -> list[Leak]:

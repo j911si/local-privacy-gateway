@@ -28,7 +28,7 @@ IBAN_TOKEN = "<IBAN_001>"
 CONFIG = f"dictionaries:\n  CUSTOMER_NAME: [{CUSTOMER}]\n"
 UPSTREAM = "https://upstream.test"
 SETTINGS = ProxySettings(upstream_base_url=UPSTREAM)
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 OTHER_CONVERSATION = "9f8e7d6c-5555-6666-7777-888888888888"
 LETTER = (
     f"Sehr geehrte Frau {LAST_NAME}, die {CUSTOMER} bucht von IBAN {IBAN} ab."

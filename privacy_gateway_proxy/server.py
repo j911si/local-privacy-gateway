@@ -56,7 +56,6 @@ SESSION_CACHE_SIZE = 64
 DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 LOGGED_SEGMENTS = 2
-UNBLOCKED_PREFIX = ("metadata",)
 ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\d+")
 
 _transform: Any
@@ -292,7 +291,7 @@ async def _transformed(
         return _error("privacy_gateway_timeout", "rescan exceeded its time budget", 503)
     blocking = rescan.blocking
     if not blocking and settings.unchecked_fields == UNCHECKED_BLOCK:
-        blocking = [hit for hit in rescan.hits if hit.path[:1] != UNBLOCKED_PREFIX]
+        blocking = audit_trail.unchecked_blocking(rescan.hits, new_body, include_system)
     if blocking:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("blocked", "ok", **outcome)

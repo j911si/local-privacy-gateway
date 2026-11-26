@@ -21,7 +21,7 @@ from privacy_gateway_proxy import audit_trail, server, transform
 from privacy_gateway_proxy.settings import ProxySettings, audit_dir_for, load_settings
 
 UPSTREAM = "https://upstream.test"
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 NAME = "Müller"
 IBAN = "DE89370400440532013000"
 EMAIL = "anna.mueller@kunde-beispiel.example"
@@ -122,7 +122,7 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     assert entry["session"] != hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
     assert entry["path"] == "/v1/messages"
     assert entry["streaming"] is False
-    assert entry["verdict"] == "ok_with_unchecked_findings"
+    assert entry["verdict"] == "ok"
     assert entry["coverage"] == {"checked_fields": 2, "checked_keys": 0, "unchecked_fields": 1}
 
     notice = field(entry, "messages[0].content[0].text")
@@ -468,7 +468,7 @@ async def test_a_value_found_in_a_later_field_is_hidden_in_earlier_fields(
     first_entry, _ = entries(audit_dir)
     callback = field(first_entry, "messages[0].content[1].text")
     assert [item["cls"] for item in callback["findings"]] == ["PERSON_LAST_NAME"]
-    assert first_entry["verdict"] == "ok_with_unchecked_findings"
+    assert first_entry["verdict"] == "ok"
 
 
 @pytest.mark.asyncio

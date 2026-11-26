@@ -14,7 +14,7 @@ import pytest
 
 from privacy_gateway import Gateway
 from privacy_gateway.model import ConfigError
-from privacy_gateway_proxy import cli, server
+from privacy_gateway_proxy import audit_trail, cli, server
 from privacy_gateway_proxy.settings import ProxySettings, load_settings
 
 UPSTREAM = "https://upstream.test"
@@ -293,19 +293,197 @@ async def test_a_subscription_style_system_prompt_with_a_home_path_is_blocked(
     assert json.loads(allowed.sent[0])["system"] == system
 
 
+DEVICE = "a3" * 32
+ACCOUNT = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+SESSION = "0b1c2d3e-5f6a-4b7c-8d9e-0a1b2c3d4e5f"
+CREDIT_CARD_LIKE = "0b1c2d3e-1111-2222-3333-444444444444"
+JSON_USER_ID = (
+    f'{{"device_id":"{DEVICE}","account_uuid":"{ACCOUNT}","session_id":"{CREDIT_CARD_LIKE}"}}'
+)
+LEGACY_USER_ID = f"user_{DEVICE}_account_{ACCOUNT}_session_{CREDIT_CARD_LIKE}"
+BILLING = "x-anthropic-billing-header: cc_version=2.1.332.18b; cc_entrypoint=cli;"
+
+
+def test_the_synthetic_session_id_really_is_a_credit_card_finding(gateway: Gateway) -> None:
+    hits = gateway.session("probe").rescan(f"user_a_account_b_session_{CREDIT_CARD_LIKE}")
+
+    assert [hit.data_class for hit in hits] == ["CREDIT_CARD"]
+
+
 @pytest.mark.asyncio
-async def test_a_finding_in_metadata_does_not_block(gateway: Gateway, tmp_path: Path) -> None:
-    body = {
-        **BASE,
-        "metadata": {"user_id": "user_a_account_b_session_0b1c2d3e-1111-2222-3333-444444444444"},
-    }
+@pytest.mark.parametrize(
+    "user_id",
+    [
+        JSON_USER_ID,
+        JSON_USER_ID.replace(ACCOUNT, ""),
+        LEGACY_USER_ID,
+        LEGACY_USER_ID.replace(ACCOUNT, ""),
+    ],
+)
+async def test_the_exact_claude_code_user_id_formats_pass(
+    gateway: Gateway, tmp_path: Path, user_id: str
+) -> None:
+    run = await _send(gateway, tmp_path, {**BASE, "metadata": {"user_id": user_id}})
+
+    assert run.status == 200, run.body
+    assert len(run.sent) == 1
+    assert json.loads(run.sent[0])["metadata"] == {"user_id": user_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_id",
+    [
+        f"user_a_account_b_session_{CREDIT_CARD_LIKE}",
+        JSON_USER_ID.replace(DEVICE, MAIL),
+        JSON_USER_ID[:-1] + f',"note":"{MAIL}"}}',
+        JSON_USER_ID[:-1] + f',"device_id":"{IBAN}"}}',
+        JSON_USER_ID.replace('","account_uuid"', ' ","account_uuid"'),
+        JSON_USER_ID.replace(DEVICE, DEVICE.upper()),
+        LEGACY_USER_ID + f" {MAIL}",
+        f"user_{DEVICE}_account_{MAIL}_session_{SESSION}",
+    ],
+)
+async def test_any_other_user_id_is_checked_and_blocks_on_a_finding(
+    gateway: Gateway, tmp_path: Path, user_id: str
+) -> None:
+    run = await _send(gateway, tmp_path, {**BASE, "metadata": {"user_id": user_id}})
+
+    assert run.status == 422
+    assert run.sent == []
+    paths = [item["path"] for item in run.entries[0]["outgoing"]["rescan"]["findings"]]
+    assert paths and all(path == "metadata.user_id" for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_another_metadata_field_with_a_mail_blocks(gateway: Gateway, tmp_path: Path) -> None:
+    body = {**BASE, "metadata": {"user_id": JSON_USER_ID, "contact": MAIL}}
 
     run = await _send(gateway, tmp_path, body)
 
-    assert run.status == 200
-    assert len(run.sent) == 1
+    assert run.status == 422
+    assert run.sent == []
+    paths = [item["path"] for item in run.entries[0]["outgoing"]["rescan"]["findings"]]
+    assert "metadata.contact" in paths
+
+
+def _system(*blocks: dict[str, Any]) -> dict[str, Any]:
+    return {**BASE, "system": [*blocks, {"type": "text", "text": "You are a helpful CLI."}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "line",
+    [BILLING, BILLING.replace("2.1.332.18b", "2.1.40").replace("=cli;", "=sdk-ts;")],
+)
+async def test_the_exact_billing_line_in_an_unchecked_system_passes(
+    gateway: Gateway, tmp_path: Path, line: str
+) -> None:
+    body = _system({"type": "text", "text": line})
+
+    run = await _send(gateway, tmp_path, body, transform_system=False)
+
+    assert run.status == 200, run.body
+    assert json.loads(run.sent[0])["system"] == body["system"]
+    assert run.entries[0]["verdict"] == "ok_with_unchecked_findings"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("blocks", "position"),
+    [
+        ([{"type": "text", "text": BILLING + " x-api-key: sk-test-0123456789abcdef"}], 0),
+        ([{"type": "text", "text": BILLING + " cc_extra=1;"}], 0),
+        ([{"type": "text", "text": BILLING + f" {MAIL}"}], 0),
+        ([{"type": "text", "text": BILLING + "\nx-api-key: sk-test-0123456789abcdef"}], 0),
+        ([{"type": "text", "text": "x-api-key: sk-test-0123456789abcdef"}], 0),
+        ([{"type": "text", "text": BILLING, "cache_control": {"type": "ephemeral"}}], 0),
+        ([{"type": "text", "text": "Hi."}, {"type": "text", "text": BILLING}], 1),
+    ],
+)
+async def test_anything_but_the_exact_billing_block_blocks(
+    gateway: Gateway, tmp_path: Path, blocks: list[dict[str, Any]], position: int
+) -> None:
+    run = await _send(gateway, tmp_path, _system(*blocks), transform_system=False)
+
+    assert run.status == 422
+    assert run.sent == []
+    paths = [item["path"] for item in run.entries[0]["outgoing"]["rescan"]["findings"]]
+    assert any(path.startswith(f"system[{position}]") for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_non_sensitive_classes_are_only_reported(gateway: Gateway, tmp_path: Path) -> None:
+    tools = [
+        {
+            "name": "Review",
+            "description": "Mention `@name` or `@reviewer`; docs on claude.ai and "
+            "https://docs.claude.ai/guide.",
+            "input_schema": {},
+        }
+    ]
+
+    run = await _send(gateway, tmp_path, {**BASE, "tools": tools})
+
+    assert run.status == 200, run.body
+    assert json.loads(run.sent[0])["tools"] == tools
     (entry,) = run.entries
     assert entry["verdict"] == "ok_with_unchecked_findings"
-    assert [item["path"] for item in entry["outgoing"]["rescan"]["findings"]] == [
-        "metadata.user_id"
+    classes = {item["cls"] for item in entry["outgoing"]["rescan"]["findings"]}
+    assert classes and not classes & audit_trail.UNCHECKED_BLOCKING_CLASSES
+
+
+def _marking_scan(cls: str):
+    def scan(session: Any, leaves: list, deadline: float | None = None) -> list:
+        return [
+            audit_trail.Hit(leaf.path, cls, 0, 4) for leaf in leaves if "MARK" in leaf.text
+        ]
+
+    return scan
+
+
+TOOLS_WITH_MARK = [{"name": "T", "description": "MARK here", "input_schema": {}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", sorted(audit_trail.UNCHECKED_BLOCKING_CLASSES))
+async def test_every_blocking_class_blocks_in_an_unchecked_field(
+    gateway: Gateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cls: str
+) -> None:
+    monkeypatch.setattr(audit_trail, "scan", _marking_scan(cls))
+
+    run = await _send(gateway, tmp_path, {**BASE, "tools": TOOLS_WITH_MARK})
+
+    assert run.status == 422
+    assert run.sent == []
+    assert run.entries[0]["outgoing"]["rescan"]["findings"] == [
+        {"path": "tools[0].description", "cls": cls, "start": 0, "end": 4}
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cls", ["FQDN", "URL", "SOCIAL_MEDIA_HANDLE", "ORGANIZATION_NAME", "PERSON_INITIALS", "CITY"]
+)
+async def test_other_classes_do_not_block_in_an_unchecked_field(
+    gateway: Gateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cls: str
+) -> None:
+    monkeypatch.setattr(audit_trail, "scan", _marking_scan(cls))
+
+    run = await _send(gateway, tmp_path, {**BASE, "tools": TOOLS_WITH_MARK})
+
+    assert run.status == 200
+    assert len(run.sent) == 1
+    assert run.entries[0]["verdict"] == "ok_with_unchecked_findings"
+
+
+def test_every_redact_class_of_the_default_config_blocks(gateway: Gateway) -> None:
+    redact = {
+        item.name for item in gateway.config.registry if item.policy.name == "REDACT"
+    }
+
+    assert redact
+    assert redact <= audit_trail.UNCHECKED_BLOCKING_CLASSES
+    assert audit_trail.UNCHECKED_BLOCKING_CLASSES <= {
+        item.name for item in gateway.config.registry
+    }

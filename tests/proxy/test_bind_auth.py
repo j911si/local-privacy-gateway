@@ -28,7 +28,7 @@ ENV_NAMES = (
 MESSAGE = {
     "model": "claude-x",
     "max_tokens": 16,
-    "metadata": {"user_id": "user_a_account_b_session_0b1c2d3e-1111-2222-3333-444444444444"},
+    "metadata": {"user_id": "user_a_account_b_session_0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"},
     "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
 }
 

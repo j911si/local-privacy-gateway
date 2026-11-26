@@ -20,7 +20,7 @@ from privacy_gateway_proxy.tool_policy import ToolGuard, load_policy, parse_poli
 
 IBAN = "DE89370400440532013000"
 MAIL = "max.muster@example.org"
-SID = "0b1c2d3e-1111-2222-3333-444444444444"
+SID = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 UPSTREAM = "https://upstream.test"
 ENTRIES = {
     "<IBAN_001>": SimpleNamespace(value=IBAN, data_class="IBAN"),

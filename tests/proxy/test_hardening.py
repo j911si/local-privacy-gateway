@@ -19,7 +19,7 @@ from privacy_gateway_proxy.settings import ProxySettings
 
 UPSTREAM = "https://upstream.test"
 TOKEN = "tok-3f9c1d7a5b2e4c68-canary"
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 MESSAGE = {
     "model": "claude-x",
     "max_tokens": 16,
@@ -712,7 +712,7 @@ KNOWN_PATHS = [
     ("GET", "/v1/files/file_011CNha8iCJcU1wXNR6q4V8w/content"),
     ("GET", "/v1/messages/batches/msgbatch_01HkcTjaV5uDC8jWR4ZsDV8d/results"),
     ("GET", "/v1/messages/msg_01AbCdEfGhIjKlMnOpQrStUv"),
-    ("GET", "/v1/organizations/0b1c2d3e-1111-2222-3333-444444444444"),
+    ("GET", "/v1/organizations/0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"),
     ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions"),
     ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions/1759178010641129"),
 ]
