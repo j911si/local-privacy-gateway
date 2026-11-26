@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
-from privacy_gateway.detect.runs import FQDN_PATTERN, JWT_PATTERN, fqdn_finditer, jwt_finditer
+from privacy_gateway.detect.runs import (
+    COLON_PATTERN,
+    FQDN_PATTERN,
+    JWT_PATTERN,
+    LINE_KEYWORD_SHAPE,
+    PASS_PW_PATTERN,
+    colon_finditer,
+    fqdn_finditer,
+    jwt_finditer,
+    line_keyword_finditer,
+    pass_pw_finditer,
+)
 from privacy_gateway.detect.validators import VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
 from privacy_gateway.tokens import NUMBERED_TOKEN
@@ -30,7 +41,12 @@ DIFF_HEADER_RE = re.compile(
 )
 DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
 DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
-LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer, JWT_PATTERN: jwt_finditer}
+LINEAR_FINDERS = {
+    FQDN_PATTERN: fqdn_finditer,
+    JWT_PATTERN: jwt_finditer,
+    PASS_PW_PATTERN: pass_pw_finditer,
+    COLON_PATTERN: colon_finditer,
+}
 STANDARD_PREFIXES = frozenset(
     {
         "ISO", "IEC", "RFC", "IEEE", "DIN", "EN", "SHA", "MD", "UTF", "HTTP", "TLS", "SSL",
@@ -39,6 +55,23 @@ STANDARD_PREFIXES = frozenset(
         "ECMA", "POSIX", "UTC", "GMT", "ISBN", "ISSN",
     }
 )
+
+
+def finditer(regex: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """`regex.finditer(text)`, through a linear-time finder where one is known to be equal."""
+    finder = LINEAR_FINDERS.get(regex.pattern)
+    if finder is not None:
+        return finder(regex, text)
+    keyword = _line_keyword(regex.pattern)
+    if keyword is not None:
+        return line_keyword_finditer(regex, text, keyword)
+    return regex.finditer(text)
+
+
+@cache
+def _line_keyword(pattern: str) -> re.Pattern[str] | None:
+    shape = LINE_KEYWORD_SHAPE.match(pattern)
+    return None if shape is None else re.compile(shape.group(0), re.MULTILINE)
 
 
 @cache
@@ -134,8 +167,7 @@ class PatternStage:
                 continue
             validator = _validator_for(data_class)
             for regex in _compile(data_class.patterns):
-                finder = LINEAR_FINDERS.get(regex.pattern)
-                matches = finder(regex, text) if finder else regex.finditer(text)
+                matches = finditer(regex, text)
                 for match in matches:
                     new.extend(self._for_match(text, match, data_class, validator, config))
         new.sort(key=lambda f: (f.span.start, f.span.end, f.data_class))

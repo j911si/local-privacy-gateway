@@ -36,7 +36,7 @@ def test_every_bundled_pattern_compiles(default_config: Config) -> None:
 
 
 def test_bundled_patterns_survive_yaml_backslashes(default_config: Config) -> None:
-    assert default_config.registry.get("IBAN").patterns[0].startswith("(?<![^\\W_])[A-Z]{2}")
+    assert default_config.registry.get("IBAN").patterns[0].startswith("(?<![A-Z0-9])[A-Z]{2}\\d{2}")
 
 
 def test_secret_classes_are_redacted(default_config: Config) -> None:

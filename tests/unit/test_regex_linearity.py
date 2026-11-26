@@ -228,3 +228,174 @@ def test_salutation_spans_are_unchanged(text: str, spans: list[tuple[int, int]])
 )
 def test_postal_code_matches_are_unchanged(text: str, value: str) -> None:
     assert [m.group(1) for m in context.POSTAL_CODE_RE.finditer(text)] == [value]
+
+
+ESCAPED_JSON_RULES = {
+    "PASSWORD": "password",
+    "API_KEY": "api_key",
+    "API_SECRET": "api_secret",
+    "CLIENT_SECRET": "client_secret",
+    "ACCESS_TOKEN": "access_token",
+    "REFRESH_TOKEN": "refresh_token",
+    "PRIVATE_KEY": "private_key",
+    "CSRF_TOKEN": "xsrf-token",
+    "SESSION_ID": "sessionid",
+}
+ESCAPED_JSON_UNITS = [
+    '{key}\\": \\"',
+    '{key}\\\\\\": \\\\\\"a',
+    '{key}\\\\\\\\\\\\\\": \\\\\\\\\\\\\\"ab',
+    '{key}:\\"a1\\\\\\"',
+    "\\",
+    '\\"',
+]
+
+
+@pytest.mark.parametrize("name", sorted(ESCAPED_JSON_RULES))
+@pytest.mark.parametrize("unit", ESCAPED_JSON_UNITS)
+def test_escaped_json_rules_scan_in_linear_time(
+    default_config: Config, name: str, unit: str
+) -> None:
+    text_unit = unit.format(key=ESCAPED_JSON_RULES[name])
+    for pattern in config_patterns(default_config, name):
+        if "{0,7}" not in pattern.pattern and "\\\\{1,7}" not in pattern.pattern:
+            continue
+        assert_linear(finditer(pattern), lambda n: text_unit * (n // len(text_unit)))
+        assert_linear(
+            finditer(pattern), lambda n: text_unit + "a" * n + " " + text_unit + "\\" * n
+        )
+
+
+@pytest.mark.parametrize(
+    "unit", ["karte", "Karte4", "4", "visa41111", "aDE89", "DE8937040044", "xDE89 3704 "]
+)
+@pytest.mark.parametrize("name", ["IBAN", "CREDIT_CARD"])
+def test_glued_iban_and_card_rules_scan_in_linear_time(
+    default_config: Config, name: str, unit: str
+) -> None:
+    for pattern in config_patterns(default_config, name):
+        assert_linear(finditer(pattern), lambda n: unit * (n // len(unit)))
+
+
+PASS_ALPHABET = [
+    "pw", "pass", ":", " ", "\t", "\n", "a", "1", "ab12cd", ".", ")", '"', "$", "=", "x",
+]
+LINE_ALPHABET = [
+    "mysql", "mysqldump", "mariadb", "sshpass", " ", "\t", "\n", "-p", " -p", " -p ", "'", '"',
+    "secret1", "\\", "-", "$x", "ab", "u",
+]
+
+
+def test_pass_pw_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.runs import PASS_PW_PATTERN, pass_pw_finditer
+
+    pattern = re.compile(PASS_PW_PATTERN, re.MULTILINE)
+    matched = 0
+    texts = random_texts(PASS_ALPHABET, 31, 20_000)
+    texts += ["pw:" * 300, "pw:pw:ab12cd", 'pw:"pw:ab12cd x', "pw: pw:" * 50 + "a1b2c3"]
+    for text in texts:
+        expected = [m.span(1) for m in pattern.finditer(text)]
+        assert [m.span(1) for m in pass_pw_finditer(pattern, text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+def test_line_keyword_finditer_equals_finditer(default_config: Config) -> None:
+    rules = [
+        re.compile(p, re.MULTILINE)
+        for p in default_config.registry.get("PASSWORD").patterns
+        if p.startswith("\\b")
+    ]
+    assert len(rules) == 4
+    matched = 0
+    texts = random_texts(LINE_ALPHABET, 57, 20_000)
+    for pattern in rules:
+        for text in texts:
+            expected = [m.span(1) for m in pattern.finditer(text)]
+            assert [m.span(1) for m in patterns.finditer(pattern, text)] == expected
+            matched += len(expected)
+    assert matched > 0
+
+
+PASSWORD_WORST_CASES = [
+    'passwd: "',
+    "password: wird ",
+    "password: must 8 chars ",
+    "password: must x ",
+    "pwd: the 1 ",
+    "pw:",
+    "pw: ",
+    'mariadb"',
+    "mysql ",
+    "sshpass ",
+    "sshpass=",
+    "password=x.",
+]
+
+
+@pytest.mark.parametrize("unit", PASSWORD_WORST_CASES)
+def test_password_rules_scan_in_linear_time(default_config: Config, unit: str) -> None:
+    for pattern in config_patterns(default_config, "PASSWORD"):
+        assert_linear(
+            lambda text, pattern=pattern: list(patterns.finditer(pattern, text)),
+            lambda n: unit * (n // len(unit)),
+        )
+
+
+@pytest.mark.parametrize("filler", [" ", "\t", ".", " .", ").", "x."])
+@pytest.mark.parametrize(
+    "head",
+    [
+        "password: x",
+        "password=x",
+        "pwd = x",
+    ],
+)
+def test_password_rules_with_a_long_blank_or_dot_run(
+    default_config: Config, head: str, filler: str
+) -> None:
+    for pattern in config_patterns(default_config, "PASSWORD"):
+        assert_linear(finditer(pattern), lambda n: head + filler * n + "y", n=20_000)
+
+
+COLON_ALPHABET = [
+    "password", "Passwort", "pwd", "_pass", ":", " ", "\t", "\n", "wird", "the", "a", "an",
+    "must", "should", "8", "12+", " characters", " chars", " Zeichen", "x", "secret9", ".", ",",
+    "(", ")", '"', "$", "none", "a.b", "my_var", "\r", "\u212a", "\u017f", "ü", "-", "'",
+]
+
+
+def test_colon_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.runs import COLON_PATTERN, colon_finditer
+
+    pattern = re.compile(COLON_PATTERN, re.MULTILINE)
+    rng = random.Random(360)
+    matched = 0
+    for _ in range(60_000):
+        text = "".join(rng.choice(COLON_ALPHABET) for _ in range(rng.randint(1, 30)))
+        if rng.random() < 0.5:
+            text = rng.choice(["password: ", "pwd:", "Passwort :\t"]) + text
+        expected = [m.span(1) for m in pattern.finditer(text)]
+        assert [m.span(1) for m in colon_finditer(pattern, text)] == expected, text
+        matched += len(expected)
+    assert matched > 1000
+
+
+def test_the_colon_rule_takes_the_linear_path(default_config: Config) -> None:
+    from privacy_gateway.detect.runs import COLON_PATTERN
+
+    assert COLON_PATTERN in default_config.registry.get("PASSWORD").patterns
+    assert COLON_PATTERN in patterns.LINEAR_FINDERS
+
+
+@pytest.mark.parametrize("unit", ["password: wird ", "password: must 8 chars ", "pwd: a "])
+def test_colon_rule_stays_linear_on_megabyte_lines(default_config: Config, unit: str) -> None:
+    pattern = re.compile(
+        next(p for p in default_config.registry.get("PASSWORD").patterns if "(?:wird" in p),
+        re.MULTILINE,
+    )
+    assert_linear(
+        lambda text: list(patterns.finditer(pattern, text)),
+        lambda n: unit * (n // len(unit)),
+        n=1_000_000,
+    )
