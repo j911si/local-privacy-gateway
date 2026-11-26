@@ -885,7 +885,8 @@ in such a field:
 - People: `PERSON_FIRST_NAME`, `PERSON_LAST_NAME`, `PERSON_FULL_NAME`, `PERSON_ALIAS`,
   `PERSON_USERNAME`, `CARDHOLDER`.
 - Contact: `EMAIL`, `PHONE`, `MOBILE_PHONE`, `PHONE_INTERNATIONAL`, `FAX`.
-- Payment and tax: `IBAN`, `CREDIT_CARD`, `DEBIT_CARD`, `CVV`, `TAX_ID`.
+- Payment: `IBAN`, `CREDIT_CARD`, `DEBIT_CARD`, `CVV`, `BANK_ACCOUNT`.
+- Identity: `TAX_ID`, `SOCIAL_SECURITY_ID`, `PASSPORT_ID`, `NATIONAL_ID`, `DATE_OF_BIRTH`.
 
 The list is `UNCHECKED_BLOCKING_CLASSES` in `privacy_gateway_proxy/audit_trail.py`. Every other
 class (for example `FQDN`, `URL`, `SOCIAL_MEDIA_HANDLE`, `ORGANIZATION_NAME`, `PERSON_INITIALS`,

@@ -487,3 +487,46 @@ def test_every_redact_class_of_the_default_config_blocks(gateway: Gateway) -> No
     assert audit_trail.UNCHECKED_BLOCKING_CLASSES <= {
         item.name for item in gateway.config.registry
     }
+
+
+IDENTITY_SAMPLES = {
+    "DATE_OF_BIRTH": "Geburtsdatum: 12.03.1980",
+    "BANK_ACCOUNT": "Kontonummer 1234567890",
+    "PASSPORT_ID": "Reisepass C01X00T47",
+    "NATIONAL_ID": "Personalausweis L01X00T47",
+    "SOCIAL_SECURITY_ID": "SSN 078-05-1120",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", sorted(IDENTITY_SAMPLES))
+async def test_a_detected_identity_value_in_a_tool_description_blocks(
+    gateway: Gateway, tmp_path: Path, cls: str
+) -> None:
+    tools = [{"name": "T", "description": IDENTITY_SAMPLES[cls], "input_schema": {}}]
+
+    run = await _send(gateway, tmp_path, {**BASE, "tools": tools})
+
+    assert run.status == 422
+    assert run.sent == []
+    assert cls in {item["cls"] for item in run.entries[0]["outgoing"]["rescan"]["findings"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Version 2.1.332.18b, Stand 26.11.2026",
+        "Termin am 01.02.2026",
+        "since 2024-06-01, v1.2.3-beta",
+    ],
+)
+async def test_versions_and_plain_dates_do_not_block(
+    gateway: Gateway, tmp_path: Path, text: str
+) -> None:
+    tools = [{"name": "T", "description": text, "input_schema": {}}]
+
+    run = await _send(gateway, tmp_path, {**BASE, "tools": tools})
+
+    assert run.status == 200, run.body
+    assert len(run.sent) == 1
