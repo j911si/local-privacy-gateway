@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import time
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,11 +22,28 @@ from privacy_gateway_proxy.transform import (
     format_path,
 )
 
-SESSION_HASH_CHARS = 12
+AUDIT_ID_BYTES = 6
+AUDIT_ID_CACHE_SIZE = 4096
 BASE64_TYPE = "base64"
 TIMEOUT = "timeout"
 OK = "ok"
 OK_WITH_UNCHECKED_FINDINGS = "ok_with_unchecked_findings"
+
+
+_audit_ids: OrderedDict[str, str] = OrderedDict()
+
+
+def audit_id(session_key: str) -> str:
+    """A random 12-hex-digit id per session key, held only in this process's memory.
+
+    It is drawn by `secrets` and never derived from the key, which restores a session
+    through the proxy and so must not reach any log. A restart or an evicted key gets a new id.
+    """
+    value = _audit_ids.pop(session_key, None) or secrets.token_hex(AUDIT_ID_BYTES)
+    _audit_ids[session_key] = value
+    while len(_audit_ids) > AUDIT_ID_CACHE_SIZE:
+        _audit_ids.popitem(last=False)
+    return value
 
 
 @dataclass(frozen=True)
@@ -154,7 +172,7 @@ def entry(
         verdict = OK_WITH_UNCHECKED_FINDINGS
     return {
         "request_id": str(uuid.uuid4()),
-        "session": hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:SESSION_HASH_CHARS],
+        "session": audit_id(session_key),
         "path": path,
         "streaming": streaming,
         "duration_ms": duration_ms,

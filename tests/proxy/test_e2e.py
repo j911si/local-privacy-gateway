@@ -175,7 +175,7 @@ async def test_non_streaming_roundtrip_hides_values_and_restores_the_answer(
 
     (event,) = audit_events(audit_log, "proxy_request")
     assert event["path"] == "/v1/messages"
-    assert event["session_key"] == CONVERSATION
+    assert "session_key" not in event
     assert event["leakage"] == "ok"
     assert event["streaming"] is False
     assert event["fields"] == 3

@@ -707,7 +707,7 @@ The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 40
 (`privacy_gateway_session`) before anything is scanned or forwarded. This holds for every request,
 not only `/v1/messages`: a `GET`, `HEAD`, `OPTIONS`, `DELETE` or passthrough request with an
 unusable key never reaches upstream, so a bad `X-PGW-Session` header cannot skip the path scan.
-The audit line records `-` as session key, never the key that was sent. The server keeps
+The audit line records the audit id of `-`, never the key that was sent. The server keeps
 the 64 most recently used `GatewaySession` objects in memory; a conversation that falls out is
 reloaded from the vault.
 
@@ -845,12 +845,13 @@ $ curl -s -X POST http://127.0.0.1:8787/v1/messages -H 'content-type: applicatio
 ### Debug mode
 
 `PGW_PROXY_DEBUG_DIR` points at a directory into which the proxy writes every transformed request
-body as `<timestamp>-<session_key>.json` with mode `0600`, in a directory created with mode `0700`.
+body as `<timestamp>-<audit_id>.json` with mode `0600`, in a directory created with mode `0700`.
+`<audit_id>` is the random `session` id of the request log, never the session key.
 That is exactly the pseudonymized JSON that goes upstream, so it answers "what really left the
 machine".
 
 A request that fails the leak check is written as
-`<timestamp>-<session_key>-FAILED-original.json` and contains the **original, untransformed body**,
+`<timestamp>-<audit_id>-FAILED-original.json` and contains the **original, untransformed body**,
 because that is the only way to see which value tripped the check. Such a request is never sent
 upstream. That second dump is clear text and therefore needs its own switch:
 
@@ -872,7 +873,7 @@ sequence for one non-streaming request:
 ```json
 {"ts": "2026-09-23T07:14:58.905939+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 0, "reused_tokens": 0, "leakage": "ok", "duration_ms": 47}
 {"ts": "2026-09-23T07:14:58.908523+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 2, "reused_tokens": 0, "leakage": "ok", "duration_ms": 2}
-{"ts": "2026-09-23T07:14:58.929209+00:00", "event": "proxy_request", "session_key": "11111111-2222-3333-4444-555555555555", "path": "/v1/messages", "fields": 2, "tokens": 2, "leakage": "ok", "streaming": false, "duration_ms": 75, "system_transformed": true}
+{"ts": "2026-09-23T07:14:58.929209+00:00", "event": "proxy_request", "path": "/v1/messages", "fields": 2, "tokens": 2, "leakage": "ok", "streaming": false, "duration_ms": 75, "system_transformed": true}
 {"ts": "2026-09-23T07:14:58.929707+00:00", "event": "restore", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "restored_count": 1, "unknown_token_count": 0, "mode": "lenient"}
 ```
 
@@ -936,8 +937,12 @@ Each line lists every field of the request:
   and values of letters, digits and `_.:-` (up to 128 characters); anything else is refused with
   HTTP 400. The access log of uvicorn never shows the query.
 
-`session` is the first 12 hex characters of `sha256(session_key)`. Values, parts of values and
-error texts never appear.
+`session` is a random audit id of 12 hex characters (`secrets.token_hex(6)`). The proxy draws
+it the first time it sees a session key and keeps the pair in memory only (the 4096 most recent
+keys), so the lines of one conversation share it until the process restarts. It is never derived
+from the key: the key restores a session's tokens through the proxy, so it counts as a credential
+and appears in no log, neither plain nor shortened nor hashed. The old `audit.jsonl` no longer
+has a `session_key` field. Values, parts of values and error texts never appear.
 
 **`verdict: ok` only means the rules found nothing.** It is no proof that a request is free of
 personal data: forms the patterns, dictionaries and context rules do not know pass unnoticed, and
@@ -1204,7 +1209,7 @@ pseudonymization. The request was not sent upstream.
    `outgoing.leakage` is `fail`, the leak check stopped it and the field with `leaks` names the
    field path, the kind of leak and the class, for example `original_value PERSON_USERNAME`. If
    it is `ok`, the final rescan stopped it and `outgoing.rescan.findings` lists path, class and
-   offsets. The older `audit.jsonl` has the session key and the timestamp.
+   offsets. The older `audit.jsonl` has the timestamp, but no session key.
 2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two
