@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -39,6 +40,8 @@ PSEUDONYMIZE_STAGE = "pseudonymize"
 SESSION_STAGE = "session_pseudonymize"
 RESULT_CACHE_SIZE = 256
 RESCAN_CACHE_SIZE = 1024
+AUDIT_ID_BYTES = 6
+AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
 REDACTED_SUFFIX = "_REDACTED>"
 
@@ -51,6 +54,7 @@ class Gateway:
         self.audit = AuditLog(self.config.audit.path)
         self._pipeline = Pipeline(self.config)
         self._vault: Vault | None = None
+        self._audit_ids: OrderedDict[str, str] = OrderedDict()
 
     def __enter__(self) -> Self:
         return self
@@ -110,7 +114,9 @@ class Gateway:
             )
         except LeakageError:
             self._discard(session_id)
-            self.audit.pseudonymize(session_id, {}, 0, "failed", _elapsed_ms(started))
+            self.audit.pseudonymize(
+                self._audit_id(session_id), {}, 0, "failed", _elapsed_ms(started)
+            )
             raise
         except Exception as exc:
             self._discard(session_id)
@@ -123,7 +129,7 @@ class Gateway:
             duration_ms=_elapsed_ms(started),
         )
         self.audit.pseudonymize(
-            session_id,
+            self._audit_id(session_id),
             summary.counts,
             len(summary.tokens),
             summary.leakage,
@@ -139,7 +145,10 @@ class Gateway:
         entries = self.vault.load(session_id)
         result = restore_text(text, entries, resolved)
         self.audit.restore(
-            session_id, result.restored_count, len(result.unknown_tokens), resolved
+            self._audit_id(session_id),
+            result.restored_count,
+            len(result.unknown_tokens),
+            resolved,
         )
         return result
 
@@ -148,6 +157,19 @@ class Gateway:
         if self._vault is not None:
             self._vault.close()
             self._vault = None
+
+    def _audit_id(self, session_id: str) -> str:
+        """A random 12-hex-digit id per vault session, held only in this process's memory.
+
+        It is drawn by `secrets` and never derived from the session id, which restores the
+        session through `pgw restore` and so must not reach any log. A restart or an evicted
+        session gets a new id.
+        """
+        value = self._audit_ids.pop(session_id, None) or secrets.token_hex(AUDIT_ID_BYTES)
+        self._audit_ids[session_id] = value
+        while len(self._audit_ids) > AUDIT_ID_CACHE_SIZE:
+            self._audit_ids.popitem(last=False)
+        return value
 
     def _discard(self, session_id: str) -> None:
         if session_id and self._vault is not None:
@@ -190,7 +212,7 @@ class GatewaySession:
         if cached is not None:
             self._results.move_to_end(digest)
             self._gateway.audit.session_pseudonymize(
-                self.session_id, 0, 0, "ok", _elapsed_ms(started)
+                self._gateway._audit_id(self.session_id), 0, 0, "ok", _elapsed_ms(started)
             )
             return cached[0], list(cached[1])
         counters = dict(self._counters)
@@ -228,7 +250,7 @@ class GatewaySession:
         except LeakageError:
             self._rollback(written, counters)
             self._gateway.audit.session_pseudonymize(
-                self.session_id, 0, 0, "failed", _elapsed_ms(started)
+                self._gateway._audit_id(self.session_id), 0, 0, "failed", _elapsed_ms(started)
             )
             raise
         except Exception as exc:
@@ -236,7 +258,11 @@ class GatewaySession:
             self._gateway.audit.error(type(exc).__name__, SESSION_STAGE)
             raise
         self._gateway.audit.session_pseudonymize(
-            self.session_id, len(written), len(reused), "ok", _elapsed_ms(started)
+            self._gateway._audit_id(self.session_id),
+            len(written),
+            len(reused),
+            "ok",
+            _elapsed_ms(started),
         )
         findings = _field_findings(report, pseudonymized, self._gateway.config.registry)
         self._remember(digest, (pseudonymized.text, findings))
@@ -297,7 +323,10 @@ class GatewaySession:
         resolved = mode if mode is not None else self._gateway.config.restore.mode
         result = restore_text(text, self._entries, resolved)
         self._gateway.audit.restore(
-            self.session_id, result.restored_count, len(result.unknown_tokens), resolved
+            self._gateway._audit_id(self.session_id),
+            result.restored_count,
+            len(result.unknown_tokens),
+            resolved,
         )
         return result
 

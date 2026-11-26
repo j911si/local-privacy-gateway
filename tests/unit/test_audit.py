@@ -25,7 +25,7 @@ def test_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     (event,) = _read(path)
     assert event["event"] == "pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert "doc_sha256" not in event
     assert event["counts"] == {"IBAN": 1}
     assert event["token_count"] == 3
@@ -39,7 +39,7 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).session_pseudonymize("s1", 2, 3, "ok", 17)
     (event,) = _read(path)
     assert event["event"] == "session_pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["new_tokens"] == 2
     assert event["reused_tokens"] == 3
     assert event["leakage"] == "ok"
@@ -85,7 +85,7 @@ def test_restore_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).restore("s1", 4, 1, "lenient")
     (event,) = _read(path)
     assert event["event"] == "restore"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["restored_count"] == 4
     assert event["unknown_token_count"] == 1
     assert event["mode"] == "lenient"

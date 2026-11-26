@@ -953,14 +953,16 @@ core's `pseudonymize`, `session_pseudonymize`, `restore`, `vault_purge` and `err
 sequence for one non-streaming request:
 
 ```json
-{"ts": "2026-09-23T07:14:58.905939+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 0, "reused_tokens": 0, "leakage": "ok", "duration_ms": 47}
-{"ts": "2026-09-23T07:14:58.908523+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 2, "reused_tokens": 0, "leakage": "ok", "duration_ms": 2}
+{"ts": "2026-09-23T07:14:58.905939+00:00", "event": "session_pseudonymize", "audit_id": "3f9a61c0d27e", "new_tokens": 0, "reused_tokens": 0, "leakage": "ok", "duration_ms": 47}
+{"ts": "2026-09-23T07:14:58.908523+00:00", "event": "session_pseudonymize", "audit_id": "3f9a61c0d27e", "new_tokens": 2, "reused_tokens": 0, "leakage": "ok", "duration_ms": 2}
 {"ts": "2026-09-23T07:14:58.929209+00:00", "event": "proxy_request", "path": "/v1/messages", "fields": 2, "tokens": 2, "leakage": "ok", "streaming": false, "duration_ms": 75, "system_transformed": true}
-{"ts": "2026-09-23T07:14:58.929707+00:00", "event": "restore", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "restored_count": 1, "unknown_token_count": 0, "mode": "lenient"}
+{"ts": "2026-09-23T07:14:58.929707+00:00", "event": "restore", "audit_id": "3f9a61c0d27e", "restored_count": 1, "unknown_token_count": 0, "mode": "lenient"}
 ```
 
 `fields` is the number of transformed strings, `tokens` the number of mappings the session holds,
-`leakage` is `ok`, `failed`, `rejected` or `upstream_error`. Follow it live with
+`leakage` is `ok`, `failed`, `rejected` or `upstream_error`. `audit_id` is a random id per vault
+session, kept only in the process's memory, so it groups the events of one session but cannot be
+used with `pgw restore`; after a restart the same session gets a new id. Follow it live with
 `tail -f ~/.local/share/privacy-gateway/audit.jsonl`.
 
 ### Request log (v2)

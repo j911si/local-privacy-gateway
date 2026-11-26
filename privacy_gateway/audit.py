@@ -23,7 +23,7 @@ class AuditLog:
 
     def pseudonymize(
         self,
-        session_id: str,
+        audit_id: str,
         counts: dict[str, int],
         token_count: int,
         leakage: str,
@@ -31,7 +31,7 @@ class AuditLog:
     ) -> None:
         self._write(
             "pseudonymize",
-            session_id=session_id,
+            audit_id=audit_id,
             counts=counts,
             token_count=token_count,
             leakage=leakage,
@@ -40,7 +40,7 @@ class AuditLog:
 
     def session_pseudonymize(
         self,
-        session_id: str,
+        audit_id: str,
         new_tokens: int,
         reused_tokens: int,
         leakage: str,
@@ -48,7 +48,7 @@ class AuditLog:
     ) -> None:
         self._write(
             "session_pseudonymize",
-            session_id=session_id,
+            audit_id=audit_id,
             new_tokens=new_tokens,
             reused_tokens=reused_tokens,
             leakage=leakage,
@@ -78,11 +78,11 @@ class AuditLog:
         )
 
     def restore(
-        self, session_id: str, restored_count: int, unknown_token_count: int, mode: str
+        self, audit_id: str, restored_count: int, unknown_token_count: int, mode: str
     ) -> None:
         self._write(
             "restore",
-            session_id=session_id,
+            audit_id=audit_id,
             restored_count=restored_count,
             unknown_token_count=unknown_token_count,
             mode=mode,
