@@ -200,11 +200,16 @@ async def test_the_audit_directory_holds_no_value_no_hash_and_no_salt(
 
     secrets = [*VALUES, *_derived(CONVERSATION)]
     strings = list(_strings(record))
+    random_paths = HEX_FIELDS | {("ts",)}
+    scrubbed = raw
+    for path, text in strings:
+        if path in random_paths:
+            scrubbed = scrubbed.replace(text, "")
     for value in secrets:
         for form in _normalized(value):
-            assert form not in raw
-            assert json.dumps(form)[1:-1] not in raw
-            assert all(form not in text.lower() for _, text in strings)
+            assert form not in scrubbed
+            assert json.dumps(form)[1:-1] not in scrubbed
+            assert all(form not in text.lower() for p, text in strings if p not in random_paths)
     assert int(CVV) not in set(_numbers(record))
 
     for path, text in strings:
@@ -217,6 +222,8 @@ async def test_the_audit_directory_holds_no_value_no_hash_and_no_salt(
     assert not LONG_HEX.search(remainder)
     assert re.fullmatch(r"[0-9a-f]{12}", record["session"])
     assert re.fullmatch(r"[0-9a-f]{64}", record["outgoing"]["sha256"])
+    assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", record["request_id"])
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T[\d:.]+\+00:00", record["ts"])
 
 
 @pytest.mark.asyncio
