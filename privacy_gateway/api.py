@@ -19,7 +19,7 @@ from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
-from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
+from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, SpanIndex
 from privacy_gateway.leakage import (
     MIN_LENGTH_FOR_FUZZY_SEARCH,
     REDACTED_SUFFIX,
@@ -284,7 +284,7 @@ class GatewaySession:
             self._rescans.move_to_end(digest)
             return list(cached)
         registry = self._gateway.config.registry
-        tokens = issued_token_spans(text, self._entries)
+        tokens = SpanIndex(issued_token_spans(text, self._entries))
         leaks: list[Leak] = []
         for finding in self._gateway._pipeline.run(text, self._known()).findings:
             if _ignored(registry, finding.data_class):

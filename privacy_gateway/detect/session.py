@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 from privacy_gateway.classes import ClassRegistry
 from privacy_gateway.detect.dictionaries import TrieMatcher, allows_genitive
 from privacy_gateway.detect.normalize import normalized, offset_map
-from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, compact_digit_run, mostly_digits
+from privacy_gateway.detect.spans import (
+    TOKEN_ATTRIBUTE,
+    SpanIndex,
+    compact_digit_run,
+    mostly_digits,
+)
 from privacy_gateway.model import Finding, Span
 from privacy_gateway.tokens import ANY_TOKEN
 
@@ -272,7 +277,7 @@ class SubstringSweep:
         mapping = offset_map(text)
         work = text if mapping is None else mapping.text
         lowered = _lower(work)
-        tokens = [Span(match.start(), match.end()) for match in ANY_TOKEN.finditer(work)]
+        tokens = SpanIndex(Span(match.start(), match.end()) for match in ANY_TOKEN.finditer(work))
         raw: list[tuple[int, int, Known]] = []
         for key, value in self._values.items():
             if " " in key:
@@ -283,11 +288,7 @@ class SubstringSweep:
                 start = lowered.find(key, start + 1)
         for pattern, value in self._spaced:
             raw.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
-        raw = [
-            hit
-            for hit in raw
-            if not any(token.overlaps(Span(hit[0], hit[1])) for token in tokens)
-        ]
+        raw = [hit for hit in raw if not tokens.overlaps(Span(hit[0], hit[1]))]
         raw.sort(key=lambda hit: (hit[0] - hit[1], hit[0]))
         chosen: list[tuple[int, int, Known]] = []
         starts: set[int] = set()

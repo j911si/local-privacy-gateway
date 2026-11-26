@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.detect.session import SubstringSweep, known_occurrences
+from privacy_gateway.detect.spans import SpanIndex
 from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, Span, VaultEntry
 from privacy_gateway.tokens import ANY_TOKEN, NUMBERED_TOKEN
 
@@ -13,45 +14,41 @@ MIN_LENGTH_FOR_FUZZY_SEARCH = 4
 REDACTED_SUFFIX = "_REDACTED>"
 
 
-def glued_to_token(finding: Finding, tokens: list[Span]) -> bool:
+def glued_to_token(finding: Finding, tokens: SpanIndex) -> bool:
     """A handle that starts right after a token is the host part of `user@host`, not a handle."""
-    return finding.data_class == "SOCIAL_MEDIA_HANDLE" and any(
-        token.end == finding.span.start for token in tokens
-    )
+    return finding.data_class == "SOCIAL_MEDIA_HANDLE" and tokens.ends_at(finding.span.start)
 
 
-def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
+def _short_touching_token(start: int, end: int, tokens: SpanIndex) -> bool:
     """A short hit right next to a token was part of a longer word before the token went in."""
-    return end - start < MIN_LENGTH_FOR_FUZZY_SEARCH and any(
-        token.end == start or token.start == end for token in tokens
+    return end - start < MIN_LENGTH_FOR_FUZZY_SEARCH and (
+        tokens.ends_at(start) or tokens.starts_at(end)
     )
 
 
-def _short_fragment_next_to_token(text: str, start: int, end: int, tokens: list[Span]) -> bool:
+def _short_fragment_next_to_token(text: str, start: int, end: int, tokens: SpanIndex) -> bool:
     """A short known value next to a token that runs on into letters or digits on its other side.
 
     A complete short value next to a token (`<PHONE_001>li`) is a leak.
     """
     if end - start >= MIN_LENGTH_FOR_FUZZY_SEARCH:
         return False
-    after = end < len(text) and text[end].isalnum() and any(t.end == start for t in tokens)
-    before = start > 0 and text[start - 1].isalnum() and any(t.start == end for t in tokens)
+    after = end < len(text) and text[end].isalnum() and tokens.ends_at(start)
+    before = start > 0 and text[start - 1].isalnum() and tokens.starts_at(end)
     return after or before
 
 
-def _only_tokens(text: str, span: Span, tokens: list[Span]) -> bool:
+def _only_tokens(text: str, span: Span, tokens: SpanIndex) -> bool:
     """Nothing but tokens and punctuation inside `span`, so it carries no value."""
-    rest = list(text[span.start : span.end])
-    for token in tokens:
-        for index in range(max(token.start, span.start), min(token.end, span.end)):
-            rest[index - span.start] = " "
-    return not any(char.isalnum() for char in rest)
+    return not any(
+        char.isalnum() for start, end in tokens.gaps(span) for char in text[start:end]
+    )
 
 
-def exempt_from_residual(finding: Finding, tokens: list[Span], text: str) -> bool:
+def exempt_from_residual(finding: Finding, tokens: SpanIndex, text: str) -> bool:
     """A residual finding that is part of a token or glued to one is no leak."""
     return (
-        any(token.contains(finding.span) for token in tokens)
+        tokens.contains(finding.span)
         or _only_tokens(text, finding.span, tokens)
         or glued_to_token(finding, tokens)
         or _short_touching_token(finding.span.start, finding.span.end, tokens)
@@ -111,7 +108,7 @@ def check_leakage(
     values that were redacted (held in memory only) to their class; a copy left is a leak.
     """
     leaks: list[Leak] = []
-    token_spans = issued_token_spans(text, entries)
+    token_spans = SpanIndex(issued_token_spans(text, entries))
 
     report = scan(text)
     for finding in report.findings:
@@ -131,26 +128,26 @@ def check_leakage(
     for value, data_class in (redacted or {}).items():
         known.setdefault(value, (data_class, redacted_token(data_class)))
     for span, (data_class, _) in known_occurrences(text, known, registry):
-        if any(token.contains(span) for token in token_spans):
+        if token_spans.contains(span):
             continue
         if _short_fragment_next_to_token(text, span.start, span.end, token_spans):
             continue
-        if data_class == "SOCIAL_MEDIA_HANDLE" and any(t.end == span.start for t in token_spans):
+        if data_class == "SOCIAL_MEDIA_HANDLE" and token_spans.ends_at(span.start):
             continue
         leaks.append(Leak("original_value", data_class, span.start, span.end))
 
     if sweep:
-        ignored = [
+        ignored = SpanIndex(
             finding.span
             for finding in report.findings
             if _policy(registry, finding.data_class) is Policy.IGNORE
-        ]
+        )
         for span, (data_class, _) in SubstringSweep(known).find(text):
-            if any(token.contains(span) for token in token_spans):
+            if token_spans.contains(span):
                 continue
-            if any(span.overlaps(other) for other in ignored):
+            if ignored.overlaps(span):
                 continue
-            if data_class == "SOCIAL_MEDIA_HANDLE" and any(t.end == span.start for t in token_spans):
+            if data_class == "SOCIAL_MEDIA_HANDLE" and token_spans.ends_at(span.start):
                 continue
             leaks.append(Leak("original_value", data_class, span.start, span.end))
 
