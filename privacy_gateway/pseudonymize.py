@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from privacy_gateway.classes import PERSON_LABEL, ClassRegistry, Policy
 from privacy_gateway.config import Config
@@ -87,6 +88,27 @@ def _key(text: str, finding: Finding) -> tuple[str | None, str, str]:
     return (None, finding.data_class, spelling)
 
 
+def rewrite(text: str, replacements: list[tuple[Span, str]]) -> str:
+    """Apply replacements in one pass when they are disjoint, else last start first."""
+    ordered = sorted(replacements, key=lambda item: item[0].start)
+    disjoint = all(span.start < span.end for span, _ in ordered) and all(
+        left.end <= right.start for (left, _), (right, _) in pairwise(ordered)
+    )
+    if disjoint:
+        parts: list[str] = []
+        position = 0
+        for span, replacement in ordered:
+            parts.append(text[position : span.start])
+            parts.append(replacement)
+            position = span.end
+        parts.append(text[position:])
+        return "".join(parts)
+    rewritten = text
+    for span, replacement in sorted(replacements, key=lambda item: item[0].start, reverse=True):
+        rewritten = rewritten[: span.start] + replacement + rewritten[span.end :]
+    return rewritten
+
+
 def pseudonymize_text(
     text: str,
     report: DetectionReport,
@@ -132,9 +154,7 @@ def pseudonymize_text(
         assignment.spans.append(finding.span)
         replacements.append((finding.span, assignment.token))
 
-    rewritten = text
-    for span, replacement in sorted(replacements, key=lambda item: item[0].start, reverse=True):
-        rewritten = rewritten[: span.start] + replacement + rewritten[span.end :]
+    rewritten = rewrite(text, replacements)
 
     for assignment in assignments:
         assignment.spans.sort()
