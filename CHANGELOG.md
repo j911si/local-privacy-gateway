@@ -36,8 +36,8 @@ All notable changes to this project are documented in this file. The format foll
   `Basic` credentials.
 - Detection no longer takes quadratic time on crafted input: PIN/TAN/OTP, ADO connection strings,
   PEM blocks, JWT, labelled tax IDs, postal codes, salutations, the password rules, overlap
-  resolution and the leak check's token test. One crafted line used to cost minutes to hours of
-  CPU.
+  resolution and the leak check's token test. A crafted 0.25 MiB request took 46 s before; the
+  same input at 1 MiB now takes 9 s.
 - Placeholders inside tool calls are no longer restored by default. Before, the proxy put the
   real value back into every `tool_use.input`, so a prompt-injected `Bash`, `WebFetch` or MCP
   call received it. Now a value is restored only where a rule in `PGW_PROXY_TOOL_RESTORE_POLICY`
