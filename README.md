@@ -703,7 +703,7 @@ kept. Every other event —
 A placeholder inside a tool call is not restored unless a rule allows it. This closes a direct
 path for prompt injection: text the model reads (a web page, a file, a tool result) can tell it
 to put `<IBAN_001>` into `Bash`, `WebFetch` or an MCP tool, and without the policy the client
-would receive and run the real value. Text blocks are restored as before.
+would receive and run the real value. Placeholders in text blocks are restored.
 
 Without `PGW_PROXY_TOOL_RESTORE_POLICY` the allowlist is empty. Claude Code then writes the
 placeholders, not the values, into files it creates with `Write` or `Edit`, and shell commands
@@ -771,7 +771,8 @@ value, no token and no hash of either is written. The file has its own name so r
 Limits: the policy decides per argument, not per effect. A value released into `Write.content`
 can still leave the machine if the model later runs that file, uploads it, or reads it back into
 a tool argument that has no rule. Keep rules narrow and use `target` for file tools. A symbolic
-link under `under` that points elsewhere is not detected, because the check sees only the string.
+link under `under` that points elsewhere is not detected, because the check sees only the string. In block mode a stream
+has already sent the start of the blocked call, its id and tool name, before the proxy ends it.
 
 ### Sessions
 
@@ -1188,7 +1189,8 @@ Supporting properties:
   `LeakageError` and purges the session.
 - **Never logged.** Findings, detection reports, audit events and exception messages carry class
   names, spans and counts — never values. The audit log records classes, offsets, lengths and
-  counts, not content.
+  counts, not content. Audit records use random ids for correlation, never the session key or the
+  vault session id.
 - **No network in the core.** `privacy_gateway` imports no networking module; a test enforces this
   statically. All network code lives in `privacy_gateway_proxy`, which the core never imports.
 - **Per-session tokens.** Two separate documents produce no cross-linkable tokens.
