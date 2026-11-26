@@ -32,7 +32,7 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 `PGW_PROXY_SESSION_STRATEGY`, `PGW_PROXY_TRANSFORM_SYSTEM`, `PGW_PROXY_PLACEHOLDER_NOTICE`,
 `PGW_PROXY_DEBUG_DIR`, `PGW_PROXY_DEBUG_ORIGINALS`, `PGW_AUDIT_LOG_DIR`,
 `PGW_PROXY_RESCAN_BUDGET`, `PGW_PROXY_PASSTHROUGH_PATHS`, `PGW_PROXY_AUTH_TOKEN`,
-`PGW_PROXY_AUTH_TOKEN_FILE`, `PGW_PROXY_ALLOW_UNAUTHENTICATED`.
+`PGW_PROXY_AUTH_TOKEN_FILE`, `PGW_PROXY_ALLOW_UNAUTHENTICATED`, `PGW_PROXY_UNCHECKED_FIELDS`.
 
 ## Architecture
 
@@ -58,7 +58,9 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - The proxy replaces and rescans the keys of objects inside `tool_use.input` (audit paths
   `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
   `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
-  `verdict: ok_with_unchecked_findings` when only unchecked fields have findings.
+  `verdict: ok_with_unchecked_findings` when only unchecked fields have findings and
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`; by default (`block`) a rescan hit in any unchecked field
+  except `metadata` blocks with 422 before the upstream call.
 - `api.py` fails closed: any exception or `LeakageError` purges the session and re-raises; no
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.

@@ -273,6 +273,7 @@ stored token is lost.
 | `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
 | `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
 | `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
+| `PGW_PROXY_UNCHECKED_FIELDS` | `block` | What happens when the rescan finds something in a field the proxy does not transform (`tools`, `thinking`, an untransformed `system`, unknown fields and blocks): `block` refuses the request with 422 `privacy_gateway_leak` before anything is sent; `allow` forwards it unchanged with `verdict: ok_with_unchecked_findings` and a warning at startup (**unsafe**: the found values go upstream in clear text). `metadata` never blocks. Any other value stops the start. |
 | `PGW_PROXY_ALLOW_UNAUTHENTICATED` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy start on a non-loopback address without an auth token, with a warning in the startup log. Anyone who reaches the port and knows a session key gets that session's original values back. |
 | `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
 | `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
@@ -849,6 +850,12 @@ memory files, skill descriptions, tool documentation — leaves the machine unch
 conversation content is protected. With an API key the switch is not needed and you get the full
 protection.
 
+With the default `PGW_PROXY_UNCHECKED_FIELDS=block` an untransformed system prompt is still
+rescanned, and any finding blocks the request with 422 `privacy_gateway_leak`. A Claude Code system
+prompt names the working directory, so a path such as `/home/<name>/…` or `/Users/<name>/…` is a
+`PERSON_USERNAME` finding and blocks every request of that login. Such a setup works only with
+`PGW_PROXY_UNCHECKED_FIELDS=allow`, which sends those values upstream in clear text.
+
 ### Access control
 
 The proxy answers only requests whose `Host` header is loopback (`127.0.0.1`, `localhost`, `[::1]`,
@@ -921,7 +928,7 @@ Limits of this setup:
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
 | 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Also any `POST`/`PUT`/`PATCH`/`DELETE` to another path not listed in `PGW_PROXY_PASSTHROUGH_PATHS`, and a `GET`/`HEAD`/`OPTIONS` with a body. Nothing is sent upstream. |
 | 422 | `privacy_gateway_tool_restore_denied` | `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` and a tool call in a non-streaming answer holds a placeholder that no rule releases. The client gets none of the answer. In a stream the same type arrives as an `error` event. The message lists class names and a count. |
-| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
+| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field, or (with the default `PGW_PROXY_UNCHECKED_FIELDS=block`) a finding in an unchecked field other than `metadata`. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 | 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |
 
@@ -988,16 +995,18 @@ Each line lists every field of the request:
   every candidate. Older versions wrote a per-value `hmac` with a salt file `audit.salt` next to
   the directory; the proxy no longer creates or reads that file, so after an update it is unused
   and can be deleted by hand. Lines with `hmac` from older versions stay valid `"v": 2` lines.
-- `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
-  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from a read-only
-  scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
+- `status: unchecked` fields are never changed (`reason`: `thinking`, `tools`, `metadata`,
+  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from the rescan.
+  With `PGW_PROXY_UNCHECKED_FIELDS=block` (default) a finding in any of them except `metadata`
+  blocks the request; with `allow` they are forwarded as they are. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
   block) is such a field with `reason: system`.
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
   `leakage`, `upstream_status` (the HTTP status the upstream answered with, `null` when nothing
   was sent or the connection failed; the verdict does not depend on it) and a `rescan`: the full
   detection runs again over every string of that body. A hit
-  in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
-  only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
+  in a checked field sets `verdict: blocked` and nothing is sent. So does a hit in an unchecked
+  field (except `metadata`) under the default `PGW_PROXY_UNCHECKED_FIELDS=block`; under `allow`
+  such hits are only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
   `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by
   definition and are not reported (`detect/public.py`). With `verdict: blocked` the hash describes
   the body that was held back; after a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
@@ -1014,9 +1023,10 @@ Each line lists every field of the request:
   issued).
 - `verdict` is `ok`, `ok_with_unchecked_findings`, `blocked` or `error` (upstream connection
   failed, rescan timeout, or a request was rejected). `ok_with_unchecked_findings` means nothing
-  was blocked, but the read-only scan found something in at least one unchecked field (`tools`,
-  `metadata`, an untransformed system prompt, images, thinking, unknown blocks); look at the
-  `observed` lists of the `unchecked` fields. A request with a body that is not a JSON object, a
+  was blocked, but the rescan found something in at least one unchecked field that was forwarded:
+  `metadata` always, the others (`tools`, an untransformed system prompt, images, thinking,
+  unknown blocks) only with `PGW_PROXY_UNCHECKED_FIELDS=allow`; look at the `observed` lists of
+  the `unchecked` fields. A request with a body that is not a JSON object, a
   wrong basic form (`messages`, a message, `content`, a block, `system`) or a query string outside
   the allowed parameters gets HTTP 400 (`invalid_request_error`) and `verdict: blocked`.
 - The keys of the objects inside `tool_use.input` are checked like values. A key field has the
@@ -1262,10 +1272,11 @@ Supporting properties:
   break restoration in a stream.
 - **One vault per process.** The proxy serves exactly one vault and one configuration. The auth
   token is one shared secret, not a per-user login.
-- **Unchecked fields go out as they are.** `tools` definitions, `metadata`, an unchanged system
-  prompt (OAuth login) and signed blocks are forwarded byte for byte. They are rescanned and
-  reported, not repaired. Tool definitions of connected services often contain example addresses
-  and handles.
+- **Unchecked fields are not repaired.** `tools` definitions, `metadata`, an unchanged system
+  prompt (OAuth login) and signed blocks are never changed. By default a finding in one of them
+  (except `metadata`) blocks the whole request; with `PGW_PROXY_UNCHECKED_FIELDS=allow` they are
+  forwarded byte for byte and only reported. Values the rules do not find go out either way. Tool
+  definitions of connected services often contain example addresses and handles, which then block.
 - **Spellings are separate placeholders.** `Anna`, `ANNA` and the `anna` in `/Users/anna/` each
   restore exactly, but the model sees three different tokens and cannot tell that they name the
   same person.
@@ -1306,7 +1317,9 @@ pseudonymization. The request was not sent upstream.
    `outgoing.leakage` is `fail`, the leak check stopped it and the field with `leaks` names the
    field path, the kind of leak and the class, for example `original_value PERSON_USERNAME`. If
    it is `ok`, the final rescan stopped it and `outgoing.rescan.findings` lists path, class and
-   offsets. The older `audit.jsonl` has the timestamp, but no session key.
+   offsets. A path in an unchecked field (`tools[…]`, `system` with
+   `PGW_PROXY_TRANSFORM_SYSTEM=0`, a `thinking` block, an unknown field) means the default
+   `PGW_PROXY_UNCHECKED_FIELDS=block` stopped it: the proxy cannot replace values there. The older `audit.jsonl` has the timestamp, but no session key.
 2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two

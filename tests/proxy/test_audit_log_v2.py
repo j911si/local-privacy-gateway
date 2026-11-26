@@ -162,7 +162,7 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
 async def test_the_log_holds_no_canary_value(gateway: Gateway, audit_dir: Path) -> None:
     seen: list[httpx.Request] = []
     tools = [{"name": "Read", "description": f"Siehe {URL} und {EMAIL}", "input_schema": {}}]
-    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+    async with build(gateway, audit_dir, ok_handler(seen), unchecked_fields="allow") as client:
         await client.post("/v1/messages", json=body_with(LETTER, tools=tools))
 
     sent = seen[0].content.decode("utf-8")
@@ -204,7 +204,7 @@ async def test_unchecked_fields_are_listed_with_observed_and_left_unchanged(
         {"role": "assistant", "content": [thinking, {"type": "text", "text": "Ja"}]},
         {"role": "user", "content": "Weiter"},
     ]
-    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+    async with build(gateway, audit_dir, ok_handler(seen), unchecked_fields="allow") as client:
         response = await client.post("/v1/messages", json=body)
 
     assert response.status_code == 200
@@ -505,7 +505,9 @@ async def test_an_untransformed_system_prompt_is_unchecked_with_observed(
 ) -> None:
     seen: list[httpx.Request] = []
     body = body_with("Hallo", system=system)
-    async with build(gateway, audit_dir, ok_handler(seen), transform_system=False) as client:
+    async with build(
+        gateway, audit_dir, ok_handler(seen), transform_system=False, unchecked_fields="allow"
+    ) as client:
         response = await client.post("/v1/messages", json=body)
 
     assert response.status_code == 200

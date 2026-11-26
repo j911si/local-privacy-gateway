@@ -1,0 +1,311 @@
+"""Findings in fields the proxy does not transform block the request unless allowed."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from privacy_gateway import Gateway
+from privacy_gateway.model import ConfigError
+from privacy_gateway_proxy import cli, server
+from privacy_gateway_proxy.settings import ProxySettings, load_settings
+
+UPSTREAM = "https://upstream.test"
+MAIL = "erika.beispiel@firma-test.de"
+IBAN = "DE89370400440532013000"
+VALUES = (MAIL, IBAN)
+CONVERSATION = "0b1c2d3e-5f6a-4b7c-8d9e-0a1b2c3d4e5f"
+BASE: dict[str, Any] = {
+    "model": "claude-x",
+    "max_tokens": 16,
+    "metadata": {"user_id": f"user_a_account_b_session_{CONVERSATION}"},
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "hallo"}]}],
+}
+
+
+def _with_thinking(thinking: str) -> dict[str, Any]:
+    return {
+        **BASE,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hallo"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": thinking, "signature": "c2ln"},
+                    {"type": "text", "text": "ok"},
+                ],
+            },
+            {"role": "user", "content": [{"type": "text", "text": "weiter"}]},
+        ],
+    }
+
+
+CASES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
+    "tools_description": (
+        {**BASE, "tools": [{"name": "T", "description": f"Mail an {MAIL}", "input_schema": {}}]},
+        {},
+        "tools[0].description",
+    ),
+    "tools_input_schema": (
+        {
+            **BASE,
+            "tools": [
+                {
+                    "name": "T",
+                    "description": "Ein Werkzeug.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"to": {"type": "string", "description": f"z. B. {MAIL}"}},
+                    },
+                }
+            ],
+        },
+        {},
+        "tools[0].input_schema",
+    ),
+    "system_untransformed": (
+        {**BASE, "system": f"Kontakt {MAIL}, IBAN {IBAN}"},
+        {"transform_system": False},
+        "system",
+    ),
+    "system_blocks_untransformed": (
+        {**BASE, "system": [{"type": "text", "text": f"IBAN {IBAN}"}]},
+        {"transform_system": False},
+        "system[0]",
+    ),
+    "thinking_block": (_with_thinking(f"IBAN {IBAN}"), {}, "messages[1].content[0]"),
+    "unknown_field": ({**BASE, "x_extra": {"note": f"IBAN {IBAN}"}}, {}, "x_extra"),
+}
+
+
+@pytest.fixture
+def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway]:
+    monkeypatch.setenv("PGW_SKIP_USER_CONFIG", "1")
+    with Gateway() as instance:
+        yield instance
+
+
+class Run:
+    """The outcome of one request through the proxy."""
+
+    def __init__(self, status: int, body: bytes, sent: list[bytes], entries: list[dict]) -> None:
+        self.status = status
+        self.body = body
+        self.sent = sent
+        self.entries = entries
+
+
+async def _send(gateway: Gateway, tmp_path: Path, body: dict, **overrides: Any) -> Run:
+    seen: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if json.loads(request.content).get("stream") is True:
+            return httpx.Response(
+                200, content=b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+    audit = tmp_path / "audit"
+    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit, **overrides)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = server.create_app(settings, gateway, client=client)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787"
+    ) as proxy:
+        response = await proxy.post("/v1/messages", content=json.dumps(body).encode())
+    entries = [
+        json.loads(line)
+        for path in audit.glob("audit-*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    return Run(response.status_code, response.content, [r.content for r in seen], entries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("case", sorted(CASES))
+async def test_a_finding_in_an_unchecked_field_blocks_before_the_upstream(
+    gateway: Gateway, tmp_path: Path, case: str, streaming: bool
+) -> None:
+    body, overrides, field = CASES[case]
+    body = {**body, "stream": True} if streaming else body
+
+    run = await _send(gateway, tmp_path, body, **overrides)
+
+    assert run.sent == []
+    assert run.status == 422
+    error = json.loads(run.body)["error"]
+    assert error["type"] == "privacy_gateway_leak"
+    assert all(value not in run.body.decode() for value in VALUES)
+    (entry,) = run.entries
+    assert entry["verdict"] == "blocked"
+    assert entry["streaming"] is streaming
+    findings = entry["outgoing"]["rescan"]["findings"]
+    assert findings
+    assert all(item["path"].startswith(field) for item in findings)
+    assert all(set(item) == {"path", "cls", "start", "end"} for item in findings)
+    assert all(isinstance(item["start"], int) and item["end"] > item["start"] for item in findings)
+    log = json.dumps(run.entries)
+    assert all(value not in log for value in VALUES)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", sorted(CASES))
+async def test_the_opt_out_forwards_unchecked_findings_as_before(
+    gateway: Gateway, tmp_path: Path, case: str
+) -> None:
+    body, overrides, _ = CASES[case]
+
+    run = await _send(gateway, tmp_path, body, unchecked_fields="allow", **overrides)
+
+    assert run.status == 200
+    assert len(run.sent) == 1
+    assert json.loads(run.sent[0]) == {
+        **json.loads(json.dumps(body)), **_checked_part(json.loads(run.sent[0]))
+    }
+    (entry,) = run.entries
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+
+
+def _checked_part(sent: dict) -> dict:
+    return {"messages": sent["messages"]}
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_unchecked_findings_is_forwarded(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    body = {
+        **BASE,
+        "tools": [{"name": "Read", "description": "Reads a file.", "input_schema": {}}],
+        "messages": [{"role": "user", "content": f"Bitte IBAN {IBAN} pruefen."}],
+    }
+
+    run = await _send(gateway, tmp_path, body)
+
+    assert run.status == 200
+    assert len(run.sent) == 1
+    assert IBAN not in run.sent[0].decode()
+    assert run.entries[0]["verdict"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_placeholders_and_public_example_values_never_block(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    first = await _send(
+        gateway, tmp_path, {**BASE, "messages": [{"role": "user", "content": f"IBAN {IBAN}"}]}
+    )
+    token = re.search(r"<IBAN_\d+>", first.sent[0].decode()).group(0)
+    body = {
+        **_with_thinking(f"Die Nutzerin nannte {token}; Beispiel <EMAIL_007>."),
+        "tools": [
+            {
+                "name": "Mail",
+                "description": "Send mail, e.g. to someone@example.com or ops@mail.example.org.",
+                "input_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+            }
+        ],
+    }
+
+    run = await _send(gateway, tmp_path, body)
+
+    assert run.status == 200, run.body
+    assert len(run.sent) == 1
+    sent = json.loads(run.sent[0])
+    assert sent["messages"][1]["content"][0] == body["messages"][1]["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_the_signed_thinking_block_is_never_changed(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    body = _with_thinking(f"IBAN {IBAN}")
+
+    allowed = await _send(gateway, tmp_path / "a", body, unchecked_fields="allow")
+    blocked = await _send(gateway, tmp_path / "b", body)
+
+    assert json.loads(allowed.sent[0])["messages"][1]["content"][0] == {
+        "type": "thinking", "thinking": f"IBAN {IBAN}", "signature": "c2ln"
+    }
+    assert blocked.sent == []
+
+
+def test_the_mode_defaults_to_block() -> None:
+    assert ProxySettings().unchecked_fields == "block"
+    assert load_settings(env={}).unchecked_fields == "block"
+
+
+@pytest.mark.parametrize("value", ["block", "allow"])
+def test_the_mode_comes_from_env(value: str) -> None:
+    assert load_settings(env={"PGW_PROXY_UNCHECKED_FIELDS": value}).unchecked_fields == value
+
+
+@pytest.mark.parametrize("value", ["", "off", "warn", "ALLOW "])
+def test_an_unknown_mode_stops_the_start(value: str) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(env={"PGW_PROXY_UNCHECKED_FIELDS": value})
+
+
+def test_the_opt_out_warns_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        cli.log_startup(ProxySettings(unchecked_fields="allow"))
+
+    assert "unchecked_fields=allow" in caplog.text
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("PGW_PROXY_UNCHECKED_FIELDS=allow" in text for text in warnings)
+
+
+def test_the_default_mode_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        cli.log_startup(ProxySettings())
+
+    assert "unchecked_fields=block" in caplog.text
+    assert "PGW_PROXY_UNCHECKED_FIELDS" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_subscription_style_system_prompt_with_a_home_path_is_blocked(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    system = [
+        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+        {"type": "text", "text": "Working directory: /home/testuser/projekt"},
+    ]
+    body = {**BASE, "system": system}
+
+    blocked = await _send(gateway, tmp_path / "a", body, transform_system=False)
+    allowed = await _send(
+        gateway, tmp_path / "b", body, transform_system=False, unchecked_fields="allow"
+    )
+
+    assert blocked.sent == []
+    assert blocked.entries[0]["outgoing"]["rescan"]["findings"][0]["cls"] == "PERSON_USERNAME"
+    assert json.loads(allowed.sent[0])["system"] == system
+
+
+@pytest.mark.asyncio
+async def test_a_finding_in_metadata_does_not_block(gateway: Gateway, tmp_path: Path) -> None:
+    body = {
+        **BASE,
+        "metadata": {"user_id": "user_a_account_b_session_0b1c2d3e-1111-2222-3333-444444444444"},
+    }
+
+    run = await _send(gateway, tmp_path, body)
+
+    assert run.status == 200
+    assert len(run.sent) == 1
+    (entry,) = run.entries
+    assert entry["verdict"] == "ok_with_unchecked_findings"
+    assert [item["path"] for item in entry["outgoing"]["rescan"]["findings"]] == [
+        "metadata.user_id"
+    ]

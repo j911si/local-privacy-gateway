@@ -48,6 +48,10 @@ Environment=PGW_AUDIT_LOG_DIR=%h/.local/state/privacy-gateway/audit
 Environment=PYTHONDONTWRITEBYTECODE=1
 # Uncomment when the client logs in with OAuth instead of an API key:
 # Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
+# The untransformed system prompt is still rescanned; by default a finding there (such as the
+# user name in a /home/<name>/ working directory) blocks the request with 422. Only
+# PGW_PROXY_UNCHECKED_FIELDS=allow forwards it, with those values in clear text. UNSAFE.
+# Environment=PGW_PROXY_UNCHECKED_FIELDS=allow
 # Auth token: keep it in a file with mode 0600, never in this unit. Clients send it as the
 # header x-pgw-auth. A file that group or others can read stops the proxy at start. Required for
 # every non-loopback bind, including the Tailscale variant.

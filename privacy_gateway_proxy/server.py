@@ -25,6 +25,7 @@ from privacy_gateway.model import LeakageError
 from privacy_gateway_proxy import audit_trail, tool_policy
 from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
 from privacy_gateway_proxy.settings import (
+    UNCHECKED_BLOCK,
     ProxySettings,
     audit_dir_for,
     check_bind,
@@ -55,6 +56,7 @@ SESSION_CACHE_SIZE = 64
 DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 LOGGED_SEGMENTS = 2
+UNBLOCKED_PREFIX = ("metadata",)
 ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\d+")
 
 _transform: Any
@@ -288,10 +290,13 @@ async def _transformed(
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("error", "ok", **outcome)
         return _error("privacy_gateway_timeout", "rescan exceeded its time budget", 503)
-    if rescan.blocking:
+    blocking = rescan.blocking
+    if not blocking and settings.unchecked_fields == UNCHECKED_BLOCK:
+        blocking = [hit for hit in rescan.hits if hit.path[:1] != UNBLOCKED_PREFIX]
+    if blocking:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("blocked", "ok", **outcome)
-        return _leak_response(LeakageError(audit_trail.as_leaks(rescan.blocking)))
+        return _leak_response(LeakageError(audit_trail.as_leaks(blocking)))
 
     _debug_dump(settings, key, new_body)
     upstream_request = client.build_request(
