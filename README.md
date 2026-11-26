@@ -273,6 +273,8 @@ stored token is lost.
 | `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
 | `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
 | `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
+| `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
+| `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
 
 ---
@@ -655,7 +657,8 @@ Transformed on `POST /v1/messages` and `POST /v1/messages/count_tokens`:
 - **Request:** `system` (string, or the `text` of `type: "text"` blocks), `messages[].content`
   (string or `text` blocks), `tool_result` content (string or `text` blocks), every string leaf
   inside `tool_use.input`, and `source.data` of a `document` block whose `source.type` is `text`.
-- **Response:** `content[].text` and every string leaf in `tool_use.input`.
+- **Response:** `content[].text`. Placeholders inside `tool_use.input` are restored only where
+  the [tool restore policy](#tool-calls-restore-policy) allows it; by default nowhere.
 
 Never touched, forwarded unchanged and **not scanned**:
 
@@ -667,7 +670,8 @@ Never touched, forwarded unchanged and **not scanned**:
 
 A user name inside a home-directory path is personal data too. `/Users/<name>/`, `/home/<name>/`
 and `C:\Users\<name>\` give a `PERSON_USERNAME` finding for the `<name>` part, so the path comes
-out as `/Users/<PERSON_002>/...` and is restored on the way back, including in tool calls. Claude
+out as `/Users/<PERSON_002>/...` and is restored on the way back in text. In tool calls it is
+restored only when a policy rule allows the class `PERSON_USERNAME` for that argument. Claude
 Code puts such paths into every request (working directory, memory directory, instruction files).
 
 Fields that are never changed are still read: the rescan of the outgoing body covers `tools`,
@@ -687,10 +691,87 @@ HTTP 422. A body that is not a JSON object of the expected form gets HTTP 400.
 SSE is parsed event by event. `text_delta` is restored incrementally with a holdback: any trailing
 fragment that could be the beginning of a token is kept back until the next delta or
 `content_block_stop`, so a token is never split across deltas. `input_json_delta` is buffered per
-content block and emitted as one restored delta at `content_block_stop`, which makes tool calls
-appear slightly later in the stream (typically under a second). Every other event —
+content block and emitted as one delta at `content_block_stop`, after the tool restore policy has
+decided on every placeholder in it, which makes tool calls appear slightly later in the stream
+(typically under a second). Input that does not parse as JSON is forwarded with every placeholder
+kept. Every other event —
 `message_start`, `ping`, `thinking_delta`, `signature_delta`, `message_delta`, `message_stop`,
 `error` — is forwarded byte-identical.
+
+### Tool calls: restore policy
+
+A placeholder inside a tool call is not restored unless a rule allows it. This closes a direct
+path for prompt injection: text the model reads (a web page, a file, a tool result) can tell it
+to put `<IBAN_001>` into `Bash`, `WebFetch` or an MCP tool, and without the policy the client
+would receive and run the real value. Text blocks are restored as before.
+
+Without `PGW_PROXY_TOOL_RESTORE_POLICY` the allowlist is empty. Claude Code then writes the
+placeholders, not the values, into files it creates with `Write` or `Edit`, and shell commands
+see the placeholders too. If you want real values in files, allow exactly those arguments:
+
+```yaml
+# PGW_PROXY_TOOL_RESTORE_POLICY=~/.config/privacy-gateway/tool-restore.yaml
+rules:
+  - tool: Write
+    argument: content
+    classes: [IBAN, EMAIL, PERSON_FULL_NAME]
+    target:
+      argument: file_path
+      under: /home/me/projects/letters
+  - tool: Edit
+    argument: new_string
+    classes: [IBAN]
+    target: {argument: file_path, under: /home/me/projects/letters}
+  - tool: MultiEdit
+    argument: edits[*].new_string
+    classes: [IBAN]
+```
+
+Each rule needs all three of:
+
+- `tool`: one exact, case-sensitive tool name (letters, digits, `_`, `-`). There are no patterns:
+  `Write` does not cover `write`, `Write_evil`, `mcp__x__Write` or a name with a hidden character.
+- `argument`: the path of a string inside the input. Object keys are joined with `.`, `[*]` stands
+  for any element of a list. The path has to reach the string itself: `items` does not reach into
+  a list, `items[*]` does.
+- `classes`: the data classes that may be restored there, as listed by `pgw classes`
+  (the class of the value, for example `PERSON_FULL_NAME`, not the token label `PERSON`).
+
+The optional `target` applies the rule only when another argument holds an absolute path under
+the directory `under`. The path is checked as a string: `//` and `/./` are normalized. A path with
+`..`, a relative path, a path holding a placeholder, or a missing or non-string argument fails
+the check, and the placeholder stays.
+
+Object keys inside a tool input are never restored. A rule without `argument` or `classes`, an
+unknown key, an unknown class, a tool name with a pattern, or a file that is not valid YAML stops
+the proxy with an error message that names the position, not the content.
+
+With `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` a placeholder that no rule releases makes the proxy
+refuse the answer. A non-streaming answer becomes HTTP 422 `privacy_gateway_tool_restore_denied`
+and the client gets nothing of the tool call. In a stream, tool calls before it have already
+been sent; the blocked call's input is replaced by an `error` event of the same type and the
+stream ends there. The default `keep_token` leaves the placeholder in place and lets the agent
+continue.
+
+Each decision is logged in `tool-restore-YYYY-MM-DD.jsonl` next to the request log, one
+`tool_restore` record per answer with placeholders in tool calls:
+
+```json
+{"v": 2, "event": "tool_restore", "ts": "...", "request_id": "<same as the proxy_request line>",
+ "streaming": false, "on_deny": "keep_token",
+ "entries": [{"tool": "Bash", "path": "content[0].input{0}", "cls": "IBAN", "decision": "kept"}]}
+```
+
+`decision` is `restored`, `kept` or `blocked`. `path` addresses object members by position like the
+request log, so no key text appears. The tool name comes from the model: characters outside
+letters, digits, `_` and `-` are written as `\uXXXX`, and the name is cut to 64 characters. No
+value, no token and no hash of either is written. The file has its own name so readers of
+`audit-*.jsonl` do not see an unknown event.
+
+Limits: the policy decides per argument, not per effect. A value released into `Write.content`
+can still leave the machine if the model later runs that file, uploads it, or reads it back into
+a tool argument that has no rule. Keep rules narrow and use `target` for file tools. A symbolic
+link under `under` that points elsewhere is not detected, because the check sees only the string.
 
 ### Sessions
 
@@ -831,6 +912,7 @@ Limits of this setup:
 | 403 | `privacy_gateway_forbidden` | `Host` header is not loopback while bound to loopback. |
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
 | 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Also any `POST`/`PUT`/`PATCH`/`DELETE` to another path not listed in `PGW_PROXY_PASSTHROUGH_PATHS`, and a `GET`/`HEAD`/`OPTIONS` with a body. Nothing is sent upstream. |
+| 422 | `privacy_gateway_tool_restore_denied` | `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` and a tool call in a non-streaming answer holds a placeholder that no rule releases. The client gets none of the answer. In a stream the same type arrives as an `error` event. The message lists class names and a count. |
 | 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 | 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |
@@ -1116,10 +1198,12 @@ Supporting properties:
   rest against someone who copies `vault.db` alone. Someone who can read your home directory as
   your user reads both files and decrypts everything. There is no passphrase, no key rotation, no
   multi-user separation.
-- **Prompt injection that turns restored values into actions.** Restoration happens on the way back
-  to the client. A model instructed by text inside a file it read can put `<IBAN_001>` into a tool
-  call; the proxy restores it, and the *real* value is what your local tool then executes or sends.
-  The gateway prevents the value from reaching the model, not from reaching a tool.
+- **Prompt injection, in part.** A model instructed by text inside a file it read can put
+  `<IBAN_001>` into a tool call. By default the proxy does not restore it there, so the tool gets
+  the placeholder. A rule you add re-opens that path for its tool, argument and classes, and a
+  released value can travel on: through a file the model later executes or uploads, or through
+  text the model reads back. Text answers are restored, so whatever you copy from them by hand
+  carries the real value. Placeholders are numbered in order and easy to guess.
 - **Anything at the proxy port.** Without `PGW_PROXY_AUTH_TOKEN`, any local process that reaches
   `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle.
 - **Whatever the rules do not describe.** See below.

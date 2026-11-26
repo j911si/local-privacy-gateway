@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from privacy_gateway.model import ConfigError
+from privacy_gateway_proxy.tool_policy import KEEP_TOKEN, ToolRule, check_settings, load_policy
 
 SESSION_STRATEGIES = ("metadata", "header", "single")
 FALSY_VALUES = ("0", "false", "no", "off")
@@ -41,6 +42,8 @@ class ProxySettings:
     rescan_budget_s: float = 10.0
     passthrough_paths: tuple[str, ...] = ()
     auth_token: str = field(default="", repr=False)
+    tool_restore_rules: tuple[ToolRule, ...] = ()
+    tool_restore_on_deny: str = KEEP_TOKEN
 
 
 def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
@@ -147,6 +150,12 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
         values["auth_token"] = auth_token
     if token_file:
         values["auth_token"] = _read_token_file(Path(token_file))
+    tool_policy = environment.get("PGW_PROXY_TOOL_RESTORE_POLICY")
+    if tool_policy:
+        values["tool_restore_rules"] = load_policy(Path(tool_policy).expanduser())
+    on_deny = environment.get("PGW_PROXY_TOOL_RESTORE_ON_DENY")
+    if on_deny is not None:
+        values["tool_restore_on_deny"] = on_deny
     audit_dir = environment.get(AUDIT_DIR_ENV)
     if audit_dir:
         values["audit_dir"] = Path(audit_dir)
@@ -166,6 +175,7 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     for path in settings.passthrough_paths:
         if not is_normal_path(path):
             raise ConfigError(f"passthrough path is not a normal absolute path: {path!r}")
+    check_settings((), settings.tool_restore_on_deny, None)
     if settings.session_strategy not in SESSION_STRATEGIES:
         raise ConfigError(f"unknown session strategy: {settings.session_strategy!r}")
     if not _upstream_allowed(settings.upstream_base_url):

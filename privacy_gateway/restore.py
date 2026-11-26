@@ -13,7 +13,7 @@ LENIENT = "lenient"
 
 _LABEL = r"[A-Za-z][A-Za-z0-9_]*?_\d{3,}"
 # A bracketed token is unambiguous wherever it stands; a bracketless one needs its own quotes.
-_LENIENT_TOKEN = re.compile(
+LENIENT_TOKEN = re.compile(
     rf"<(?P<bracketed>{_LABEL})>"
     rf"|(?<![\w>])(?P<quote>[`\"'])(?P<bare>{_LABEL})(?P=quote)(?!\w)"
 )
@@ -30,7 +30,7 @@ def restore_text(
     """
     if mode not in (STRICT, LENIENT):
         raise RestoreError(f"unknown restore mode: {mode}")
-    pattern = NUMBERED_TOKEN if mode == STRICT else _LENIENT_TOKEN
+    pattern = NUMBERED_TOKEN if mode == STRICT else LENIENT_TOKEN
     unknown: list[str] = []
     restored = 0
 

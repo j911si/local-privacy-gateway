@@ -49,8 +49,7 @@ def _roundtrip(session: Any, sent: dict) -> dict:
         def restore_text(self, text: str) -> str:
             return session.restore(text, mode="lenient").text
 
-    reply = {"content": [{"type": "tool_use", "id": "t", "name": "X", "input": sent}]}
-    return transform.restore_response(reply, Restorer())["content"][0]["input"]
+    return transform.restore_json(sent, Restorer().restore_text)
 
 
 def test_two_redacted_keys_are_not_blocked_and_leak_nothing(gateway: Gateway) -> None:

@@ -62,7 +62,8 @@ def log_startup(settings: ProxySettings) -> None:
     log = logging.getLogger("privacy_gateway_proxy")
     log.info(
         "settings listen=%s:%s upstream=%s transform_system=%s placeholder_notice=%s "
-        "debug_dir=%s debug_originals=%s auth_token=%s",
+        "debug_dir=%s debug_originals=%s auth_token=%s tool_restore_rules=%s "
+        "tool_restore_on_deny=%s",
         settings.listen_host,
         settings.listen_port,
         settings.upstream_base_url,
@@ -71,6 +72,8 @@ def log_startup(settings: ProxySettings) -> None:
         settings.debug_dir,
         settings.debug_originals,
         "set" if settings.auth_token else "unset",
+        len(settings.tool_restore_rules),
+        settings.tool_restore_on_deny,
     )
     if not is_loopback(settings.listen_host):
         log.warning(

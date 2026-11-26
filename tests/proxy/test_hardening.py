@@ -378,12 +378,16 @@ async def test_keys_without_findings_stay_byte_identical(
 
 
 @pytest.mark.asyncio
-async def test_a_token_key_in_the_response_is_restored(make_proxy: Callable[..., Proxy]) -> None:
+async def test_a_token_key_in_the_response_stays_a_token_without_a_policy(
+    make_proxy: Callable[..., Proxy],
+) -> None:
     proxy = make_proxy()
+    keys: list[str] = []
 
     def reply(request: httpx.Request) -> httpx.Response:
         sent_keys = json.loads(request.content)["messages"][0]["content"][0]["input"]
         (token_key,) = sent_keys
+        keys.append(token_key)
         block = {"type": "tool_use", "id": "t2", "name": "Lookup", "input": {token_key: "v"}}
         return httpx.Response(200, json={"content": [block]})
 
@@ -394,7 +398,8 @@ async def test_a_token_key_in_the_response_is_restored(make_proxy: Callable[...,
     )
 
     assert status == 200
-    assert json.loads(data)["content"][0]["input"] == {SECRET_MAIL: "v"}
+    assert json.loads(data)["content"][0]["input"] == {keys[0]: "v"}
+    assert keys[0] != SECRET_MAIL
 
 
 @pytest.mark.asyncio

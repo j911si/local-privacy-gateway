@@ -225,7 +225,7 @@ def pseudonymize_request(
 
 
 def restore_response(body: dict, sess: TextSession) -> dict:
-    """Return a copy of the response with text blocks and tool_use inputs restored."""
+    """Return a copy of the response with text blocks restored; tool_use input stays as sent."""
     new_body = copy.deepcopy(body)
     content = new_body.get("content")
     if not isinstance(content, list):
@@ -235,8 +235,6 @@ def restore_response(body: dict, sess: TextSession) -> dict:
             continue
         if block.get("type") == "text" and isinstance(block.get("text"), str):
             block["text"] = sess.restore_text(block["text"])
-        elif block.get("type") == "tool_use" and "input" in block:
-            block["input"] = restore_json(block["input"], sess.restore_text)
     return new_body
 
 
