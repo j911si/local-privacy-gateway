@@ -26,7 +26,7 @@ from privacy_gateway_proxy import server
 from privacy_gateway_proxy.settings import ProxySettings
 
 UPSTREAM = "https://upstream.test"
-CONVERSATION = "7d4e2c1a-5555-6666-7777-888899990000"
+CONVERSATION = "7d4e2c1a-5b6c-4d7e-8f90-a1b2c3d4e5f6"
 NAME = "Müller"
 IBAN = "DE89 3704 0044 0532 0130 00"
 PHONE = "+49 211 5559021"

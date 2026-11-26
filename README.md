@@ -263,7 +263,7 @@ stored token is lost.
 | `PGW_RESTORE_MODE` | `strict` | Default restore mode, `strict` or `lenient`. |
 | `PGW_CONFIG` | unset | Extra configuration file, applied after the user config. |
 | `PGW_SKIP_USER_CONFIG` | unset | `1`/`true`/`yes` ignores `~/.config/privacy-gateway/config.yaml`. Useful for reproducible runs and tests. |
-| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. |
+| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` (also `0.0.0.0`, `[::]` and private addresses such as Tailscale's `100.x`) needs an auth token, else the proxy does not start. |
 | `PGW_PROXY_UPSTREAM` | `https://api.anthropic.com` | Upstream base URL. Only `https://` or `http://127.0.0.1` / `http://localhost` are accepted; anything else is a `ConfigError`. |
 | `PGW_PROXY_SESSION_STRATEGY` | `metadata` | How the vault session key is derived: `metadata`, `header` or `single`. |
 | `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
@@ -273,6 +273,8 @@ stored token is lost.
 | `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
 | `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
 | `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
+| `PGW_PROXY_UNCHECKED_FIELDS` | `block` | What happens when the rescan finds something in a field the proxy does not transform (`tools`, `thinking`, an untransformed `system`, unknown fields and blocks): `block` refuses the request with 422 `privacy_gateway_leak` before anything is sent when the finding belongs to a [blocking class](#unchecked-fields-blocking-classes); other classes are only reported. `allow` forwards everything unchanged with `verdict: ok_with_unchecked_findings` and a warning at startup (**unsafe**: the found values go upstream in clear text). Any other value stops the start. |
+| `PGW_PROXY_ALLOW_UNAUTHENTICATED` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy start on a non-loopback address without an auth token, with a warning in the startup log. Anyone who reaches the port and knows a session key gets that session's original values back. |
 | `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
 | `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
@@ -620,8 +622,8 @@ uses `UMask=0077` and the sandboxing options a user manager allows (`NoNewPrivil
 
 If another machine has to reach the proxy, bind it only to an address that nothing but trusted
 devices can reach, such as a private VPN interface, never to `0.0.0.0`. On a non-loopback address
-the `Host` header check is off (the proxy logs a warning at startup). Set `PGW_PROXY_AUTH_TOKEN_FILE`
-there. Without a token, network reachability is the only access control.
+the `Host` header check is off (the proxy logs a warning at startup), and the proxy only starts
+with `PGW_PROXY_AUTH_TOKEN_FILE` set.
 
 ### Pointing a client at it
 
@@ -848,6 +850,67 @@ memory files, skill descriptions, tool documentation — leaves the machine unch
 conversation content is protected. With an API key the switch is not needed and you get the full
 protection.
 
+With the default `PGW_PROXY_UNCHECKED_FIELDS=block` an untransformed system prompt is still
+rescanned, and a finding of a [blocking class](#unchecked-fields-blocking-classes) blocks the
+request with 422 `privacy_gateway_leak`. A Claude Code system prompt names the working directory,
+so a path such as `/home/<name>/…` or `/Users/<name>/…` is a `PERSON_USERNAME` finding and blocks
+every request of that login (`/home/user/` and other generic account names are not). Such a setup
+works only with `PGW_PROXY_UNCHECKED_FIELDS=allow`, which sends those values upstream in clear
+text. The billing line Claude Code sends as the first system block does not block, see the
+exceptions below.
+
+**Upgrade note (OAuth login, `PGW_PROXY_TRANSFORM_SYSTEM=0`):** after the update, check today's
+request log. If requests end in 422 with a `system[…]` path in `outgoing.rescan.findings`, either
+start Claude Code from a directory whose path holds no personal user name, or set
+`PGW_PROXY_UNCHECKED_FIELDS=allow` in the environment of the proxy process and accept that the
+system prompt, including that user name, goes out unchanged as before.
+
+### Unchecked fields: blocking classes
+
+Fields the proxy does not transform (`tools`, `thinking` and `redacted_thinking`, `metadata`, an
+untransformed `system`, unknown fields and blocks) are never changed, because some are signed. With
+the default `PGW_PROXY_UNCHECKED_FIELDS=block` the rescan of the outgoing body blocks the request
+(422 `privacy_gateway_leak`, `verdict: blocked`, nothing sent) when it finds one of these classes
+in such a field:
+
+- Secrets and credentials, every class with policy `redact`: `API_KEY`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `STRIPE_SECRET_KEY`, `API_SECRET`, `CLIENT_SECRET`, `PASSWORD`, `PIN`, `TAN`,
+  `OTP`, `ACCESS_TOKEN`, `REFRESH_TOKEN`, `JWT`, `OAUTH_CODE`, `SESSION_ID`, `SESSION_COOKIE`,
+  `AUTH_COOKIE`, `CSRF_TOKEN`, `PRIVATE_KEY`, `SSH_PRIVATE_KEY`, `TLS_PRIVATE_KEY`,
+  `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AZURE_SECRET`, `GCP_CREDENTIAL`, `KUBERNETES_SECRET`,
+  `GITHUB_TOKEN`, `GITLAB_TOKEN`, `PERSONAL_ACCESS_TOKEN`, `DATABASE_CONNECTION_STRING`,
+  `SIGNED_URL`, `SAS_TOKEN`.
+- HTTP headers and cookies, which often carry credentials: `CUSTOM_HEADER`, `HEADER_VALUE`,
+  `COOKIE`, `COOKIE_VALUE`.
+- People: `PERSON_FIRST_NAME`, `PERSON_LAST_NAME`, `PERSON_FULL_NAME`, `PERSON_ALIAS`,
+  `PERSON_USERNAME`, `CARDHOLDER`.
+- Contact: `EMAIL`, `PHONE`, `MOBILE_PHONE`, `PHONE_INTERNATIONAL`, `FAX`.
+- Payment: `IBAN`, `CREDIT_CARD`, `DEBIT_CARD`, `CVV`, `BANK_ACCOUNT`.
+- Identity: `TAX_ID`, `SOCIAL_SECURITY_ID`, `PASSPORT_ID`, `NATIONAL_ID`, `DATE_OF_BIRTH`.
+
+The list is `UNCHECKED_BLOCKING_CLASSES` in `privacy_gateway_proxy/audit_trail.py`. Every other
+class (for example `FQDN`, `URL`, `SOCIAL_MEDIA_HANDLE`, `ORGANIZATION_NAME`, `PERSON_INITIALS`,
+addresses, IDs) is only reported in `observed` and `outgoing.rescan.findings`, never with a value,
+and the request goes out with `verdict: ok_with_unchecked_findings`. Values under the public
+example domains never count (`detect/public.py`), and neither do placeholders this session issued.
+
+Two exact client values never block, and only in exactly this form:
+
+- `metadata.user_id` as Claude Code sends it, either
+  `{"device_id":"<64 lowercase hex>","account_uuid":"<uuid or empty>","session_id":"<uuid>"}`
+  (these three keys in this order, no spaces) or `user_<64 hex>_account_<uuid or empty>_session_<uuid>`
+  (lowercase UUIDs). Any other key, character or text makes it an ordinary field. Other
+  `metadata` fields are always checked.
+- The billing line in the first system block when the system prompt is untransformed: a block
+  `{"type": "text", "text": …}` without further keys whose text is exactly
+  `x-anthropic-billing-header: cc_version=<version>; cc_entrypoint=<word>;`, with a version of
+  digits, letters and dots and an entrypoint of lowercase letters, digits, `_` and `-`. Any
+  further key, header or text in that block makes the whole block an ordinary field, and its
+  `CUSTOM_HEADER` finding blocks.
+
+`PGW_PROXY_UNCHECKED_FIELDS=allow` turns the block off. That is unsafe: everything the rules
+find in these fields goes upstream in clear text, as in earlier versions.
+
 ### Access control
 
 The proxy answers only requests whose `Host` header is loopback (`127.0.0.1`, `localhost`, `[::1]`,
@@ -859,10 +922,13 @@ $ curl -s -H 'Host: evil.example' -X POST http://127.0.0.1:8787/v1/messages -d '
 {"type":"error","error":{"type":"privacy_gateway_forbidden","message":"host header is not loopback"}}
 ```
 
-The proxy auth token is optional and off by default. Without it, anything that can reach the port
+The proxy auth token is off by default on loopback. Without it, anything that can reach the port
 and knows or guesses a session key can have that session's tokens restored. On a single-user
-machine bound to loopback that is acceptable. On a shared machine or a network address, set
-`PGW_PROXY_AUTH_TOKEN_FILE`.
+machine bound to loopback that is acceptable; on a shared machine, set `PGW_PROXY_AUTH_TOKEN_FILE`.
+On any other address (`0.0.0.0`, `[::]`, a LAN or VPN address) the proxy refuses to start without
+a token. The check covers every route except `GET /health`, which answers `{"status":"ok"}` and
+nothing else. `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` overrides the refusal; that setup is unsafe and
+the startup log says so.
 
 The proxy holds no credentials of its own: `x-api-key` and `Authorization` are forwarded untouched.
 
@@ -875,24 +941,27 @@ on one host, bind it to that host's address on the private network and point the
 ships with a loopback bind. Its commented Tailscale variant reads the Tailscale IPv4 address when
 the service starts (`tailscale ip -4`), refuses to start when there is none and listens on that
 address only. Prompt B in [`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md) switches the unit to
-that variant for you, and Prompt C connects a client.
+that variant for you, and Prompt C connects a client. The proxy needs an auth token on that
+address.
 
 ```bash
 # on the proxy host
+umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token
+export PGW_PROXY_AUTH_TOKEN_FILE=~/.config/privacy-gateway/proxy-auth-token
 uv run pgw-proxy serve --listen "$(tailscale ip -4 | head -n1):8787"
 
-# on every client
+# on every client (the same token, sent as the x-pgw-auth header)
 export ANTHROPIC_BASE_URL=http://<proxy-host>:8787
+export ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: <token>"
 claude --model "sonnet[1m]"
 curl http://<proxy-host>:8787/health        # {"status":"ok"} when the proxy is reachable
 ```
 
 Limits of this setup:
 
-- The host check is off for a non-loopback bind and the proxy has no token. The only protection is
-  that devices outside the private network cannot reach the address. Limit it further with the
-  network's access rules (Tailscale ACLs, a firewall) to your own devices. Never bind `0.0.0.0` on a
-  host with a public interface.
+- The host check is off for a non-loopback bind; the auth token is the access control. Limit
+  reachability further with the network's access rules (Tailscale ACLs, a firewall) to your own
+  devices. Never bind `0.0.0.0` on a host with a public interface.
 - Between client and proxy the prompts travel as plain HTTP with real values. The private network
   encrypts that hop, nothing else does.
 - A client without a connection to the private network gets a connection error. There is no
@@ -914,7 +983,7 @@ Limits of this setup:
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
 | 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Also any `POST`/`PUT`/`PATCH`/`DELETE` to another path not listed in `PGW_PROXY_PASSTHROUGH_PATHS`, and a `GET`/`HEAD`/`OPTIONS` with a body. Nothing is sent upstream. |
 | 422 | `privacy_gateway_tool_restore_denied` | `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` and a tool call in a non-streaming answer holds a placeholder that no rule releases. The client gets none of the answer. In a stream the same type arrives as an `error` event. The message lists class names and a count. |
-| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
+| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field, or (with the default `PGW_PROXY_UNCHECKED_FIELDS=block`) a finding of a blocking class in an unchecked field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 | 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |
 
@@ -981,16 +1050,18 @@ Each line lists every field of the request:
   every candidate. Older versions wrote a per-value `hmac` with a salt file `audit.salt` next to
   the directory; the proxy no longer creates or reads that file, so after an update it is unused
   and can be deleted by hand. Lines with `hmac` from older versions stay valid `"v": 2` lines.
-- `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
-  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from a read-only
-  scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
+- `status: unchecked` fields are never changed (`reason`: `thinking`, `tools`, `metadata`,
+  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from the rescan.
+  With `PGW_PROXY_UNCHECKED_FIELDS=block` (default) a finding of a blocking class in any of
+  them blocks the request; with `allow` they are forwarded as they are. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
   block) is such a field with `reason: system`.
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
   `leakage`, `upstream_status` (the HTTP status the upstream answered with, `null` when nothing
   was sent or the connection failed; the verdict does not depend on it) and a `rescan`: the full
   detection runs again over every string of that body. A hit
-  in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
-  only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
+  in a checked field sets `verdict: blocked` and nothing is sent. So does a hit of a blocking class in
+  an unchecked field under the default `PGW_PROXY_UNCHECKED_FIELDS=block`; other hits there, and
+  all of them under `allow`, are only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
   `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by
   definition and are not reported (`detect/public.py`). With `verdict: blocked` the hash describes
   the body that was held back; after a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
@@ -1007,9 +1078,9 @@ Each line lists every field of the request:
   issued).
 - `verdict` is `ok`, `ok_with_unchecked_findings`, `blocked` or `error` (upstream connection
   failed, rescan timeout, or a request was rejected). `ok_with_unchecked_findings` means nothing
-  was blocked, but the read-only scan found something in at least one unchecked field (`tools`,
-  `metadata`, an untransformed system prompt, images, thinking, unknown blocks); look at the
-  `observed` lists of the `unchecked` fields. A request with a body that is not a JSON object, a
+  was blocked, but the rescan found something in at least one unchecked field that was forwarded
+  (a non-blocking class, a known client value, or anything with
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`); look at the `observed` lists of the `unchecked` fields. A request with a body that is not a JSON object, a
   wrong basic form (`messages`, a message, `content`, a block, `system`) or a query string outside
   the allowed parameters gets HTTP 400 (`invalid_request_error`) and `verdict: blocked`.
 - The keys of the objects inside `tool_use.input` are checked like values. A key field has the
@@ -1209,7 +1280,9 @@ Supporting properties:
   text the model reads back. Text answers are restored, so whatever you copy from them by hand
   carries the real value. Placeholders are numbered in order and easy to guess.
 - **Anything at the proxy port.** Without `PGW_PROXY_AUTH_TOKEN`, any local process that reaches
-  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle.
+  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle. A non-loopback
+  bind without a token is refused unless `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` is set; with it,
+  every device that reaches the port is such a process.
 - **Whatever the rules do not describe.** See below.
 
 ### Known limits
@@ -1253,10 +1326,11 @@ Supporting properties:
   break restoration in a stream.
 - **One vault per process.** The proxy serves exactly one vault and one configuration. The auth
   token is one shared secret, not a per-user login.
-- **Unchecked fields go out as they are.** `tools` definitions, `metadata`, an unchanged system
-  prompt (OAuth login) and signed blocks are forwarded byte for byte. They are rescanned and
-  reported, not repaired. Tool definitions of connected services often contain example addresses
-  and handles.
+- **Unchecked fields are not repaired.** `tools` definitions, `metadata`, an unchanged system
+  prompt (OAuth login) and signed blocks are never changed. By default a finding of a blocking class
+  in one of them blocks the whole request; other classes (domains, URLs, handles, organization
+  names) and everything under `PGW_PROXY_UNCHECKED_FIELDS=allow` are forwarded byte for byte and
+  only reported. Values the rules do not find go out either way.
 - **Spellings are separate placeholders.** `Anna`, `ANNA` and the `anna` in `/Users/anna/` each
   restore exactly, but the model sees three different tokens and cannot tell that they name the
   same person.
@@ -1297,7 +1371,10 @@ pseudonymization. The request was not sent upstream.
    `outgoing.leakage` is `fail`, the leak check stopped it and the field with `leaks` names the
    field path, the kind of leak and the class, for example `original_value PERSON_USERNAME`. If
    it is `ok`, the final rescan stopped it and `outgoing.rescan.findings` lists path, class and
-   offsets. The older `audit.jsonl` has the timestamp, but no session key.
+   offsets. A path in an unchecked field (`tools[…]`, `system` with
+   `PGW_PROXY_TRANSFORM_SYSTEM=0`, a `thinking` block, an unknown field) means the default
+   `PGW_PROXY_UNCHECKED_FIELDS=block` stopped it: the proxy cannot replace values there, see
+   [Unchecked fields: blocking classes](#unchecked-fields-blocking-classes). The older `audit.jsonl` has the timestamp, but no session key.
 2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two
@@ -1315,8 +1392,8 @@ body was not transformable at all (see the status table above).
 
 The `Host` header is not loopback. Use `http://127.0.0.1:8787` or `http://localhost:8787` in
 `ANTHROPIC_BASE_URL`, not a LAN address or a hostname that resolves elsewhere. If you really need
-to bind to a non-loopback address, the check turns itself off — and so does your only access
-control, which the startup log warns about. For several machines use the private-network setup in
+to bind to a non-loopback address, the check turns itself off and the proxy needs an auth token
+to start. For several machines use the private-network setup in
 [Sharing one proxy across machines](#sharing-one-proxy-across-machines).
 
 ### Claude Code reports a connection error with a shared proxy

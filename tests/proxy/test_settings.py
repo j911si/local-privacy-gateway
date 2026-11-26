@@ -74,6 +74,7 @@ def test_env_values_are_applied() -> None:
             "PGW_PROXY_SESSION_STRATEGY": "header",
             "PGW_CONFIG": "/tmp/pgw.yaml",
             "PGW_PROXY_DEBUG_DIR": "/tmp/pgw-debug",
+            "PGW_PROXY_AUTH_TOKEN": "tok-test",
         }
     )
 
@@ -87,7 +88,11 @@ def test_env_values_are_applied() -> None:
 
 def test_overrides_beat_env_and_none_is_ignored() -> None:
     settings = load_settings(
-        env={"PGW_PROXY_LISTEN": "0.0.0.0:9000", "PGW_PROXY_UPSTREAM": "http://localhost:1"},
+        env={
+            "PGW_PROXY_LISTEN": "0.0.0.0:9000",
+            "PGW_PROXY_UPSTREAM": "http://localhost:1",
+            "PGW_PROXY_AUTH_TOKEN": "tok-test",
+        },
         listen_port=7777,
         upstream_base_url=None,
     )

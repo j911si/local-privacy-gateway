@@ -21,6 +21,11 @@ LOCAL_UPSTREAM_PREFIXES = ("http://127.0.0.1", "http://localhost")
 PROCESS_SESSION_KEY = secrets.token_hex(8)
 AUDIT_DIR_ENV = "PGW_AUDIT_LOG_DIR"
 DEFAULT_AUDIT_DIR = Path("~/.local/state/privacy-gateway/audit")
+ALLOW_UNAUTHENTICATED_ENV = "PGW_PROXY_ALLOW_UNAUTHENTICATED"
+UNCHECKED_FIELDS_ENV = "PGW_PROXY_UNCHECKED_FIELDS"
+UNCHECKED_BLOCK = "block"
+UNCHECKED_ALLOW = "allow"
+UNCHECKED_MODES = (UNCHECKED_BLOCK, UNCHECKED_ALLOW)
 
 
 @dataclass
@@ -44,6 +49,8 @@ class ProxySettings:
     auth_token: str = field(default="", repr=False)
     tool_restore_rules: tuple[ToolRule, ...] = ()
     tool_restore_on_deny: str = KEEP_TOKEN
+    allow_unauthenticated: bool = False
+    unchecked_fields: str = UNCHECKED_BLOCK
 
 
 def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None) -> Path:
@@ -57,6 +64,18 @@ def audit_dir_for(settings: ProxySettings, env: Mapping[str, str] | None = None)
 def is_loopback(host: str) -> bool:
     """True when the host part addresses this machine only."""
     return host.strip().lower() in LOOPBACK_HOSTS
+
+
+def check_bind(settings: ProxySettings) -> None:
+    """Refuse a non-loopback bind without an auth token unless the opt-out is set."""
+    if is_loopback(settings.listen_host) or settings.auth_token or settings.allow_unauthenticated:
+        return
+    raise ConfigError(
+        f"refusing to listen on the non-loopback address {settings.listen_host} without an "
+        "auth token: anyone who reaches the port could restore pseudonymized values. Put a "
+        "token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE (clients send it as x-pgw-auth), "
+        f"or set {ALLOW_UNAUTHENTICATED_ENV}=1 to accept the risk"
+    )
 
 
 def _upstream_allowed(url: str) -> bool:
@@ -156,6 +175,12 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     on_deny = environment.get("PGW_PROXY_TOOL_RESTORE_ON_DENY")
     if on_deny is not None:
         values["tool_restore_on_deny"] = on_deny
+    allow_unauthenticated = environment.get(ALLOW_UNAUTHENTICATED_ENV)
+    if allow_unauthenticated is not None:
+        values["allow_unauthenticated"] = allow_unauthenticated.strip().lower() in TRUTHY_VALUES
+    unchecked_fields = environment.get(UNCHECKED_FIELDS_ENV)
+    if unchecked_fields is not None:
+        values["unchecked_fields"] = unchecked_fields
     audit_dir = environment.get(AUDIT_DIR_ENV)
     if audit_dir:
         values["audit_dir"] = Path(audit_dir)
@@ -176,8 +201,11 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
         if not is_normal_path(path):
             raise ConfigError(f"passthrough path is not a normal absolute path: {path!r}")
     check_settings((), settings.tool_restore_on_deny, None)
+    if settings.unchecked_fields not in UNCHECKED_MODES:
+        raise ConfigError(f"{UNCHECKED_FIELDS_ENV} must be one of {', '.join(UNCHECKED_MODES)}")
     if settings.session_strategy not in SESSION_STRATEGIES:
         raise ConfigError(f"unknown session strategy: {settings.session_strategy!r}")
     if not _upstream_allowed(settings.upstream_base_url):
         raise ConfigError(f"upstream must be https or loopback: {settings.upstream_base_url!r}")
+    check_bind(settings)
     return settings

@@ -25,8 +25,10 @@ from privacy_gateway.model import LeakageError
 from privacy_gateway_proxy import audit_trail, tool_policy
 from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
 from privacy_gateway_proxy.settings import (
+    UNCHECKED_BLOCK,
     ProxySettings,
     audit_dir_for,
+    check_bind,
     is_loopback,
     is_normal_path,
 )
@@ -72,6 +74,7 @@ except ImportError:
 
 def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient | None = None):
     """Build the proxy application for one gateway and one upstream client."""
+    check_bind(settings)
     upstream = client if client is not None else httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     sessions: OrderedDict[str, Any] = OrderedDict()
     trail = RequestAuditLog(audit_dir_for(settings))
@@ -286,10 +289,13 @@ async def _transformed(
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("error", "ok", **outcome)
         return _error("privacy_gateway_timeout", "rescan exceeded its time budget", 503)
-    if rescan.blocking:
+    blocking = rescan.blocking
+    if not blocking and settings.unchecked_fields == UNCHECKED_BLOCK:
+        blocking = audit_trail.unchecked_blocking(rescan.hits, new_body, include_system)
+    if blocking:
         _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
         record("blocked", "ok", **outcome)
-        return _leak_response(LeakageError(audit_trail.as_leaks(rescan.blocking)))
+        return _leak_response(LeakageError(audit_trail.as_leaks(blocking)))
 
     _debug_dump(settings, key, new_body)
     upstream_request = client.build_request(

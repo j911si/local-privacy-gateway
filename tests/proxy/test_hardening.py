@@ -19,7 +19,7 @@ from privacy_gateway_proxy.settings import ProxySettings
 
 UPSTREAM = "https://upstream.test"
 TOKEN = "tok-3f9c1d7a5b2e4c68-canary"
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 MESSAGE = {
     "model": "claude-x",
     "max_tokens": 16,
@@ -437,10 +437,10 @@ async def test_a_sensitive_value_under_any_key_is_still_tokenized(
 
 
 @pytest.mark.asyncio
-async def test_unchecked_findings_change_the_verdict_but_do_not_block(
+async def test_unchecked_findings_change_the_verdict_but_do_not_block_when_allowed(
     make_proxy: Callable[..., Proxy],
 ) -> None:
-    proxy = make_proxy()
+    proxy = make_proxy(unchecked_fields="allow")
     tools = [{"name": "T", "description": f"Mail {SECRET_MAIL}", "input_schema": {}}]
 
     status, _ = await proxy.call(
@@ -468,10 +468,10 @@ async def test_clean_unchecked_fields_keep_the_verdict_ok(
 
 
 @pytest.mark.asyncio
-async def test_findings_in_an_untransformed_system_prompt_change_the_verdict(
+async def test_findings_in_an_untransformed_system_prompt_change_the_verdict_when_allowed(
     make_proxy: Callable[..., Proxy],
 ) -> None:
-    proxy = make_proxy(transform_system=False)
+    proxy = make_proxy(transform_system=False, unchecked_fields="allow")
     body = {**CLEAN, "system": f"Kontakt {SECRET_MAIL}"}
 
     await proxy.call("POST", "/v1/messages", json.dumps(body).encode())
@@ -481,10 +481,10 @@ async def test_findings_in_an_untransformed_system_prompt_change_the_verdict(
 
 
 @pytest.mark.asyncio
-async def test_well_formed_unknown_blocks_are_forwarded_and_counted_unchecked(
+async def test_well_formed_unknown_blocks_are_forwarded_and_counted_unchecked_when_allowed(
     make_proxy: Callable[..., Proxy],
 ) -> None:
-    proxy = make_proxy()
+    proxy = make_proxy(unchecked_fields="allow")
     block = {"type": "future_block", "payload": {"mail": SECRET_MAIL}}
 
     status, _ = await proxy.call("POST", "/v1/messages", message_with([block]))
@@ -712,7 +712,7 @@ KNOWN_PATHS = [
     ("GET", "/v1/files/file_011CNha8iCJcU1wXNR6q4V8w/content"),
     ("GET", "/v1/messages/batches/msgbatch_01HkcTjaV5uDC8jWR4ZsDV8d/results"),
     ("GET", "/v1/messages/msg_01AbCdEfGhIjKlMnOpQrStUv"),
-    ("GET", "/v1/organizations/0b1c2d3e-1111-2222-3333-444444444444"),
+    ("GET", "/v1/organizations/0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"),
     ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions"),
     ("GET", "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions/1759178010641129"),
 ]
