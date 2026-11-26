@@ -124,7 +124,7 @@ def test_many_findings_scale_n_log_n(default_config: Config, overlapping: bool) 
             out.append(Finding(Span(start, start + length), data_class, "pattern", 0.9))
         return out
 
-    small, large = make(20_000), make(40_000)
+    small, large = make(10_000), make(40_000)
     small_time, large_time = best(small, registry), best(large, registry)
     assert large_time < 2.0, f"{large_time:.2f}s for 40k findings"
-    assert large_time < 0.05 or large_time / small_time < 3.0, large_time / small_time
+    assert large_time < 0.05 or large_time / small_time < 8.0, large_time / small_time  # 4x n: ~4.5 n log n, ~16 quadratic

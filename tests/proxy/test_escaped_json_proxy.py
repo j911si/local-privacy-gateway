@@ -16,7 +16,7 @@ from privacy_gateway_proxy.settings import ProxySettings
 SECRET = "Fake9secret7Value42xyz"
 IBAN = "DE89370400440532013000"
 SETTINGS = ProxySettings(upstream_base_url="https://upstream.test")
-SESSION = "user_abc_account_def_session_0b1c2d3e-1111-2222-3333-444444444444"
+SESSION = "user_abc_account_def_session_0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 
 
 @pytest.fixture
