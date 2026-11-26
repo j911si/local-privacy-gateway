@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
 from privacy_gateway.detect.runs import (
+    COLON_PATTERN,
     FQDN_PATTERN,
     JWT_PATTERN,
     LINE_KEYWORD_SHAPE,
     PASS_PW_PATTERN,
+    colon_finditer,
     fqdn_finditer,
     jwt_finditer,
     line_keyword_finditer,
@@ -43,6 +45,7 @@ LINEAR_FINDERS = {
     FQDN_PATTERN: fqdn_finditer,
     JWT_PATTERN: jwt_finditer,
     PASS_PW_PATTERN: pass_pw_finditer,
+    COLON_PATTERN: colon_finditer,
 }
 STANDARD_PREFIXES = frozenset(
     {

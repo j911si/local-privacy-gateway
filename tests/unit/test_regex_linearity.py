@@ -320,6 +320,9 @@ def test_line_keyword_finditer_equals_finditer(default_config: Config) -> None:
 PASSWORD_WORST_CASES = [
     'passwd: "',
     "password: wird ",
+    "password: must 8 chars ",
+    "password: must x ",
+    "pwd: the 1 ",
     "pw:",
     "pw: ",
     'mariadb"',
@@ -333,8 +336,6 @@ PASSWORD_WORST_CASES = [
 @pytest.mark.parametrize("unit", PASSWORD_WORST_CASES)
 def test_password_rules_scan_in_linear_time(default_config: Config, unit: str) -> None:
     for pattern in config_patterns(default_config, "PASSWORD"):
-        if unit == "password: wird " and "(?:wird" in pattern.pattern:
-            continue
         assert_linear(
             lambda text, pattern=pattern: list(patterns.finditer(pattern, text)),
             lambda n: unit * (n // len(unit)),
@@ -355,3 +356,33 @@ def test_password_rules_with_a_long_blank_or_dot_run(
 ) -> None:
     for pattern in config_patterns(default_config, "PASSWORD"):
         assert_linear(finditer(pattern), lambda n: head + filler * n + "y", n=20_000)
+
+
+COLON_ALPHABET = [
+    "password", "Passwort", "pwd", "_pass", ":", " ", "\t", "\n", "wird", "the", "a", "an",
+    "must", "should", "8", "12+", " characters", " chars", " Zeichen", "x", "secret9", ".", ",",
+    "(", ")", '"', "$", "none", "a.b", "my_var", "\r", "\u212a", "\u017f", "ü", "-", "'",
+]
+
+
+def test_colon_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.runs import COLON_PATTERN, colon_finditer
+
+    pattern = re.compile(COLON_PATTERN, re.MULTILINE)
+    rng = random.Random(360)
+    matched = 0
+    for _ in range(60_000):
+        text = "".join(rng.choice(COLON_ALPHABET) for _ in range(rng.randint(1, 30)))
+        if rng.random() < 0.5:
+            text = rng.choice(["password: ", "pwd:", "Passwort :\t"]) + text
+        expected = [m.span(1) for m in pattern.finditer(text)]
+        assert [m.span(1) for m in colon_finditer(pattern, text)] == expected, text
+        matched += len(expected)
+    assert matched > 1000
+
+
+def test_the_colon_rule_takes_the_linear_path(default_config: Config) -> None:
+    from privacy_gateway.detect.runs import COLON_PATTERN
+
+    assert COLON_PATTERN in default_config.registry.get("PASSWORD").patterns
+    assert COLON_PATTERN in patterns.LINEAR_FINDERS

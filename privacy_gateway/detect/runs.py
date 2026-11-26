@@ -180,3 +180,94 @@ def line_keyword_finditer(
         if newline == -1:
             return
         position = newline + 1
+
+
+COLON_PREFIX = (
+    '(?i)(?<![A-Za-z0-9])(?:(?:ht|pg)?(?:password|passwd|passphrase)|pwd|kennwort|pas'
+    'swort|(?<=[_.\\-])pass)["\']?\\]?[ \\t]*:(?!=)[ \t]*+'
+)
+COLON_GUARD = (
+    '(?!["\']|\\$|\\(|(?:none|null|nil|undefined|true|false|str|int|bool|bytes|float|opt'
+    'ional|secretstr)\\b|[\\w.]+[(\\[]|(?:[A-Za-z_]+(?:\\.[A-Za-z_]+)+|(?-i:[a-z]+(?:_[a-'
+    'z]+)+))[ \\t]*[.,;:)\\]]*$)'
+)
+COLON_MUST = (
+    "(?!(?:must|muss|should|sollte)(?![\\w'])[^\\n]*\\b\\d+\\+?[ \\t]+(?:characters?|chars|"
+    'digits?|letters?|zeichen|ziffern|buchstaben)\\b[A-Za-zÄÖÜäöüß \\t,.()]*$)'
+)
+COLON_STOP = (
+    '(?!(?:wird|werden|wurde|ist|sind|war|siehe|oben|unten|per|mit|ohne|und|oder|der|'
+    'die|das|dem|den|ein|eine|einer|einem|nicht|kein|keine|bitte|nur|auch|wie|wenn|da'
+    'nn|bei|von|vom|zum|zur|im|am|auf|aus|an|in|für|fuer|über|ueber|nach|vor|the|a|an'
+    '|is|are|was|will|be|see|by|via|with|without|and|or|not|no|to|for|of|on|at|from|y'
+    'our|you|must|should|can|please|here|enter|all|has|have|been|this|that|it|as|if|s'
+    "uccessfully|updated|changed|required)(?![\\w'])(?![^\\n]*\\d))"
+)
+COLON_VALUE = (
+    '(\\S[^\\n]{3}(?=[ \\t]*+[.,;:)\\]]*+$)|\\S[^\\n]{2,}?(?:[^ \\t\\n.,;:)\\]]|[.,;:)\\]](?=[ '
+    '\\t]))(?=[ \\t]*+[.,;:)\\]]*+$))[ \\t]*[.,;:)\\]]*$'
+)
+COLON_PATTERN = COLON_PREFIX + COLON_GUARD + COLON_MUST + COLON_STOP + COLON_VALUE
+_COLON_PREFIX_RE = re.compile(COLON_PREFIX)
+_COLON_MUST_RE = re.compile("(?i)" + COLON_MUST[3 : COLON_MUST.index("[^\\n]*")])
+_COLON_STOP_RE = re.compile("(?i)" + COLON_STOP[3 : COLON_STOP.index("(?![^\\n]*\\d)")])
+_COLON_HEAD_RE = re.compile(
+    "(?i)" + COLON_MUST[COLON_MUST.index("\\b\\d+") : COLON_MUST.index("[A-Za-z\u00c4")]
+)
+_COLON_TAIL_CHAR = re.compile(
+    "(?i)" + COLON_MUST[COLON_MUST.index("[A-Za-z\u00c4") : COLON_MUST.rindex("]") + 1]
+)
+_DIGIT = re.compile(r"\d")
+
+
+def colon_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `pattern.finditer(text)` yields for `COLON_PATTERN`, in linear time.
+
+    The prefix fixes the value start `v`. Two lookaheads at `v` scan to the line end: a stopword
+    fails the match when no digit follows on the line, and `must ... 8 characters` fails it when
+    such a phrase ends the line somewhere after the word. Both only depend on `v` and two numbers
+    per line (the last digit and the last such phrase start), which are computed once per line.
+    When neither applies, the rule without these two lookaheads decides; the lookaheads sit at
+    the same position as the remaining guard, so dropping them does not change any other match.
+    """
+    plain = re.compile(COLON_PREFIX + COLON_GUARD + COLON_VALUE, pattern.flags)
+    lines: dict[int, tuple[int, int]] = {}
+    position = 0
+    while (prefix := _COLON_PREFIX_RE.search(text, position)) is not None:
+        if not _colon_blocked(text, prefix.end(), lines):
+            match = plain.match(text, prefix.start())
+            if match is not None:
+                yield match
+                position = match.end()
+                continue
+        position = prefix.start() + 1
+
+
+def _colon_blocked(text: str, value: int, lines: dict[int, tuple[int, int]]) -> bool:
+    must = _COLON_MUST_RE.match(text, value)
+    stop = _COLON_STOP_RE.match(text, value)
+    if must is None and stop is None:
+        return False
+    end = text.find("\n", value)
+    end = len(text) if end == -1 else end
+    if end not in lines:
+        lines[end] = _line_facts(text, text.rfind("\n", 0, value) + 1, end)
+    last_digit, last_phrase = lines[end]
+    if stop is not None and last_digit < value:
+        return True
+    return must is not None and last_phrase >= must.end()
+
+
+def _line_facts(text: str, start: int, end: int) -> tuple[int, int]:
+    """Last digit and last `N characters` phrase start whose tail runs to the line end."""
+    last_digit = end - 1
+    while last_digit >= start and _DIGIT.match(text, last_digit) is None:
+        last_digit -= 1
+    tail = end
+    while tail > start and _COLON_TAIL_CHAR.match(text, tail - 1) is not None:
+        tail -= 1
+    last_phrase = -1
+    for head in _COLON_HEAD_RE.finditer(text, start, end):
+        if head.end() >= tail:
+            last_phrase = head.start()
+    return last_digit, last_phrase
