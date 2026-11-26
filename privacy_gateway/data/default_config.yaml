@@ -173,7 +173,7 @@ classes:
     category: IDENTIFIER
     policy: tokenize
     patterns:
-      - '\b\d{2}[ ]?\d{3}[ ]?\d{3}[ ]?\d{3}\b'
+      - '(?<![^\W_])\d{2}[ ]?\d{3}[ ]?\d{3}[ ]?\d{3}(?![^\W_])'
       - '\b[A-Z]{2}[0-9A-Z]{8,12}\b'
       - '(?i)(?<![A-Za-z0-9])(?P<label>steuer-?id(?:nr)?|steueridentifikationsnummer|steuernummer|idnr|tin|tax[ -]?id)\.?[ \t]*[:=]?[ \t]*(?P<value>\d{2}(?: ?\d{3}){3})\b'
     validator: tax_id
@@ -218,7 +218,7 @@ classes:
   IBAN:
     category: FINANCIAL
     policy: tokenize
-    patterns: ['\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}[ ]?[A-Z0-9]{1,4}\b']
+    patterns: ['(?<![^\W_])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}[ ]?[A-Z0-9]{1,4}(?![^\W_])']
     validator: iban
     context_words: ['iban']
   BIC:
@@ -235,7 +235,7 @@ classes:
   CREDIT_CARD:
     category: FINANCIAL
     policy: tokenize
-    patterns: ['\b\d(?:[ -]?\d){12,18}\b']
+    patterns: ['(?<![^\W_])\d(?:[ -]?\d){12,18}(?![^\W_])']
     validator: luhn
     context_words: ['card', 'karte', 'visa', 'mastercard', 'amex', 'kreditkarte']
   DEBIT_CARD:
