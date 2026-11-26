@@ -386,3 +386,16 @@ def test_the_colon_rule_takes_the_linear_path(default_config: Config) -> None:
 
     assert COLON_PATTERN in default_config.registry.get("PASSWORD").patterns
     assert COLON_PATTERN in patterns.LINEAR_FINDERS
+
+
+@pytest.mark.parametrize("unit", ["password: wird ", "password: must 8 chars ", "pwd: a "])
+def test_colon_rule_stays_linear_on_megabyte_lines(default_config: Config, unit: str) -> None:
+    pattern = re.compile(
+        next(p for p in default_config.registry.get("PASSWORD").patterns if "(?:wird" in p),
+        re.MULTILINE,
+    )
+    assert_linear(
+        lambda text: list(patterns.finditer(pattern, text)),
+        lambda n: unit * (n // len(unit)),
+        n=1_000_000,
+    )

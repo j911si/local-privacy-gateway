@@ -231,10 +231,10 @@ def colon_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str
     the same position as the remaining guard, so dropping them does not change any other match.
     """
     plain = re.compile(COLON_PREFIX + COLON_GUARD + COLON_VALUE, pattern.flags)
-    lines: dict[int, tuple[int, int]] = {}
+    line = [0, -1, -1, -1]
     position = 0
     while (prefix := _COLON_PREFIX_RE.search(text, position)) is not None:
-        if not _colon_blocked(text, prefix.end(), lines):
+        if not _colon_blocked(text, prefix.end(), line):
             match = plain.match(text, prefix.start())
             if match is not None:
                 yield match
@@ -243,16 +243,17 @@ def colon_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str
         position = prefix.start() + 1
 
 
-def _colon_blocked(text: str, value: int, lines: dict[int, tuple[int, int]]) -> bool:
+def _colon_blocked(text: str, value: int, line: list[int]) -> bool:
     must = _COLON_MUST_RE.match(text, value)
     stop = _COLON_STOP_RE.match(text, value)
     if must is None and stop is None:
         return False
-    end = text.find("\n", value)
-    end = len(text) if end == -1 else end
-    if end not in lines:
-        lines[end] = _line_facts(text, text.rfind("\n", 0, value) + 1, end)
-    last_digit, last_phrase = lines[end]
+    if not line[0] <= value <= line[1]:
+        start = text.rfind("\n", max(line[1], 0) if value > line[1] else 0, value) + 1
+        end = text.find("\n", value)
+        end = len(text) if end == -1 else end
+        line[:] = [start, end, *_line_facts(text, start, end)]
+    _, _, last_digit, last_phrase = line
     if stop is not None and last_digit < value:
         return True
     return must is not None and last_phrase >= must.end()
