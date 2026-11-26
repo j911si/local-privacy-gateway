@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import threading
+
+import pytest
+
+from privacy_gateway import detect
 from privacy_gateway.config import Config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.session import SessionStage
@@ -125,3 +130,44 @@ def test_known_last_name_inside_a_salutation_keeps_the_salutation(default_config
     matched = {f.data_class: (text[f.span.start : f.span.end], f.stage) for f in report.findings}
     assert matched["PERSON_LAST_NAME"] == ("Müller", "session")
     assert matched["SALUTATION"][0] == "Frau"
+
+
+def test_interleaved_threads_never_pair_one_known_set_with_another_stage(
+    default_config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = {"Wendland": ("PERSON_LAST_NAME", "<PERSON_001>")}
+    second = {"Brandmeier": ("PERSON_LAST_NAME", "<PERSON_001>")}
+    pipeline = Pipeline(default_config)
+    first_in_constructor = threading.Event()
+    second_done = threading.Event()
+    found: dict[str, list[str]] = {}
+
+    class Gated(SessionStage):
+        def __init__(self, known: dict[str, tuple[str, str]]) -> None:
+            if known is first:
+                first_in_constructor.set()
+                assert second_done.wait(5)
+            super().__init__(known)
+
+    monkeypatch.setattr(detect, "SessionStage", Gated)
+
+    def session_values(text: str, known: dict[str, tuple[str, str]]) -> list[str]:
+        report = pipeline.run(text, known)
+        return [text[f.span.start : f.span.end] for f in report.findings if f.stage == "session"]
+
+    def run_first() -> None:
+        found["first"] = session_values("Notiz zu Wendland.", first)
+
+    def run_second() -> None:
+        assert first_in_constructor.wait(5)
+        found["second"] = session_values("Notiz zu Brandmeier.", second)
+        second_done.set()
+
+    threads = [threading.Thread(target=run_first), threading.Thread(target=run_second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert found == {"first": ["Wendland"], "second": ["Brandmeier"]}
+    assert session_values("Notiz zu Brandmeier.", second) == ["Brandmeier"]
