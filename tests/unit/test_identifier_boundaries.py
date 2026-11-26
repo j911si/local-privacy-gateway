@@ -68,11 +68,41 @@ def test_tax_id_next_to_underscores_is_detected(default_config: Config) -> None:
         ("build_4111111111111112_x", "4111111111111112"),
         ("run_id_7392018465537281_done", "7392018465537281"),
         ("Steuer_65929970488_2026.pdf", "65929970488"),
-        (f"x{IBAN}", IBAN),
+        (f"X{IBAN}", IBAN),
+        (f"IBAN{IBAN}", IBAN),
         (f"id{CARD}", CARD),
+        (f"Karte{CARD[:-1]}2", CARD[:-1] + "2"),
+        ("Karte1234567812345670", "1234567812345670"),
+        (f"discard_{CARD}x", CARD),
     ],
 )
 def test_wrong_check_digits_and_glued_letters_stay(
     default_config: Config, text: str, value: str
 ) -> None:
     assert classes_at(text, default_config, value) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [f"x{IBAN}", f"Konto{IBAN}", f"kontoauszug{IBAN}.pdf", f"ibanäDE{IBAN[2:]}"],
+)
+def test_iban_glued_to_lowercase_letters_is_replaced(gateway: Gateway, text: str) -> None:
+    out = gateway.session().pseudonymize(text)
+    assert IBAN not in out
+    assert "<IBAN_" in out
+
+
+@pytest.mark.parametrize(
+    ("text", "card"),
+    [
+        (f"Karte{CARD}", CARD),
+        (f"KARTE{CARD}", CARD),
+        (f"visa{CARD}.pdf", CARD),
+        ("mastercard5555555555554444", "5555555555554444"),
+        ("Kreditkarte378282246310005", "378282246310005"),
+    ],
+)
+def test_card_glued_to_a_card_word_is_replaced(gateway: Gateway, text: str, card: str) -> None:
+    out = gateway.session().pseudonymize(text)
+    assert card not in out
+    assert "<CREDIT_CARD_" in out

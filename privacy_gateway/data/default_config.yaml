@@ -218,7 +218,7 @@ classes:
   IBAN:
     category: FINANCIAL
     policy: tokenize
-    patterns: ['(?<![^\W_])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}[ ]?[A-Z0-9]{1,4}(?![^\W_])']
+    patterns: ['(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}[ ]?[A-Z0-9]{1,4}(?![^\W_])']
     validator: iban
     context_words: ['iban']
   BIC:
@@ -235,7 +235,9 @@ classes:
   CREDIT_CARD:
     category: FINANCIAL
     policy: tokenize
-    patterns: ['(?<![^\W_])\d(?:[ -]?\d){12,18}(?![^\W_])']
+    patterns:
+      - '(?<![^\W_])\d(?:[ -]?\d){12,18}(?![^\W_])'
+      - '(?i:kreditkarte|karte|card|visa|mastercard|amex)(?=(?:4\d{12}(?:\d{3}){0,2}|5[1-5]\d{14}|2(?:2[2-9]|[3-6]\d|7[01])\d{13}|2720\d{12}|3[47]\d{13}|6(?:011|5\d\d)\d{12})(?!\d))(\d{13,19})(?![^\W_])'
     validator: luhn
     context_words: ['card', 'karte', 'visa', 'mastercard', 'amex', 'kreditkarte']
   DEBIT_CARD:

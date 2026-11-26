@@ -264,3 +264,14 @@ def test_escaped_json_rules_scan_in_linear_time(
         assert_linear(
             finditer(pattern), lambda n: text_unit + "a" * n + " " + text_unit + "\\" * n
         )
+
+
+@pytest.mark.parametrize(
+    "unit", ["karte", "Karte4", "4", "visa41111", "aDE89", "DE8937040044", "xDE89 3704 "]
+)
+@pytest.mark.parametrize("name", ["IBAN", "CREDIT_CARD"])
+def test_glued_iban_and_card_rules_scan_in_linear_time(
+    default_config: Config, name: str, unit: str
+) -> None:
+    for pattern in config_patterns(default_config, name):
+        assert_linear(finditer(pattern), lambda n: unit * (n // len(unit)))
