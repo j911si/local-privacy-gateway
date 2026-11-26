@@ -91,27 +91,9 @@ class Gateway:
         started = time.perf_counter()
         session_id = ""
         try:
-            report = self._pipeline.run(text)
-            session_id = self.vault.create_session("", self.config.hash())
-            pseudonymized = pseudonymize_text(text, report, self.config)
-            for assignment in pseudonymized.assignments:
-                first = assignment.spans[0]
-                self.vault.store(
-                    session_id,
-                    assignment.token,
-                    assignment.data_class,
-                    text[first.start : first.end],
-                    [text[first.start : first.end]],
-                    assignment.attributes,
-                )
-            entries = self.vault.load(session_id)
-            check_leakage(
-                pseudonymized.text,
-                entries,
-                self._pipeline.run,
-                self.config.registry,
-                sweep=False,
-            )
+            session = self.session()
+            session_id = session.session_id
+            pseudonymized, report, _, _ = session._run(text)
         except LeakageError:
             self._discard(session_id)
             self.audit.pseudonymize(
@@ -215,6 +197,29 @@ class GatewaySession:
                 self._gateway._audit_id(self.session_id), 0, 0, "ok", _elapsed_ms(started)
             )
             return cached[0], list(cached[1])
+        try:
+            pseudonymized, report, written, reused = self._run(text)
+        except LeakageError:
+            self._gateway.audit.session_pseudonymize(
+                self._gateway._audit_id(self.session_id), 0, 0, "failed", _elapsed_ms(started)
+            )
+            raise
+        except Exception as exc:
+            self._gateway.audit.error(type(exc).__name__, SESSION_STAGE)
+            raise
+        self._gateway.audit.session_pseudonymize(
+            self._gateway._audit_id(self.session_id),
+            len(written),
+            len(reused),
+            "ok",
+            _elapsed_ms(started),
+        )
+        findings = _field_findings(report, pseudonymized, self._gateway.config.registry)
+        self._remember(digest, (pseudonymized.text, findings))
+        return pseudonymized.text, list(findings)
+
+    def _run(self, text: str) -> tuple[PseudonymizedText, DetectionReport, list[str], list[str]]:
+        """Replace, check and learn until the check passes; rolls back and re-raises on failure."""
         counters = dict(self._counters)
         written: list[str] = []
         reused: list[str] = []
@@ -247,26 +252,10 @@ class GatewaySession:
                         continue
                     raise
                 break
-        except LeakageError:
+        except Exception:
             self._rollback(written, counters)
-            self._gateway.audit.session_pseudonymize(
-                self._gateway._audit_id(self.session_id), 0, 0, "failed", _elapsed_ms(started)
-            )
             raise
-        except Exception as exc:
-            self._rollback(written, counters)
-            self._gateway.audit.error(type(exc).__name__, SESSION_STAGE)
-            raise
-        self._gateway.audit.session_pseudonymize(
-            self._gateway._audit_id(self.session_id),
-            len(written),
-            len(reused),
-            "ok",
-            _elapsed_ms(started),
-        )
-        findings = _field_findings(report, pseudonymized, self._gateway.config.registry)
-        self._remember(digest, (pseudonymized.text, findings))
-        return pseudonymized.text, list(findings)
+        return pseudonymized, report, written, reused
 
     def rescan(self, text: str) -> list[Leak]:
         """Findings in text about to be sent that are not a token this session issued."""
