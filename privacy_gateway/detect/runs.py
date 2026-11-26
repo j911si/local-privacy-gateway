@@ -38,6 +38,20 @@ def run_finditer(
             position = match.end()
 
 
+JWT_PATTERN = r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+_JWT_RUN = re.compile(r"[A-Za-z0-9_-]+")
+_JWT_START = re.compile(r"\beyJ")
+
+
+def jwt_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `pattern.finditer(text)` yields for `JWT_PATTERN`, in linear time.
+
+    The header part runs to the end of its `[A-Za-z0-9_-]` run (a dot cannot be inside it), so
+    the first `eyJ` of a run decides for the whole run, as in `run_finditer`.
+    """
+    return run_finditer(pattern, text, _JWT_RUN, _JWT_START)
+
+
 FQDN_PATTERN = r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,}[A-Za-z]{2,}\b"
 MAX_LABEL = 63
 _FQDN_START = re.compile(r"\b(?=[A-Za-z0-9])")

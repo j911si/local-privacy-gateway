@@ -198,7 +198,7 @@ SENTENCE_BOUNDARIES = ".\n"
 
 MIN_SALUTATION_NAME_LENGTH = 3
 SALUTATION_RE = re.compile(
-    r"(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
+    r"(?:(?<!\s)|(?!\s))(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
     r"\b(Frau|Herr|Herrn|Mrs\.?|Mr\.?|Ms\.?|Mx\.?)\s+"
     r"((?:(?:Dr|Prof|Dipl\.-Ing)\.\s+)*)"
     r"([A-ZÄÖÜ][\wäöüß-]+(?:\s+[A-ZÄÖÜ][\wäöüß-]+)?)"
@@ -255,7 +255,7 @@ ADDRESS_RE = re.compile(
     r"|Street|St\.|Road|Rd\.|Avenue|Ave\.|Lane))"
     r"\s+(\d{1,4}[a-zA-Z]?)\s*,?\s*(\d{4,5})\s+([A-ZÄÖÜ][\wäöüß -]+)"
 )
-POSTAL_CODE_RE = re.compile(r"(?i)\b(?:PLZ|Postleitzahl|zip)\s*[:=]?\s*(\d{4,5})")
+POSTAL_CODE_RE = re.compile(r"(?i)\b(?:PLZ|Postleitzahl|zip)\s*+[:=]?+\s*+(\d{4,5})")
 PLACE_OF_BIRTH_RE = re.compile(
     r"(?i)\b(?:(?:geboren|geb\.|born)(?:\s+(?:am|on))?\s+(?:\d[\d./-]{5,}\s+)?in"
     r"|Geburtsort[:=]?)\s+([A-ZÄÖÜ][\wäöüß -]+)"

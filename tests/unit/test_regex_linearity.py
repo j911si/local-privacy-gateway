@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from privacy_gateway.config import Config
-from privacy_gateway.detect import structured
+from privacy_gateway.detect import context, patterns, structured
 
 HARD_TIMEOUT_S = 60
 MAX_FACTOR = 3.0
@@ -163,3 +163,68 @@ def test_pem_blocks_scan_in_linear_time(default_config: Config, unit: str) -> No
         lambda text: structured._parse_pem_blocks(text, default_config),
         lambda n: unit * (n // len(unit)),
     )
+
+
+JWT_ALPHABET = ["eyJ", "-", "_", ".", "a", "Z", "0", "abcdefghij", " ", "xeyJ", "=", "\n"]
+
+
+def test_jwt_finditer_equals_finditer(default_config: Config) -> None:
+    from privacy_gateway.detect.runs import JWT_PATTERN, jwt_finditer
+
+    assert default_config.registry.get("JWT").patterns == (JWT_PATTERN,)
+    pattern = re.compile(JWT_PATTERN, re.MULTILINE)
+    matched = 0
+    texts = random_texts(JWT_ALPHABET, 99, 6000)
+    texts.append("eyJ" + "a" * 12 + "." + "b" * 12 + "." + "c" * 12)
+    for text in texts:
+        expected = [m.span() for m in pattern.finditer(text)]
+        assert [m.span() for m in jwt_finditer(pattern, text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+@pytest.mark.parametrize("unit", ["eyJ-", "eyJaaaaaaaaaaaa.", "eyJ_"])
+def test_jwt_rule_scans_in_linear_time(default_config: Config, unit: str) -> None:
+    pattern = re.compile(default_config.registry.get("JWT").patterns[0], re.MULTILINE)
+    scan = patterns.LINEAR_FINDERS.get(pattern.pattern)
+    assert_linear(
+        (lambda text: list(scan(pattern, text))) if scan else finditer(pattern),
+        lambda n: unit * (n // len(unit)),
+    )
+
+
+@pytest.mark.parametrize("word", ["steuernummer", "Steuer-ID", "tax id"])
+def test_labelled_tax_id_after_long_blank_runs(default_config: Config, word: str) -> None:
+    for pattern in config_patterns(default_config, "TAX_ID"):
+        assert_linear(finditer(pattern), lambda n: word + " " * n + "fehlt")
+
+
+@pytest.mark.parametrize("word", ["PLZ", "Postleitzahl", "zip"])
+def test_postal_code_after_long_blank_runs(word: str) -> None:
+    assert_linear(finditer(context.POSTAL_CODE_RE), lambda n: word + " " * n + "fehlt")
+
+
+@pytest.mark.parametrize("payload", ["Dear", "Hi", "Hallo", "x", ""])
+def test_salutation_after_long_blank_runs(payload: str) -> None:
+    assert_linear(finditer(context.SALUTATION_RE), lambda n: payload + " " * n + "fehlt")
+
+
+@pytest.mark.parametrize(
+    ("text", "spans"),
+    [
+        ("Sehr geehrte Frau Müller,", [(0, 24)]),
+        ("x   Herr Dr. Meier", [(1, 18)]),
+        ("hallo Dear Frau Kühn", [(6, 20)]),
+        ("  \n Mr. Smith", [(0, 13)]),
+    ],
+)
+def test_salutation_spans_are_unchanged(text: str, spans: list[tuple[int, int]]) -> None:
+    assert [m.span() for m in context.SALUTATION_RE.finditer(text)] == spans
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [("PLZ: 80331", "80331"), ("Postleitzahl 1010", "1010"), ("zip=12345", "12345")],
+)
+def test_postal_code_matches_are_unchanged(text: str, value: str) -> None:
+    assert [m.group(1) for m in context.POSTAL_CODE_RE.finditer(text)] == [value]
