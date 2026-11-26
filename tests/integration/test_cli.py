@@ -8,6 +8,7 @@ from pathlib import Path
 CLASS_COUNT = 141
 FIXTURE = "customer_letter_de"
 IBAN = "DE89370400440532013000"
+GLUED_LOGIN = "Sehr geehrter Herr Wendland, Ihr Login lautet Wendland2024."
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -138,3 +139,16 @@ def test_vault_list_and_purge(
     )
     assert restored.returncode == 1
     assert restored.stderr.startswith("error: ")
+
+
+def test_pseudonymize_without_session_key_replaces_a_name_glued_to_digits(
+    gateway_env: dict[str, str], tmp_path: Path
+) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text(GLUED_LOGIN, encoding="utf-8")
+    result = run(gateway_env, "pseudonymize", str(source))
+    assert result.returncode == 0, result.stderr
+    assert "Wendland" not in result.stdout
+    assert result.stdout == (
+        "Sehr geehrter Herr <PERSON_MALE_001>, Ihr Login lautet <PERSON_MALE_001>2024."
+    )

@@ -138,3 +138,15 @@ def test_pseudonymize_many_shares_counters_in_order(gateway: Gateway) -> None:
 
     assert results[1] == f"{PERSON_TOKEN} hat mit <PERSON_002> gesprochen."
     assert results[2] == f"Die Überweisung auf {IBAN_TOKEN} ist raus."
+
+
+def test_a_short_known_user_name_glued_to_a_new_phone_number_is_replaced(
+    gateway: Gateway,
+) -> None:
+    session = gateway.session("short-glued")
+    assert session.pseudonymize("cd /home/li/projekt") == "cd /home/<PERSON_001>/projekt"
+    text = "Tel. +49 30 12345678li"
+    output = session.pseudonymize(text)
+    assert output.endswith("<PERSON_001>")
+    assert session.restore(output, "strict").text == text
+    assert session.pseudonymize("Tel. +49 30 12345678lix").endswith(">lix")

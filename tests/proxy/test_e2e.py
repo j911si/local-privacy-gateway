@@ -407,3 +407,26 @@ async def test_a_text_document_block_is_pseudonymized_and_restored(gateway: Gate
     document = json.loads(seen[0].content)["messages"][0]["content"][-1]
     assert document["source"]["data"] == f"IBAN {IBAN_TOKEN}"
     assert response.json()["content"][0]["text"] == IBAN
+
+
+@pytest.mark.asyncio
+async def test_a_learned_user_name_does_not_hide_the_last_name_glued_to_a_first_name(
+    gateway: Gateway,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+    client = build(gateway, handler)
+    async with client:
+        first = await client.post(
+            "/v1/messages", json=request_body("Herr Wendland, Pfad /home/awendland/notes.txt")
+        )
+        second = await client.post("/v1/messages", json=request_body("Gruss AnnikaWendland"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "wendland" not in seen[0].content.decode("utf-8").lower()
+    assert "Wendland" not in sent_text(seen[-1])

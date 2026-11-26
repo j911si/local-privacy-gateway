@@ -38,15 +38,16 @@ class Pipeline:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._stages: list[Stage] = [stage_type() for stage_type in STAGE_TYPES]
-        self._known: Mapping[str, tuple[str, str]] | None = None
-        self._session_stage: SessionStage | None = None
+        self._session: tuple[Mapping[str, tuple[str, str]], SessionStage] | None = None
 
     def _session_stage_for(self, known: Mapping[str, tuple[str, str]]) -> SessionStage:
         """Reuse the stage while the caller passes the same known-set object."""
-        if self._session_stage is None or self._known is not known:
-            self._known = known
-            self._session_stage = SessionStage(known)
-        return self._session_stage
+        cached = self._session
+        if cached is not None and cached[0] is known:
+            return cached[1]
+        stage = SessionStage(known)
+        self._session = (known, stage)
+        return stage
 
     def run(
         self, text: str, known: Mapping[str, tuple[str, str]] | None = None

@@ -10,6 +10,7 @@ from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, 
 from privacy_gateway.tokens import ANY_TOKEN, NUMBERED_TOKEN
 
 MIN_LENGTH_FOR_FUZZY_SEARCH = 4
+REDACTED_SUFFIX = "_REDACTED>"
 
 
 def glued_to_token(finding: Finding, tokens: list[Span]) -> bool:
@@ -26,13 +27,49 @@ def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
     )
 
 
-def exempt_from_residual(finding: Finding, tokens: list[Span]) -> bool:
+def _short_fragment_next_to_token(text: str, start: int, end: int, tokens: list[Span]) -> bool:
+    """A short known value next to a token that runs on into letters or digits on its other side.
+
+    A complete short value next to a token (`<PHONE_001>li`) is a leak.
+    """
+    if end - start >= MIN_LENGTH_FOR_FUZZY_SEARCH:
+        return False
+    after = end < len(text) and text[end].isalnum() and any(t.end == start for t in tokens)
+    before = start > 0 and text[start - 1].isalnum() and any(t.start == end for t in tokens)
+    return after or before
+
+
+def _only_tokens(text: str, span: Span, tokens: list[Span]) -> bool:
+    """Nothing but tokens and punctuation inside `span`, so it carries no value."""
+    rest = list(text[span.start : span.end])
+    for token in tokens:
+        for index in range(max(token.start, span.start), min(token.end, span.end)):
+            rest[index - span.start] = " "
+    return not any(char.isalnum() for char in rest)
+
+
+def exempt_from_residual(finding: Finding, tokens: list[Span], text: str) -> bool:
     """A residual finding that is part of a token or glued to one is no leak."""
     return (
         any(token.contains(finding.span) for token in tokens)
+        or _only_tokens(text, finding.span, tokens)
         or glued_to_token(finding, tokens)
         or _short_touching_token(finding.span.start, finding.span.end, tokens)
     )
+
+
+def redacted_token(data_class: str) -> str:
+    """The marker that replaces a value of a redacted class."""
+    return f"<{data_class}{REDACTED_SUFFIX}"
+
+
+def issued_token_spans(text: str, entries: Mapping[str, VaultEntry]) -> list[Span]:
+    """Spans of the tokens a session issued and of redaction markers, not of other look-alikes."""
+    return [
+        Span(match.start(), match.end())
+        for match in ANY_TOKEN.finditer(text)
+        if match.group(0) in entries or match.group(0).endswith(REDACTED_SUFFIX)
+    ]
 
 
 def numbered_tokens(text: str) -> frozenset[str]:
@@ -65,20 +102,22 @@ def check_leakage(
     literal_tokens: frozenset[str] = frozenset(),
     *,
     sweep: bool = True,
+    redacted: Mapping[str, str] | None = None,
 ) -> None:
     """Raise `LeakageError` when the pseudonymized text still exposes data.
 
     `literal_tokens` are token-shaped strings that were already in the input text. With `sweep`
-    a plain substring search for known values runs beside `known_occurrences`.
+    a plain substring search for known values runs beside `known_occurrences`. `redacted` maps
+    values that were redacted (held in memory only) to their class; a copy left is a leak.
     """
     leaks: list[Leak] = []
-    token_spans = [Span(match.start(), match.end()) for match in ANY_TOKEN.finditer(text)]
+    token_spans = issued_token_spans(text, entries)
 
     report = scan(text)
     for finding in report.findings:
         if _policy(registry, finding.data_class) is Policy.IGNORE:
             continue
-        if exempt_from_residual(finding, token_spans):
+        if exempt_from_residual(finding, token_spans, text):
             continue
         leaks.append(
             Leak("residual_finding", finding.data_class, finding.span.start, finding.span.end)
@@ -89,10 +128,12 @@ def check_leakage(
         for form in [entry.value, *entry.surface_forms]:
             if form:
                 known.setdefault(form, (entry.data_class, token))
+    for value, data_class in (redacted or {}).items():
+        known.setdefault(value, (data_class, redacted_token(data_class)))
     for span, (data_class, _) in known_occurrences(text, known, registry):
         if any(token.contains(span) for token in token_spans):
             continue
-        if _short_touching_token(span.start, span.end, token_spans):
+        if _short_fragment_next_to_token(text, span.start, span.end, token_spans):
             continue
         if data_class == "SOCIAL_MEDIA_HANDLE" and any(t.end == span.start for t in token_spans):
             continue
