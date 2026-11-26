@@ -60,7 +60,9 @@ TOKEN_KEYS = frozenset({"token", "access_token"})
 API_KEY_KEYS = frozenset({"api_key", "apikey", "key"})
 SESSION_COOKIES = frozenset({"sessionid", "jsessionid", "phpsessid", "connect.sid", "sid"})
 AUTH_COOKIES = frozenset({"auth", "token", "access_token", "id_token"})
-CSRF_COOKIES = frozenset({"csrf", "xsrf", "_csrf"})
+CSRF_COOKIES = frozenset(
+    {"csrf", "xsrf", "_csrf", "csrftoken", "csrf-token", "xsrf-token", "csrfmiddlewaretoken"}
+)
 SKIPPED_X_HEADERS = frozenset({"x-request-id"})
 AUTH_HEADERS = frozenset({"authorization", "proxy-authorization"})
 ADO_HOST_KEYS = frozenset({"server", "data source", "host", "addr", "address"})

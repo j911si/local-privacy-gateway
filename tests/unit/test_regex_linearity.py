@@ -228,3 +228,39 @@ def test_salutation_spans_are_unchanged(text: str, spans: list[tuple[int, int]])
 )
 def test_postal_code_matches_are_unchanged(text: str, value: str) -> None:
     assert [m.group(1) for m in context.POSTAL_CODE_RE.finditer(text)] == [value]
+
+
+ESCAPED_JSON_RULES = {
+    "PASSWORD": "password",
+    "API_KEY": "api_key",
+    "API_SECRET": "api_secret",
+    "CLIENT_SECRET": "client_secret",
+    "ACCESS_TOKEN": "access_token",
+    "REFRESH_TOKEN": "refresh_token",
+    "PRIVATE_KEY": "private_key",
+    "CSRF_TOKEN": "xsrf-token",
+    "SESSION_ID": "sessionid",
+}
+ESCAPED_JSON_UNITS = [
+    '{key}\\": \\"',
+    '{key}\\\\\\": \\\\\\"a',
+    '{key}\\\\\\\\\\\\\\": \\\\\\\\\\\\\\"ab',
+    '{key}:\\"a1\\\\\\"',
+    "\\",
+    '\\"',
+]
+
+
+@pytest.mark.parametrize("name", sorted(ESCAPED_JSON_RULES))
+@pytest.mark.parametrize("unit", ESCAPED_JSON_UNITS)
+def test_escaped_json_rules_scan_in_linear_time(
+    default_config: Config, name: str, unit: str
+) -> None:
+    text_unit = unit.format(key=ESCAPED_JSON_RULES[name])
+    for pattern in config_patterns(default_config, name):
+        if "{0,7}" not in pattern.pattern and "\\\\{1,7}" not in pattern.pattern:
+            continue
+        assert_linear(finditer(pattern), lambda n: text_unit * (n // len(text_unit)))
+        assert_linear(
+            finditer(pattern), lambda n: text_unit + "a" * n + " " + text_unit + "\\" * n
+        )
