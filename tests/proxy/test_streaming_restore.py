@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from itertools import pairwise
 
 import pytest
@@ -91,3 +92,88 @@ def test_arbitrary_chunking_gives_the_one_shot_result(pieces: list[str], cuts: l
     deltas = [text[a:b] for a, b in pairwise(points) if text[a:b]]
 
     assert stream(deltas) == restore(text)
+
+
+# A closing quote directly before `<` ends a bracketless token; it must not be held back with
+# the `<`, or the token in front of it is cut off from its quote and never restored.
+QUOTE_THEN_LT = [
+    "Name: `PERSON_001`<",
+    'Name: "PERSON_001"<',
+    "Name: 'PERSON_001'<",
+    "Name: `<PERSON_001>`<",
+    "`PERSON_001`<EMAIL_001> und 'ipv4_012'<",
+    "\"PERSON_001\"<<IPV4_012>'email_001'<b>",
+    "'PERSON_001'<'email_001'<`ipv4_012`<",
+]
+VALUES = sorted({entry.value for entry in ENTRIES.values()})
+
+
+def _assert_never_more_than_one_shot(streamed: str, text: str) -> None:
+    expected = restore(text)
+    for value in VALUES:
+        assert streamed.count(value) <= expected.count(value), value
+
+
+@pytest.mark.parametrize("quote", ["`", '"', "'"])
+def test_closing_quote_before_angle_bracket_in_one_delta(quote: str) -> None:
+    text = f"Name: {quote}PERSON_001{quote}<"
+
+    assert stream([text]) == f"Name: {quote}annika{quote}<"
+
+
+@pytest.mark.parametrize("text", QUOTE_THEN_LT)
+def test_quote_before_angle_bracket_in_one_delta(text: str) -> None:
+    assert stream([text]) == restore(text)
+
+
+@pytest.mark.parametrize("text", QUOTE_THEN_LT + TEXTS)
+def test_every_one_and_two_cut_split_gives_the_one_shot_result(text: str) -> None:
+    expected = restore(text)
+    for first in range(len(text) + 1):
+        streamed = stream([text[:first], text[first:]])
+        assert streamed == expected, first
+        _assert_never_more_than_one_shot(streamed, text)
+        for second in range(first, len(text) + 1):
+            parts = [text[:first], text[first:second], text[second:]]
+            streamed = stream(parts)
+            assert streamed == expected, (first, second)
+            _assert_never_more_than_one_shot(streamed, text)
+
+
+FUZZ_PIECES = [
+    "<PERSON_001>",
+    "`PERSON_001`",
+    "'email_001'",
+    '"PERSON_001"',
+    "<IPV4_012>",
+    "x",
+    " ",
+    "'",
+    "`",
+    '"',
+    "<",
+    ">",
+    "A",
+    "_",
+    "1",
+    "ab",
+    "\n",
+    "PERSON_001",
+    "Z<",
+    "PERSON_001'",
+]
+
+
+def test_seeded_fuzz_gives_the_one_shot_result() -> None:
+    rnd = random.Random(20261126)
+    mismatches = []
+    for _ in range(3000):
+        text = "".join(rnd.choice(FUZZ_PIECES) for _ in range(rnd.randint(1, 12)))
+        count = rnd.randint(0, min(5, len(text) - 1))
+        cuts = sorted(rnd.sample(range(1, len(text)), k=count))
+        points = [0, *cuts, len(text)]
+        streamed = stream([text[a:b] for a, b in pairwise(points)])
+        _assert_never_more_than_one_shot(streamed, text)
+        if streamed != restore(text):
+            mismatches.append(text)
+    assert mismatches == []
