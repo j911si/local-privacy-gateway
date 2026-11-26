@@ -1,0 +1,94 @@
+"""Rules that backtracked quadratically stay linear: 2n costs < 3x n, with an absolute cap."""
+
+from __future__ import annotations
+
+import re
+import signal
+import time
+from collections.abc import Callable, Iterator
+
+import pytest
+
+from privacy_gateway.config import Config
+
+HARD_TIMEOUT_S = 60
+MAX_FACTOR = 3.0
+MAX_SECONDS = 1.0
+NOISE_FLOOR_S = 0.02
+N = 100_000
+
+
+@pytest.fixture(autouse=True)
+def _hard_timeout() -> Iterator[None]:
+    """SIGALRM stops a quadratic regex instead of hanging the run."""
+
+    def _expired(signum: int, frame: object) -> None:
+        raise TimeoutError(f"regex scan exceeded {HARD_TIMEOUT_S}s")
+
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.alarm(HARD_TIMEOUT_S)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def best_of_three(scan: Callable[[], object]) -> float:
+    timings = []
+    for _ in range(3):
+        started = time.perf_counter()
+        scan()
+        timings.append(time.perf_counter() - started)
+    return min(timings)
+
+
+def assert_linear(
+    scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
+) -> None:
+    small_text, large_text = payload(n), payload(2 * n)
+    small = best_of_three(lambda: scan(small_text))
+    large = best_of_three(lambda: scan(large_text))
+    assert large < MAX_SECONDS, f"{large:.3f}s for {2 * n} characters"
+    assert large < NOISE_FLOOR_S or large / small < MAX_FACTOR, f"factor {large / small:.2f}"
+
+
+def finditer(pattern: re.Pattern[str]) -> Callable[[str], object]:
+    return lambda text: list(pattern.finditer(text))
+
+
+def config_patterns(config: Config, name: str) -> list[re.Pattern[str]]:
+    return [re.compile(p, re.MULTILINE) for p in config.registry.get(name).patterns]
+
+
+@pytest.mark.parametrize(
+    ("name", "word"),
+    [("PIN", "PIN"), ("TAN", "TAN"), ("OTP", "OTP"), ("OTP", "einmalcode")],
+)
+def test_pin_tan_otp_after_long_blank_runs(default_config: Config, name: str, word: str) -> None:
+    for pattern in config_patterns(default_config, name):
+        assert_linear(finditer(pattern), lambda n: word + " " * n + "fehlt")
+        assert_linear(finditer(pattern), lambda n: (word + " " * 50) * (n // 53))
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("PIN 1234", "1234"),
+        ("PIN:1234", "1234"),
+        ("pin = 12345678", "12345678"),
+        ("PIN \n 4711", "4711"),
+        ("TAN: 123456", "123456"),
+        ("OTP=654321", "654321"),
+        ("Einmalcode :  654321", "654321"),
+    ],
+)
+def test_pin_tan_otp_matches_are_unchanged(default_config: Config, text: str, value: str) -> None:
+    found = [
+        m.group(1)
+        for name in ("PIN", "TAN", "OTP")
+        for pattern in config_patterns(default_config, name)
+        for m in pattern.finditer(text)
+    ]
+    assert value in found
+

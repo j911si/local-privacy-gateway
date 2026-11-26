@@ -502,19 +502,19 @@ classes:
     category: SECRET
     policy: redact
     patterns:
-      - '(?i)\bpin\s*[:=]?\s*(\d{4,8})\b'
+      - '(?i)\bpin\s*+[:=]?+\s*+(\d{4,8})\b'
       - '(?i)\bpin\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{4,8})\b'
   TAN:
     category: SECRET
     policy: redact
     patterns:
-      - '(?i)\btan\s*[:=]?\s*(\d{6,8})\b'
+      - '(?i)\btan\s*+[:=]?+\s*+(\d{6,8})\b'
       - '(?i)\btan\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{6,8})\b'
   OTP:
     category: SECRET
     policy: redact
     patterns:
-      - '(?i)\b(?:otp|one-time code|einmalcode)\s*[:=]?\s*(\d{6,8})\b'
+      - '(?i)\b(?:otp|one-time code|einmalcode)\s*+[:=]?+\s*+(\d{6,8})\b'
       - '(?i)\b(?:otp|one-time code|einmalcode)\b[^\n\d:=]{1,40}[:=][^\S\n]*(\d{6,8})\b'
   ACCESS_TOKEN:
     category: SECRET
