@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import re
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -30,16 +32,27 @@ PEM_RE = re.compile(
     r"[\s\S]*?"
     r"-----END \1PRIVATE KEY(?: BLOCK)?-----"
 )
+PEM_BEGIN_RE = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
+PEM_END_RE = re.compile(r"-----END ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
 DB_URI_RE = re.compile(
     r"(?:postgresql|postgres|mysql|mongodb\+srv|mongodb|redis|amqp|mssql)://[^\s>\"')]+"
 )
 ADO_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=[^;\n]*(?:;[ \t]*[A-Za-z][A-Za-z ]{1,24}=[^;\n]*)+")
-HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
+ADO_KEY_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=")
+ADO_NEXT_RE = re.compile(r";[ \t]*[A-Za-z][A-Za-z ]{1,24}=")
+HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
+INLINE_BASIC_RE = re.compile(
+    r"(?i)(?<![\w-])(?:proxy-)?authorization:[ \t]*basic[ \t]+"
+    r"([A-Za-z0-9+/]{8,}={0,2})(?![\w+/=-])"
+)
 DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
 K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
-K8S_DATA_RE = re.compile(r"^([ \t]*)data:[ \t]*$", re.MULTILINE)
-K8S_ENTRY_RE = re.compile(r"^([ \t]+)[\w.\-]+:[ \t]*(\S+)[ \t]*$")
+K8S_DATA_RE = re.compile(r"^([ \t]*)(?:data|stringData):[ \t]*$", re.MULTILINE)
+K8S_ENTRY_RE = re.compile(
+    r"^([ \t]+)[\w.\-]+:[ \t]*"
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>][-+]?\d?)|(\S(?:.*\S)?))?[ \t]*$"
+)
 
 INTERNAL_SUFFIXES = (".local", ".internal", ".corp", ".lan")
 SIGNATURE_KEYS = frozenset({"sig", "signature", "x-amz-signature", "x-goog-signature"})
@@ -49,6 +62,7 @@ SESSION_COOKIES = frozenset({"sessionid", "jsessionid", "phpsessid", "connect.si
 AUTH_COOKIES = frozenset({"auth", "token", "access_token", "id_token"})
 CSRF_COOKIES = frozenset({"csrf", "xsrf", "_csrf"})
 SKIPPED_X_HEADERS = frozenset({"x-request-id"})
+AUTH_HEADERS = frozenset({"authorization", "proxy-authorization"})
 ADO_HOST_KEYS = frozenset({"server", "data source", "host", "addr", "address"})
 ADO_KEY_CLASSES = {
     "server": "DATABASE_HOST",
@@ -233,9 +247,39 @@ def _parse_jwts(text: str, config: Config) -> list[Finding]:
     return findings
 
 
+def _all_starts(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    position = 0
+    while (match := pattern.search(text, position)) is not None:
+        yield match
+        position = match.start() + 1
+
+
+def pem_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `PEM_RE.finditer(text)` yields, in linear time.
+
+    The END lines are collected once per label; a BEGIN is only handed to PEM_RE.match when an
+    END with its label follows. Plain `finditer` scans to the end of the text from every BEGIN
+    without an END, which is quadratic on many such lines.
+    """
+    ends: dict[str, list[int]] = {}
+    for end in _all_starts(PEM_END_RE, text):
+        ends.setdefault(end.group(1), []).append(end.start())
+    position = 0
+    for begin in _all_starts(PEM_BEGIN_RE, text):
+        if begin.start() < position:
+            continue
+        starts = ends.get(begin.group(1), [])
+        if bisect.bisect_left(starts, begin.end()) == len(starts):
+            continue
+        match = PEM_RE.match(text, begin.start())
+        if match is not None:
+            yield match
+            position = match.end()
+
+
 def _parse_pem_blocks(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in PEM_RE.finditer(text):
+    for match in pem_finditer(text):
         label = match.group(1)
         if "OPENSSH" in label:
             data_class = "SSH_PRIVATE_KEY"
@@ -284,9 +328,30 @@ def _force_host_class(child: Finding) -> Finding:
     return child
 
 
+def ado_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `ADO_RE.finditer(text)` yields, in linear time.
+
+    A value runs to the next `;` or newline, so a match needs a key right after the `;` that
+    ends the segment it starts in. Only the first key of such a segment is tried; plain
+    `finditer` rescans the rest of the line from every start, which is quadratic on `aA=aA=`.
+    """
+    position = 0
+    while (semicolon := text.find(";", position)) != -1:
+        newline = text.rfind("\n", position, semicolon)
+        start = position if newline == -1 else newline + 1
+        key = ADO_KEY_RE.search(text, start, semicolon)
+        if key is not None and ADO_NEXT_RE.match(text, semicolon) is not None:
+            match = ADO_RE.match(text, key.start())
+            if match is not None:
+                yield match
+                position = match.end()
+                continue
+        position = semicolon + 1
+
+
 def _parse_ado_strings(text: str) -> list[Finding]:
     findings: list[Finding] = []
-    for match in ADO_RE.finditer(text):
+    for match in ado_finditer(text):
         pairs = _split_pairs(match.group(0), match.start(), ";")
         keys = {name.strip().lower() for name, _, _, _ in pairs}
         if not keys & ADO_HOST_KEYS or not keys & {"database", "user id", "password", "pwd"}:
@@ -333,10 +398,12 @@ def _cookie_children(value: str, offset: int, only_first: bool) -> list[Finding]
 def _parse_headers(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in HEADER_RE.finditer(text):
-        name = match.group(1).lower()
-        value = match.group(2)
-        value_offset = match.start(2)
-        if name == "authorization":
+        name = match.group(2).lower()
+        value = match.group(3)
+        value_offset = match.start(3)
+        if match.group(1) and name not in AUTH_HEADERS:
+            continue
+        if name in AUTH_HEADERS:
             credential = AUTH_RE.match(value)
             if credential is not None:
                 start = value_offset + credential.start(1)
@@ -350,7 +417,19 @@ def _parse_headers(text: str, config: Config) -> list[Finding]:
                 continue
             child = _finding(value_offset, value_offset + len(value), "HEADER_VALUE")
             findings.append(_finding(match.start(), match.end(), "CUSTOM_HEADER", [child]))
+    for match in INLINE_BASIC_RE.finditer(text):
+        if _is_basic_credential(match.group(1)):
+            findings.append(_finding(match.start(1), match.end(1), "ACCESS_TOKEN"))
     return findings
+
+
+def _is_basic_credential(value: str) -> bool:
+    stripped = value.rstrip("=")
+    try:
+        decoded = base64.b64decode(stripped + "=" * (-len(stripped) % 4), validate=True)
+    except ValueError:
+        return False
+    return b":" in decoded
 
 
 def _documents(text: str) -> list[tuple[int, int]]:
@@ -371,19 +450,27 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
             continue
         for data_match in K8S_DATA_RE.finditer(block):
             indent = len(data_match.group(1))
+            scalar_indent: int | None = None
             position = data_match.end() + 1
             while position < len(block):
                 newline = block.find("\n", position)
                 line_end = len(block) if newline == -1 else newline
                 line = block[position:line_end]
-                if line.strip():
+                stripped = line.strip()
+                lead = len(line) - len(line.lstrip(" \t"))
+                if stripped and scalar_indent is not None and lead > scalar_indent:
+                    start = doc_start + position + lead
+                    findings.append(_finding(start, start + len(stripped), "KUBERNETES_SECRET"))
+                elif stripped:
                     entry = K8S_ENTRY_RE.match(line)
                     if entry is None or len(entry.group(1)) <= indent:
                         break
-                    start = doc_start + position + entry.start(2)
-                    findings.append(
-                        _finding(start, start + len(entry.group(2)), "KUBERNETES_SECRET")
-                    )
+                    scalar_indent = len(entry.group(1)) if entry.group(4) else None
+                    group = next((g for g in (2, 3, 5) if entry.group(g)), None)
+                    if group is not None:
+                        start = doc_start + position + entry.start(group)
+                        end = doc_start + position + entry.end(group)
+                        findings.append(_finding(start, end, "KUBERNETES_SECRET"))
                 position = line_end + 1
     return findings
 

@@ -8,7 +8,7 @@ from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
-from privacy_gateway.detect.runs import FQDN_PATTERN, fqdn_finditer
+from privacy_gateway.detect.runs import FQDN_PATTERN, JWT_PATTERN, fqdn_finditer, jwt_finditer
 from privacy_gateway.detect.validators import VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
 from privacy_gateway.tokens import NUMBERED_TOKEN
@@ -30,7 +30,7 @@ DIFF_HEADER_RE = re.compile(
 )
 DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
 DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
-LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer}
+LINEAR_FINDERS = {FQDN_PATTERN: fqdn_finditer, JWT_PATTERN: jwt_finditer}
 STANDARD_PREFIXES = frozenset(
     {
         "ISO", "IEC", "RFC", "IEEE", "DIN", "EN", "SHA", "MD", "UTF", "HTTP", "TLS", "SSL",
