@@ -18,7 +18,7 @@ PIN = "482913"
 PASSWORD = "Kx7#mQ2vRt9z"
 PIN_TEXT = f"Zugangs-PIN: {PIN}. Bitte merken: {PIN}"
 PIN_OUTPUT = "Zugangs-PIN: <PIN_REDACTED>. Bitte merken: <PIN_REDACTED>"
-CONVERSATION = "user_a_account_b_session_0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "user_a_account_b_session_0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 
 
 def _empty(_text: str) -> DetectionReport:
