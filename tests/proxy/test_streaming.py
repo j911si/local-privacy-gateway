@@ -104,13 +104,10 @@ def test_parse_sse_ignores_comment_lines() -> None:
     assert events[0].event == "ping"
 
 
-def test_whole_stream_restores_text_and_tool_input(raw: bytes) -> None:
+def test_whole_stream_restores_text_but_not_tool_input(raw: bytes) -> None:
     text, partial = collect(run([raw]))
     assert text == restore(STREAM_TEXT)
-    assert json.loads(partial) == {
-        "file_path": "/tmp/x",
-        "content": restore("Kontakt <PERSON_FEMALE_001>"),
-    }
+    assert json.loads(partial) == TOOL_INPUT
 
 
 def test_no_token_survives_in_the_output(raw: bytes) -> None:
@@ -198,11 +195,12 @@ def test_input_json_is_emitted_once_at_content_block_stop() -> None:
     output = restorer.feed(block_stop(2))
     events, _ = parse_sse(output)
     assert len(events) == 2
-    assert json.loads(json.loads(events[0].data)["delta"]["partial_json"]) == {"a": "Frau Müller"}
+    partial = json.loads(events[0].data)["delta"]["partial_json"]
+    assert json.loads(partial) == {"a": "<PERSON_FEMALE_001>"}
     assert events[1].event == "content_block_stop"
 
 
-def test_unparsable_input_json_is_restored_as_plain_text() -> None:
+def test_unparsable_input_json_passes_unchanged_without_a_guard() -> None:
     payload = {
         "type": "content_block_delta",
         "index": 2,
@@ -211,7 +209,7 @@ def test_unparsable_input_json_is_restored_as_plain_text() -> None:
     restorer = StreamRestorer(restore)
     restorer.feed(sse("content_block_delta", payload))
     events, _ = parse_sse(restorer.feed(block_stop(2)))
-    assert json.loads(events[0].data)["delta"]["partial_json"] == '{"a":"Frau Müller"'
+    assert json.loads(events[0].data)["delta"]["partial_json"] == '{"a":"<PERSON_FEMALE_001>"'
 
 
 def test_restore_never_sees_an_unterminated_token_fragment(raw: bytes) -> None:

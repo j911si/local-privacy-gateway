@@ -113,11 +113,16 @@ class RequestAuditLog:
     """Daily `audit-YYYY-MM-DD.jsonl` files (UTC) for value-free v2 entries."""
 
     def __init__(
-        self, directory: Path, *, clock: Callable[[], datetime] | None = None
+        self,
+        directory: Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        prefix: str = "audit",
     ) -> None:
         self.directory = Path(directory).expanduser()
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._rotated_on: date | None = None
+        self._prefix = prefix
 
     def write(self, event: str, fields: dict[str, object]) -> Path:
         """Append one entry to today's file, rotating old files once per day and process."""
@@ -126,9 +131,9 @@ class RequestAuditLog:
         os.chmod(self.directory, 0o700)
         today = now.date()
         if self._rotated_on != today:
-            rotate(self.directory, today)
+            rotate(self.directory, today, prefix=self._prefix)
             self._rotated_on = today
-        path = self.directory / f"audit-{today.isoformat()}.jsonl"
+        path = self.directory / f"{self._prefix}-{today.isoformat()}.jsonl"
         record = {"v": RECORD_VERSION, "event": event, "ts": now.isoformat(), **fields}
         descriptor = os.open(path, APPEND_FLAGS, 0o600)
         os.fchmod(descriptor, 0o600)
@@ -137,11 +142,14 @@ class RequestAuditLog:
         return path
 
 
-def rotate(directory: Path, today: date, keep_days: int = RETENTION_DAYS) -> list[Path]:
-    """Delete daily files dated `keep_days` or more days before `today`; others stay."""
+def rotate(
+    directory: Path, today: date, keep_days: int = RETENTION_DAYS, *, prefix: str = "audit"
+) -> list[Path]:
+    """Delete daily `prefix-` files dated `keep_days` or more days before `today`; others stay."""
+    daily = re.compile(rf"^{re.escape(prefix)}-(\d{{4}}-\d{{2}}-\d{{2}})\.jsonl$")
     removed: list[Path] = []
     for path in Path(directory).iterdir():
-        match = DAILY_FILE.match(path.name)
+        match = daily.match(path.name)
         if match is None or not path.is_file() or path.is_symlink():
             continue
         try:

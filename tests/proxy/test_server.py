@@ -59,7 +59,7 @@ class StubGateway:
 
 
 class StubRestorer:
-    def __init__(self, restore: Callable[[str], str]) -> None:
+    def __init__(self, restore: Callable[[str], str], tools: Any = None) -> None:
         self._restore = restore
         self.chunks: list[bytes] = []
 
@@ -122,7 +122,7 @@ def build(
 ) -> tuple[httpx.AsyncClient, StubGateway, list[StubRestorer]]:
     restorers: list[StubRestorer] = []
 
-    def factory(restore: Callable[[str], str]) -> StubRestorer:
+    def factory(restore: Callable[[str], str], tools: Any = None) -> StubRestorer:
         restorer = StubRestorer(restore)
         restorers.append(restorer)
         return restorer

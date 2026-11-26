@@ -22,7 +22,7 @@ from starlette.routing import Route
 
 from privacy_gateway.audit import RequestAuditLog
 from privacy_gateway.model import LeakageError
-from privacy_gateway_proxy import audit_trail
+from privacy_gateway_proxy import audit_trail, tool_policy
 from privacy_gateway_proxy.session_key import is_valid_key, session_key_for
 from privacy_gateway_proxy.settings import (
     ProxySettings,
@@ -76,12 +76,16 @@ def create_app(settings: ProxySettings, gateway: Any, client: httpx.AsyncClient 
     upstream = client if client is not None else httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT)
     sessions: OrderedDict[str, Any] = OrderedDict()
     trail = RequestAuditLog(audit_dir_for(settings))
+    tool_trail = RequestAuditLog(audit_dir_for(settings), prefix=tool_policy.AUDIT_PREFIX)
+    tool_policy.check_settings(
+        settings.tool_restore_rules, settings.tool_restore_on_deny, _known_classes(gateway)
+    )
 
     async def health(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
     async def proxy(request: Request) -> Response:
-        return await _dispatch(request, settings, gateway, upstream, sessions, trail)
+        return await _dispatch(request, settings, gateway, upstream, sessions, trail, tool_trail)
 
     app = Starlette(
         routes=[
@@ -129,6 +133,7 @@ async def _dispatch(
     client: httpx.AsyncClient,
     sessions: OrderedDict[str, Any],
     trail: RequestAuditLog,
+    tool_trail: RequestAuditLog,
 ) -> Response:
     if is_loopback(settings.listen_host) and not _host_allowed(request.headers.get("host", "")):
         return _error("privacy_gateway_forbidden", "host header is not loopback", 403)
@@ -169,7 +174,9 @@ async def _dispatch(
             problem = _shape_error(body)
             if problem is not None:
                 return _malformed(gateway, settings, trail, path, problem)
-            return await _transformed(request, body, settings, gateway, client, sessions, trail)
+            return await _transformed(
+                request, body, settings, gateway, client, sessions, trail, tool_trail
+            )
         if path not in settings.passthrough_paths:
             return _rejected(
                 gateway, request, settings, trail, path,
@@ -234,6 +241,7 @@ async def _transformed(
     client: httpx.AsyncClient,
     sessions: OrderedDict[str, Any],
     trail: RequestAuditLog,
+    tool_trail: RequestAuditLog,
 ) -> Response:
     started = time.perf_counter()
     path = request.url.path
@@ -248,8 +256,10 @@ async def _transformed(
     recorder = audit_trail.Recorder(session)
     checked = audit_trail.checked_refs(_transform, body, include_system, notice)
 
-    def record(verdict: str, leakage: str, **parts: Any) -> None:
-        _record(trail, key, path, streaming, started, verdict, leakage, checked, recorder, **parts)
+    def record(verdict: str, leakage: str, **parts: Any) -> str:
+        return _record(
+            trail, key, path, streaming, started, verdict, leakage, checked, recorder, **parts
+        )
 
     try:
         new_body, fields = _transform.pseudonymize_request(
@@ -300,7 +310,7 @@ async def _transformed(
         return _upstream_error(exc)
 
     _audit(gateway, key, path, fields, session, "ok", streaming, started, include_system)
-    record("ok", "ok", upstream_status=response.status_code, **outcome)
+    request_id = record("ok", "ok", upstream_status=response.status_code, **outcome)
     headers = _response_headers(response.headers)
     if response.status_code >= 400:
         try:
@@ -321,10 +331,21 @@ async def _transformed(
         )
         return Response(raw_body, status_code=response.status_code, headers=headers)
     lenient = _LenientSession(session)
+    guard = tool_policy.ToolGuard(
+        settings.tool_restore_rules,
+        settings.tool_restore_on_deny,
+        _entries(session),
+        streaming=streaming,
+    )
+
+    def audit_tools() -> None:
+        if guard.entries:
+            tool_trail.write(tool_policy.AUDIT_EVENT, guard.audit_fields(request_id))
+
     if streaming:
-        restorer = _stream_restorer_factory(lenient.restore_text)
+        restorer = _stream_restorer_factory(lenient.restore_text, guard)
         return StreamingResponse(
-            _restored_stream(response, restorer),
+            _restored_stream(response, restorer, audit_tools),
             status_code=response.status_code,
             headers=headers,
         )
@@ -335,7 +356,10 @@ async def _transformed(
     data = _parse_json(raw_body)
     if not isinstance(data, dict):
         return Response(raw_body, status_code=response.status_code, headers=headers)
-    restored = _transform.restore_response(data, lenient)
+    restored = guard.restore_response(_transform.restore_response(data, lenient))
+    audit_tools()
+    if guard.blocked:
+        return _error(tool_policy.ERROR_TYPE, guard.message(), 422)
     return JSONResponse(restored, status_code=response.status_code, headers=headers)
 
 
@@ -372,17 +396,23 @@ async def _passthrough(
     )
 
 
-async def _restored_stream(response: httpx.Response, restorer: Any) -> AsyncIterator[bytes]:
+async def _restored_stream(
+    response: httpx.Response, restorer: Any, on_close: Any = None
+) -> AsyncIterator[bytes]:
     try:
         async for chunk in _raw_chunks(response):
             restored = restorer.feed(chunk)
             if restored:
                 yield restored
+            if getattr(restorer, "closed", False):
+                break
         tail = restorer.finish()
         if tail:
             yield tail
     finally:
         await response.aclose()
+        if on_close is not None:
+            on_close()
 
 
 async def _forwarded_stream(response: httpx.Response) -> AsyncIterator[bytes]:
@@ -423,6 +453,16 @@ def _session_for(gateway: Any, sessions: OrderedDict[str, Any], key: str) -> Any
     while len(sessions) > SESSION_CACHE_SIZE:
         sessions.popitem(last=False)
     return session
+
+
+def _entries(session: Any) -> Any:
+    entries = getattr(session, "entries", None)
+    return entries() if callable(entries) else {}
+
+
+def _known_classes(gateway: Any) -> Any:
+    registry = getattr(getattr(gateway, "config", None), "registry", None)
+    return None if registry is None else {item.name for item in registry}
 
 
 def _field_count(body: dict, include_system: bool) -> int:
@@ -561,7 +601,7 @@ def _record(
     payload: bytes | None = None,
     rescan: audit_trail.Rescan | None = None,
     upstream_status: int | None = None,
-) -> None:
+) -> str:
     fields = audit_trail.entry(
         session_key=session_key,
         path=path,
@@ -580,6 +620,7 @@ def _record(
         upstream_status=upstream_status,
     )
     trail.write("proxy_request", fields)
+    return str(fields["request_id"])
 
 
 def _audit(

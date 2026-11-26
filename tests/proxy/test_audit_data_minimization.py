@@ -201,3 +201,53 @@ async def test_the_audit_directory_holds_no_value_no_hash_and_no_salt(
     assert not LONG_HEX.search(remainder)
     assert re.fullmatch(r"[0-9a-f]{12}", record["session"])
     assert re.fullmatch(r"[0-9a-f]{64}", record["outgoing"]["sha256"])
+
+
+TOOL_RECORD_KEYS = {"v", "event", "ts", "request_id", "streaming", "on_deny", "entries"}
+TOOL_ENTRY_KEYS = {"tool", "path", "cls", "decision"}
+"""The `tool_restore` record names the tool, the position, the class and the decision.
+
+The tool name is the model's choice, escaped and cut to 64 characters; `path` is positional
+like the v2 fields, so no key text is rendered; no value, no token and no hash of either.
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_tool_restore_record_holds_no_value(gateway: Gateway, tmp_path: Path) -> None:
+    audit_dir = tmp_path / "state" / "audit"
+    settings = ProxySettings(upstream_base_url=UPSTREAM, audit_dir=audit_dir)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        tokens = sorted(set(re.findall(r"<[A-Z_]+_\d{3}>", request.content.decode())))
+        payload = {"command": " ".join(tokens), tokens[0]: [t.lower() for t in tokens]}
+        block = {"type": "tool_use", "id": "t9", "name": "Bash\u200b", "input": payload}
+        return httpx.Response(200, json={"content": [block]})
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    app = server.create_app(settings, gateway, client=upstream)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787"
+    ) as client:
+        response = await client.post("/v1/messages", json=_body())
+
+    assert response.status_code == 200
+    (path,) = audit_dir.glob("tool-restore-*.jsonl")
+    raw = path.read_text(encoding="utf-8")
+    (record,) = [json.loads(line) for line in raw.splitlines()]
+    assert set(record) == TOOL_RECORD_KEYS
+    assert record["event"] == "tool_restore"
+    assert record["entries"]
+    for item in record["entries"]:
+        assert set(item) == TOOL_ENTRY_KEYS
+        assert item["decision"] == "kept"
+    remainder = raw.replace(record["request_id"], "").replace(record["ts"], "")
+    for value in [*VALUES, CONVERSATION, CONVERSATION.replace("-", "")]:
+        for form in _normalized(value):
+            for text in (remainder, response.text):
+                assert form not in text
+                assert json.dumps(form)[1:-1] not in text
+    assert not re.search(r"<[A-Z_]+_\d{3}>", raw)
+    strings = list(_strings(record))
+    for key_path, text in strings:
+        if key_path != ("request_id",):
+            assert not LONG_HEX.search(text), key_path

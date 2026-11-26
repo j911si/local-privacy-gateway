@@ -170,7 +170,7 @@ async def test_non_streaming_roundtrip_hides_values_and_restores_the_answer(
     assert response.status_code == 200
     blocks = response.json()["content"]
     assert blocks[0]["text"] == f"Notiz zu {LAST_NAME} und {CUSTOMER} und {IBAN}."
-    assert blocks[1]["input"]["content"] == f"Kunde {CUSTOMER}"
+    assert blocks[1]["input"]["content"] == f"Kunde {CUSTOMER_TOKEN}"
     assert TOKEN_PATTERN.findall(sent_text(seen[0])) == [PERSON_TOKEN, CUSTOMER_TOKEN, IBAN_TOKEN]
 
     (event,) = audit_events(audit_log, "proxy_request")

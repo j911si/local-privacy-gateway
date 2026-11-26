@@ -331,7 +331,7 @@ def test_notice_does_not_touch_the_system_prompt(
     assert new_body["messages"][0]["content"][0]["text"] == NOTICE_TEXT
 
 
-def test_restore_response_restores_text_and_tool_use_input(
+def test_restore_response_restores_text_but_leaves_tool_use_input(
     response_body: dict, fake_session: FakeSession
 ) -> None:
     restored = restore_response(response_body, fake_session)
@@ -339,13 +339,7 @@ def test_restore_response_restores_text_and_tool_use_input(
     assert restored["content"][1]["text"] == (
         "Hallo Frau Müller, die Alpenbank AG nutzt DE89370400440532013000."
     )
-    tool_input = restored["content"][2]["input"]
-    assert tool_input["content"] == (
-        "Sehr geehrte Frau Müller, Ihre IBAN DE89370400440532013000 liegt vor."
-    )
-    assert tool_input["tags"] == ["Alpenbank AG", 7, None]
-    assert tool_input["overwrite"] is True
-    assert tool_input["retries"] == 2
+    assert restored["content"][2]["input"] == response_body["content"][2]["input"]
 
 
 def test_restore_response_leaves_thinking_and_metadata_untouched(
@@ -535,7 +529,7 @@ def test_key_paths_render_by_position_without_the_key() -> None:
     )
 
 
-def test_restore_response_restores_tool_use_keys(fake_session: FakeSession) -> None:
+def test_restore_response_leaves_tool_use_keys(fake_session: FakeSession) -> None:
     body = {
         "content": [
             {"type": "tool_use", "id": "t", "name": "W", "input": {"<IBAN_001>": "<IBAN_001>"}}
@@ -544,7 +538,7 @@ def test_restore_response_restores_tool_use_keys(fake_session: FakeSession) -> N
 
     restored = restore_response(body, fake_session)
 
-    assert restored["content"][0]["input"] == {"DE89370400440532013000": "DE89370400440532013000"}
+    assert restored["content"][0]["input"] == {"<IBAN_001>": "<IBAN_001>"}
 
 
 @pytest.mark.parametrize(
