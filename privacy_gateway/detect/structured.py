@@ -34,8 +34,12 @@ DB_URI_RE = re.compile(
     r"(?:postgresql|postgres|mysql|mongodb\+srv|mongodb|redis|amqp|mssql)://[^\s>\"')]+"
 )
 ADO_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=[^;\n]*(?:;[ \t]*[A-Za-z][A-Za-z ]{1,24}=[^;\n]*)+")
-HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
+HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
+INLINE_BASIC_RE = re.compile(
+    r"(?i)(?<![\w-])(?:proxy-)?authorization:[ \t]*basic[ \t]+"
+    r"([A-Za-z0-9+/]{8,}={0,2})(?![\w+/=-])"
+)
 DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
 K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
 K8S_DATA_RE = re.compile(r"^([ \t]*)(?:data|stringData):[ \t]*$", re.MULTILINE)
@@ -52,6 +56,7 @@ SESSION_COOKIES = frozenset({"sessionid", "jsessionid", "phpsessid", "connect.si
 AUTH_COOKIES = frozenset({"auth", "token", "access_token", "id_token"})
 CSRF_COOKIES = frozenset({"csrf", "xsrf", "_csrf"})
 SKIPPED_X_HEADERS = frozenset({"x-request-id"})
+AUTH_HEADERS = frozenset({"authorization", "proxy-authorization"})
 ADO_HOST_KEYS = frozenset({"server", "data source", "host", "addr", "address"})
 ADO_KEY_CLASSES = {
     "server": "DATABASE_HOST",
@@ -336,10 +341,12 @@ def _cookie_children(value: str, offset: int, only_first: bool) -> list[Finding]
 def _parse_headers(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in HEADER_RE.finditer(text):
-        name = match.group(1).lower()
-        value = match.group(2)
-        value_offset = match.start(2)
-        if name == "authorization":
+        name = match.group(2).lower()
+        value = match.group(3)
+        value_offset = match.start(3)
+        if match.group(1) and name not in AUTH_HEADERS:
+            continue
+        if name in AUTH_HEADERS:
             credential = AUTH_RE.match(value)
             if credential is not None:
                 start = value_offset + credential.start(1)
@@ -353,7 +360,19 @@ def _parse_headers(text: str, config: Config) -> list[Finding]:
                 continue
             child = _finding(value_offset, value_offset + len(value), "HEADER_VALUE")
             findings.append(_finding(match.start(), match.end(), "CUSTOM_HEADER", [child]))
+    for match in INLINE_BASIC_RE.finditer(text):
+        if _is_basic_credential(match.group(1)):
+            findings.append(_finding(match.start(1), match.end(1), "ACCESS_TOKEN"))
     return findings
+
+
+def _is_basic_credential(value: str) -> bool:
+    stripped = value.rstrip("=")
+    try:
+        decoded = base64.b64decode(stripped + "=" * (-len(stripped) % 4), validate=True)
+    except ValueError:
+        return False
+    return b":" in decoded
 
 
 def _documents(text: str) -> list[tuple[int, int]]:
