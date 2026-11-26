@@ -338,3 +338,17 @@ def test_a_short_value_glued_to_a_token_is_no_leak(default_config: Config) -> No
     assert check_leakage("id Li<ACCOUNT_ID_001>", entries, _empty_scan, registry) is None
     with pytest.raises(LeakageError):
         check_leakage("id <ACCOUNT_ID_001> Li", entries, _empty_scan, registry)
+
+
+def test_a_residual_finding_of_only_a_marker_and_punctuation_is_no_leak(
+    default_config: Config,
+) -> None:
+    registry = default_config.registry
+    marker = '<PASSWORD_REDACTED>", '
+    text = f"DB_PASSWORD={marker}x"
+    assert check_leakage(text, {}, _scan_for(marker, "PASSWORD"), registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage(
+            "DB_PASSWORD=<PASSWORD_REDACTED>x1", {}, _scan_for("<PASSWORD_REDACTED>x1", "PASSWORD"),
+            registry,
+        )

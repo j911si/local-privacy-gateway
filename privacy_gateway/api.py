@@ -19,7 +19,12 @@ from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
-from privacy_gateway.leakage import check_leakage, exempt_from_residual, numbered_tokens
+from privacy_gateway.leakage import (
+    check_leakage,
+    exempt_from_residual,
+    numbered_tokens,
+    redacted_token,
+)
 from privacy_gateway.model import (
     DetectionReport,
     FieldFinding,
@@ -44,6 +49,7 @@ AUDIT_ID_BYTES = 6
 AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
 REDACTED_SUFFIX = "_REDACTED>"
+REDACTED_TRIM = " \t\r\n\"'`,;"
 
 
 class Gateway:
@@ -176,6 +182,7 @@ class GatewaySession:
         self._rescans: OrderedDict[str, list[Leak]] = OrderedDict()
         self._known_cache: dict[str, tuple[str, str]] | None = None
         self._values: dict[tuple[str, str], str] | None = None
+        self._redacted: dict[str, str] = {}
         self._generation = 0
 
     def entries(self) -> Mapping[str, VaultEntry]:
@@ -223,6 +230,7 @@ class GatewaySession:
         counters = dict(self._counters)
         written: list[str] = []
         reused: list[str] = []
+        redacted: list[str] = []
         pipeline = self._gateway._pipeline
         literal_tokens = numbered_tokens(text)
         try:
@@ -234,6 +242,7 @@ class GatewaySession:
                     text, report, self._gateway.config, counters=self._counters
                 )
                 self._write(text, pseudonymized, written, reused)
+                self._learn_redacted(text, report, redacted)
                 try:
                     check_leakage(
                         pseudonymized.text,
@@ -241,19 +250,20 @@ class GatewaySession:
                         lambda candidate, known=known: pipeline.run(candidate, known),
                         self._gateway.config.registry,
                         literal_tokens,
+                        redacted=self._redacted,
                     )
                 except LeakageError as exc:
                     if attempt + 1 < MAX_PASSES and (
                         self._generation != generation
                         or self._learn_residue(
-                            pseudonymized.text, exc.leaks, known, written, reused
+                            pseudonymized.text, exc.leaks, known, written, reused, redacted
                         )
                     ):
                         continue
                     raise
                 break
         except Exception:
-            self._rollback(written, counters)
+            self._rollback(written, counters, redacted)
             raise
         return pseudonymized, report, written, reused
 
@@ -274,7 +284,7 @@ class GatewaySession:
         for finding in self._gateway._pipeline.run(text, self._known()).findings:
             if _ignored(registry, finding.data_class):
                 continue
-            if exempt_from_residual(finding, tokens):
+            if exempt_from_residual(finding, tokens, text):
                 continue
             if is_public_reference(text[finding.span.start : finding.span.end]):
                 continue
@@ -331,6 +341,8 @@ class GatewaySession:
             for form in [entry.value, *entry.surface_forms]:
                 if form:
                     known.setdefault(form, (entry.data_class, token))
+        for value, data_class in self._redacted.items():
+            known.setdefault(value, (data_class, redacted_token(data_class)))
         self._known_cache = known
         return known
 
@@ -398,6 +410,24 @@ class GatewaySession:
             )
             written.append(assignment.token)
 
+    def _learn_redacted(self, text: str, report: DetectionReport, learned: list[str]) -> None:
+        """Keep redacted values in memory only, so every later copy is redacted too."""
+        registry = self._gateway.config.registry
+        count = len(learned)
+        for finding in report.findings:
+            data_class = registry.get(finding.data_class)
+            value = text[finding.span.start : finding.span.end].strip(REDACTED_TRIM)
+            if data_class.policy is not Policy.REDACT or not value:
+                continue
+            if value in self._redacted:
+                continue
+            self._redacted[value] = data_class.name
+            learned.append(value)
+        if len(learned) > count:
+            self._known_cache = None
+            self._rescans.clear()
+            self._known_changed()
+
     def _learn_residue(
         self,
         output: str,
@@ -405,6 +435,7 @@ class GatewaySession:
         known: dict[str, tuple[str, str]],
         written: list[str],
         reused: list[str],
+        redacted: list[str],
     ) -> bool:
         """Make values the output check found a known value, so the next pass replaces them.
 
@@ -428,16 +459,17 @@ class GatewaySession:
         if not kept:
             return False
         generation = self._generation
-        learned = pseudonymize_text(
-            output, replace(report, findings=kept), self._gateway.config, counters=self._counters
-        )
+        residue = replace(report, findings=kept)
+        learned = pseudonymize_text(output, residue, self._gateway.config, counters=self._counters)
         self._write(output, learned, written, reused)
+        self._learn_redacted(output, residue, redacted)
         return self._generation != generation
 
     def _rollback(
         self,
         written: list[str],
         counters: dict[str, int],
+        redacted: list[str],
     ) -> None:
         self._known_cache = None
         self._values = None
@@ -447,6 +479,10 @@ class GatewaySession:
         self._gateway.vault.delete_tokens(self.session_id, written)
         for token in written:
             self._entries.pop(token, None)
+        for value in redacted:
+            self._redacted.pop(value, None)
+        if redacted:
+            self._known_changed()
         self._counters = counters
 
     def _known_changed(self) -> None:
