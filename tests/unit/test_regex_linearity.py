@@ -127,3 +127,39 @@ def test_ado_connection_strings_scan_in_linear_time(unit: str) -> None:
     assert_linear(
         structured._parse_ado_strings, lambda n: unit * (n // len(unit)), n=ADO_N
     )
+
+
+PEM_ALPHABET = [
+    "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----",
+    "-----END RSA PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+    "-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN EC PRIVATE KEY-----", "-----END ", "-",
+    "-----", "BEGIN ", "PRIVATE KEY", "\n", "MIIB", " ", "A", "-----BEGIN PRIVATE KEY BLOCK-----",
+]
+
+
+def test_pem_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.structured import PEM_RE, pem_finditer
+
+    matched = 0
+    texts = random_texts(PEM_ALPHABET, 815)
+    texts.append("-----BEGIN PRIVATE KEY-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----")
+    for text in texts:
+        expected = [(m.span(), m.group(1)) for m in PEM_RE.finditer(text)]
+        assert [(m.span(), m.group(1)) for m in pem_finditer(text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "-----BEGIN PRIVATE KEY-----\n",
+        "-----BEGIN RSA PRIVATE KEY-----\n-----END PRIVATE KEY-----\n",
+        "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n",
+    ],
+)
+def test_pem_blocks_scan_in_linear_time(default_config: Config, unit: str) -> None:
+    assert_linear(
+        lambda text: structured._parse_pem_blocks(text, default_config),
+        lambda n: unit * (n // len(unit)),
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import re
 from collections.abc import Iterator
@@ -31,6 +32,8 @@ PEM_RE = re.compile(
     r"[\s\S]*?"
     r"-----END \1PRIVATE KEY(?: BLOCK)?-----"
 )
+PEM_BEGIN_RE = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
+PEM_END_RE = re.compile(r"-----END ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
 DB_URI_RE = re.compile(
     r"(?:postgresql|postgres|mysql|mongodb\+srv|mongodb|redis|amqp|mssql)://[^\s>\"')]+"
 )
@@ -244,9 +247,39 @@ def _parse_jwts(text: str, config: Config) -> list[Finding]:
     return findings
 
 
+def _all_starts(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    position = 0
+    while (match := pattern.search(text, position)) is not None:
+        yield match
+        position = match.start() + 1
+
+
+def pem_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `PEM_RE.finditer(text)` yields, in linear time.
+
+    The END lines are collected once per label; a BEGIN is only handed to PEM_RE.match when an
+    END with its label follows. Plain `finditer` scans to the end of the text from every BEGIN
+    without an END, which is quadratic on many such lines.
+    """
+    ends: dict[str, list[int]] = {}
+    for end in _all_starts(PEM_END_RE, text):
+        ends.setdefault(end.group(1), []).append(end.start())
+    position = 0
+    for begin in _all_starts(PEM_BEGIN_RE, text):
+        if begin.start() < position:
+            continue
+        starts = ends.get(begin.group(1), [])
+        if bisect.bisect_left(starts, begin.end()) == len(starts):
+            continue
+        match = PEM_RE.match(text, begin.start())
+        if match is not None:
+            yield match
+            position = match.end()
+
+
 def _parse_pem_blocks(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in PEM_RE.finditer(text):
+    for match in pem_finditer(text):
         label = match.group(1)
         if "OPENSSH" in label:
             data_class = "SSH_PRIVATE_KEY"
