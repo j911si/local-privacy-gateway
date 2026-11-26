@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from privacy_gateway import Gateway
+from privacy_gateway.model import VaultError
 from privacy_gateway.vault import Vault
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "vault_v010"
@@ -123,3 +124,24 @@ def test_purge_removes_the_v010_session(
     gateway.vault.purge(SESSION_ID)
     assert gateway.vault.find_session(SESSION_KEY) is None
     assert _row_counts(vault_paths[0]) == [0, 0, 0]
+
+
+def test_v010_token_keeps_its_value_against_a_second_connection(
+    vault_paths: tuple[Path, Path],
+) -> None:
+    db_path, key_file = vault_paths
+    with Vault(db_path, key_file) as first, Vault(db_path, key_file) as second:
+        with pytest.raises(VaultError):
+            second.store(SESSION_ID, "<IBAN_001>", "IBAN", "DE02120300000000202051", [], {})
+        first.store(SESSION_ID, "<IBAN_001>", "IBAN", IBAN_SPACED, [IBAN_SPACED], {})
+        assert first.load(SESSION_ID)["<IBAN_001>"].value == IBAN_SPACED
+    conn = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO mappings (session_id, token, data_class, nonce, ciphertext, "
+                "attributes_json) VALUES (?, '<IBAN_001>', 'IBAN', x'00', x'00', '{}')",
+                (SESSION_ID,),
+            )
+    finally:
+        conn.close()
