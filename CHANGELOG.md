@@ -7,6 +7,37 @@ All notable changes to this project are documented in this file. The format foll
 ## 0.2.0 – unreleased
 
 ### Security
+- Breaking: a finding of a sensitive class in a field the proxy forwards unchanged (`tools`,
+  `metadata`, a signed block, the system prompt with `PGW_PROXY_TRANSFORM_SYSTEM=0`, an unknown
+  field) now blocks the request with 422 before anything is sent. Before, it went out in clear
+  text and was only logged. `PGW_PROXY_UNCHECKED_FIELDS=allow` restores the old behaviour. The
+  blocking classes and the two narrow exceptions (Claude Code's `metadata.user_id` and its billing
+  line) are listed in [Unchecked fields: blocking classes](README.md#unchecked-fields-blocking-classes).
+- Breaking: the proxy refuses to start on a non-loopback address without `PGW_PROXY_AUTH_TOKEN` or
+  `PGW_PROXY_AUTH_TOKEN_FILE`. Before, it only warned. `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` is the
+  explicit opt-out.
+- A second copy of a redacted password, PIN, TAN or other secret in the same text or a later turn
+  went out in clear text. Every copy is now redacted, and the leak check looks for it. Redacted
+  values are kept in memory only, never in the vault or a log.
+- `pgw pseudonymize` without `--session-key` skipped the substring sweep, so a known name glued to
+  digits (`Wendland2024`) went out. Documents now take the same path as sessions.
+- The substring sweep let a longer known value that failed its boundary check hide a shorter one
+  (`awendland` hid `Wendland` in `AnnikaWendland`).
+- A short known value glued to a token (`<PHONE_001>li`) passed the leak check. It is now replaced
+  or blocked; fragments of longer words still pass.
+- Only tokens the gateway issued, and redaction markers, hide a value from the leak check. Before,
+  any token-shaped text did.
+- Two processes writing the same session into one `vault.db` could give two values the same
+  token, so a restore showed the wrong name. Checking and writing a token now happen in one
+  `BEGIN IMMEDIATE` transaction; a collision fails closed and reloads the session.
+- Detection: IBAN, card and tax numbers next to `_` and in file names, IBAN behind lower-case
+  letters, card numbers behind a card word, Kubernetes `stringData`, passwords containing `\"`,
+  escaped JSON up to three levels, CSRF and XSRF token spellings, indented, proxy and inline
+  `Basic` credentials.
+- Detection no longer takes quadratic time on crafted input: PIN/TAN/OTP, ADO connection strings,
+  PEM blocks, JWT, labelled tax IDs, postal codes, salutations, the password rules, overlap
+  resolution and the leak check's token test. One crafted line used to cost minutes to hours of
+  CPU.
 - Placeholders inside tool calls are no longer restored by default. Before, the proxy put the
   real value back into every `tool_use.input`, so a prompt-injected `Bash`, `WebFetch` or MCP
   call received it. Now a value is restored only where a rule in `PGW_PROXY_TOOL_RESTORE_POLICY`
@@ -70,6 +101,14 @@ All notable changes to this project are documented in this file. The format foll
   new version does not read or delete any of them; remove them yourself if you do not need them.
 - If an agent should write real values into files, add rules to a policy file. Without one,
   every tool call gets placeholders.
+- A proxy bound to a private address (Tailscale, LAN) needs a token now. Create one with
+  `umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token`, set
+  `PGW_PROXY_AUTH_TOKEN_FILE` in the service and send it from each client, for example with
+  `ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: <token>"`.
+- With a subscription login and `PGW_PROXY_TRANSFORM_SYSTEM=0`, a working directory under
+  `/home/<name>/` or `/Users/<name>/` puts your user name into the unchanged system prompt, and
+  every request is blocked. Either work in a directory without your user name or set
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`, which sends the name in clear text as 0.1.0 did.
 
 ## 0.1.0 – 2026-09-23
 

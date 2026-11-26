@@ -1337,13 +1337,29 @@ Supporting properties:
 - **Learned names in a request path.** The path scan runs the rules, not the values a conversation
   has learned. A name that only a context rule found earlier is not recognized in a path.
 - **Token-shaped text in your own input.** Text that already contains something like `<IBAN_001>`
-  (docs about this gateway, for example) passes the leak check as literal text. If a later real
-  value gets the same token, a restored answer can show that value where the model quoted the
-  literal. Nothing leaves your machine through this.
+  (docs about this gateway, for example) stays as literal text. A new token skips numbers that
+  already appear in the text it is issued for, but a literal that first shows up in a later turn
+  can still match a token issued earlier; a restored answer can then show that value where the
+  model quoted the literal. Nothing leaves your machine through this.
 - **Prompt caching.** A new known value changes older messages of the same conversation, which
   invalidates Anthropic's prompt cache for that one request.
 - **Rescan budget.** `PGW_PROXY_RESCAN_BUDGET` is checked between strings; one very long string can
   run past it. A custom `FQDN` pattern in your YAML falls back to the slower regex scan.
+- **Large requests block the proxy.** Detection runs in the event loop. Measured on the release
+  candidate: about 9 s of CPU per MiB of prose for one request, so a body near the 32 MiB limit
+  holds every other session for minutes. The default rules run in linear time; a pattern you change
+  in your YAML falls back to the plain regex scan and has no such guarantee.
+- **Redacted values live in memory only.** Once a password, PIN or TAN is redacted, later copies in
+  the same document or conversation are redacted too. That memory ends with the process and with
+  each separate `pgw` call, so a copy in a later CLI call or after a proxy restart is caught only
+  if a rule finds it again. A short PIN such as `2024` also replaces the same number as a year.
+- **Parallel writers on one vault.** Several processes may share `vault.db` and a session key. A
+  token is claimed inside one transaction; when two writers collide, the loser fails closed with
+  `VaultError` and the next request gets a free token. Under heavy parallel use of one session
+  many requests fail this way.
+- **Detection edges.** An IBAN glued to capital letters (`IBANDE89…`) and a card number glued to a
+  word other than a card word (`id4111…`) are not found. Escaped JSON is covered up to three
+  escape levels, escaped password values up to 512 characters.
 - **Out of scope:** ML/NER models, OCR, binary documents, multi-user vaults, key rotation.
 
 ### Further reading
