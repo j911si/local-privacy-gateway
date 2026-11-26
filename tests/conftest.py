@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+from isolation_guard import Guard, GuardPlugin, protected_roots, real_homes
 
 from privacy_gateway.config import Config, load_config
+
+pytest_plugins = ("pytester",)
+
+GUARD = Guard(roots=protected_roots(os.environ), homes=real_homes(os.environ))
+GUARD.install()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.pluginmanager.register(GuardPlugin(GUARD), "isolation-guard")
+
 
 SKIP_USER_CONFIG_ENV = {"PGW_SKIP_USER_CONFIG": "1"}
 HOME_DIRS = {
