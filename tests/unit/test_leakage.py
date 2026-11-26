@@ -326,18 +326,32 @@ def test_a_known_value_that_equals_a_token_name_is_no_leak_inside_that_token(
         check_leakage("Host HOST_001 steht offen.", entries, _empty_scan, registry)
 
 
-def test_a_short_value_glued_to_a_token_is_no_leak(default_config: Config) -> None:
+@pytest.mark.parametrize(
+    "text",
+    ["id <ACCOUNT_ID_001>Li, <ACCOUNT_ID_001>", "id Li<ACCOUNT_ID_001>", "id <ACCOUNT_ID_001> Li"],
+)
+def test_a_complete_short_value_glued_to_a_token_is_a_leak(
+    default_config: Config, text: str
+) -> None:
     entries = {
         "<PERSON_001>": _entry("Li", "PERSON_LAST_NAME"),
         "<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID"),
     }
-    registry = default_config.registry
 
-    glued = "id <ACCOUNT_ID_001>Li, <ACCOUNT_ID_001>"
-    assert check_leakage(glued, entries, _empty_scan, registry) is None
-    assert check_leakage("id Li<ACCOUNT_ID_001>", entries, _empty_scan, registry) is None
     with pytest.raises(LeakageError):
-        check_leakage("id <ACCOUNT_ID_001> Li", entries, _empty_scan, registry)
+        check_leakage(text, entries, _empty_scan, default_config.registry)
+
+
+@pytest.mark.parametrize(
+    "text", ["id <ACCOUNT_ID_001>Li, x", "id <ACCOUNT_ID_001>Lix", "id xLi<ACCOUNT_ID_001>"]
+)
+def test_a_short_residual_finding_next_to_a_token_is_no_leak(
+    default_config: Config, text: str
+) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
+    scan = _scan_for("Li", "PERSON_LAST_NAME")
+
+    assert check_leakage(text, entries, scan, default_config.registry) is None
 
 
 def test_a_residual_finding_of_only_a_marker_and_punctuation_is_no_leak(

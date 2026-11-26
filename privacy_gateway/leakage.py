@@ -26,6 +26,18 @@ def _short_touching_token(start: int, end: int, tokens: list[Span]) -> bool:
     )
 
 
+def _short_fragment_next_to_token(text: str, start: int, end: int, tokens: list[Span]) -> bool:
+    """A short known value next to a token that runs on into letters or digits on its other side.
+
+    A complete short value next to a token (`<PHONE_001>li`) is a leak.
+    """
+    if end - start >= MIN_LENGTH_FOR_FUZZY_SEARCH:
+        return False
+    after = end < len(text) and text[end].isalnum() and any(t.end == start for t in tokens)
+    before = start > 0 and text[start - 1].isalnum() and any(t.start == end for t in tokens)
+    return after or before
+
+
 def _only_tokens(text: str, span: Span, tokens: list[Span]) -> bool:
     """Nothing but tokens and punctuation inside `span`, so it carries no value."""
     rest = list(text[span.start : span.end])
@@ -111,7 +123,7 @@ def check_leakage(
     for span, (data_class, _) in known_occurrences(text, known, registry):
         if any(token.contains(span) for token in token_spans):
             continue
-        if _short_touching_token(span.start, span.end, token_spans):
+        if _short_fragment_next_to_token(text, span.start, span.end, token_spans):
             continue
         if data_class == "SOCIAL_MEDIA_HANDLE" and any(t.end == span.start for t in token_spans):
             continue

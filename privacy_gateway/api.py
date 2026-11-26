@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -20,6 +21,7 @@ from privacy_gateway.detect import Pipeline
 from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
 from privacy_gateway.leakage import (
+    MIN_LENGTH_FOR_FUZZY_SEARCH,
     check_leakage,
     exempt_from_residual,
     numbered_tokens,
@@ -28,6 +30,7 @@ from privacy_gateway.leakage import (
 from privacy_gateway.model import (
     DetectionReport,
     FieldFinding,
+    Finding,
     Leak,
     LeakageError,
     PseudonymizeResult,
@@ -232,12 +235,15 @@ class GatewaySession:
         reused: list[str] = []
         redacted: list[str] = []
         pipeline = self._gateway._pipeline
+        registry = self._gateway.config.registry
         literal_tokens = numbered_tokens(text)
         try:
             for attempt in range(MAX_PASSES):
                 generation = self._generation
                 known = self._known()
-                report = self._bind_tokens(text, pipeline.run(text, known))
+                report = self._bind_tokens(
+                    text, _with_glued_short(text, pipeline.run(text, known), known, registry)
+                )
                 pseudonymized = pseudonymize_text(
                     text, report, self._gateway.config, counters=self._counters
                 )
@@ -488,6 +494,38 @@ class GatewaySession:
     def _known_changed(self) -> None:
         self._generation += 1
         self._results.clear()
+
+
+def _with_glued_short(
+    text: str, report: DetectionReport, known: Mapping[str, tuple[str, str]], registry: ClassRegistry
+) -> DetectionReport:
+    """Add short known values glued to a replaced finding, which the leak check sees whole."""
+    spans = [f.span for f in report.findings if not _ignored(registry, f.data_class)]
+    if not spans:
+        return report
+    starts = {span.start for span in spans}
+    ends = {span.end for span in spans}
+    added: list[Finding] = []
+    for form, (data_class, _) in known.items():
+        if len(form) >= MIN_LENGTH_FOR_FUZZY_SEARCH:
+            continue
+        for match in re.finditer(re.escape(form), text, re.IGNORECASE):
+            start, end = match.start(), match.end()
+            free_left = start == 0 or not text[start - 1].isalnum() or start in ends
+            free_right = end == len(text) or not text[end].isalnum() or end in starts
+            if not ((start in ends and free_right) or (end in starts and free_left)):
+                continue
+            span = Span(start, end)
+            if any(span.overlaps(other) for other in spans):
+                continue
+            spans.append(span)
+            added.append(
+                Finding(span=span, data_class=data_class, stage="session", confidence=1.0)
+            )
+    if not added:
+        return report
+    findings = sorted([*report.findings, *added], key=lambda finding: finding.span.start)
+    return replace(report, findings=findings)
 
 
 def _ignored(registry: ClassRegistry, data_class: str) -> bool:
