@@ -7,7 +7,8 @@ import os
 import secrets
 import sqlite3
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
@@ -23,6 +24,7 @@ from .tokens import NUMBERED_TOKEN
 KEY_SIZE = 32
 NONCE_SIZE = 12
 GENDER_LABEL_SUFFIXES = ("_FEMALE", "_MALE")
+BUSY_TIMEOUT_MS = 10_000
 
 
 _SCHEMA = """
@@ -111,7 +113,7 @@ class Vault:
         db_path = Path(db_path)
         _ensure_private_parent(db_path)
         self._db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA secure_delete=ON")
@@ -150,25 +152,24 @@ class Vault:
 
     def get_or_create_session(self, external_key: str, config_hash: str) -> str:
         """Return the session for an external key, creating it on first use."""
-        row = self._conn.execute(
-            "SELECT id, config_hash FROM sessions WHERE external_key = ?", (external_key,)
-        ).fetchone()
-        if row is not None:
-            if row[1] != config_hash:
-                print(
-                    f"privacy-gateway: session {row[0]} was created with a different "
-                    "configuration",
-                    file=sys.stderr,
+        with self._write_transaction():
+            row = self._conn.execute(
+                "SELECT id, config_hash FROM sessions WHERE external_key = ?", (external_key,)
+            ).fetchone()
+            if row is None:
+                session_id = uuid4().hex
+                self._conn.execute(
+                    "INSERT INTO sessions (id, created_at, doc_sha256, config_hash, external_key) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, datetime.now(UTC).isoformat(), "", config_hash, external_key),
                 )
-            return row[0]
-        session_id = uuid4().hex
-        self._conn.execute(
-            "INSERT INTO sessions (id, created_at, doc_sha256, config_hash, external_key) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, datetime.now(UTC).isoformat(), "", config_hash, external_key),
-        )
-        self._conn.commit()
-        return session_id
+                return session_id
+        if row[1] != config_hash:
+            print(
+                f"privacy-gateway: session {row[0]} was created with a different configuration",
+                file=sys.stderr,
+            )
+        return row[0]
 
     def max_counters(self, session_id: str) -> dict[str, int]:
         """Return the highest token number per base label stored for a session."""
@@ -222,29 +223,42 @@ class Vault:
         surface_forms: list[str],
         attributes: dict[str, str],
     ) -> None:
-        """Encrypt and store one token mapping."""
-        if not self._session_exists(session_id):
-            raise VaultError(f"unknown session: {session_id}")
-        if self._conflicts(session_id, token, value):
-            raise VaultError(f"token already assigned: {token}")
+        """Encrypt and store one token mapping; a token already taken by another value fails."""
         nonce, ciphertext = self._encrypt(value, f"{session_id}|{token}")
-        self._conn.execute(
-            "INSERT OR REPLACE INTO mappings "
-            "(session_id, token, data_class, nonce, ciphertext, attributes_json) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, token, data_class, nonce, ciphertext, json.dumps(attributes)),
-        )
-        self._conn.execute(
-            "DELETE FROM surface_forms WHERE session_id = ? AND token = ?", (session_id, token)
-        )
-        for ordinal, form in enumerate(surface_forms):
-            form_nonce, form_ciphertext = self._encrypt(form, f"{session_id}|{token}|{ordinal}")
-            self._conn.execute(
-                "INSERT INTO surface_forms (session_id, token, ordinal, nonce, ciphertext) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, token, ordinal, form_nonce, form_ciphertext),
-            )
-        self._conn.commit()
+        row = (data_class, nonce, ciphertext, json.dumps(attributes), session_id, token)
+        try:
+            with self._write_transaction():
+                if not self._session_exists(session_id):
+                    raise VaultError(f"unknown session: {session_id}")
+                if self._conflicts(session_id, token, value):
+                    raise VaultError(f"token already assigned: {token}")
+                updated = self._conn.execute(
+                    "UPDATE mappings SET data_class = ?, nonce = ?, ciphertext = ?, "
+                    "attributes_json = ? WHERE session_id = ? AND token = ?",
+                    row,
+                ).rowcount
+                if not updated:
+                    self._conn.execute(
+                        "INSERT INTO mappings "
+                        "(data_class, nonce, ciphertext, attributes_json, session_id, token) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        row,
+                    )
+                self._conn.execute(
+                    "DELETE FROM surface_forms WHERE session_id = ? AND token = ?",
+                    (session_id, token),
+                )
+                for ordinal, form in enumerate(surface_forms):
+                    form_nonce, form_ciphertext = self._encrypt(
+                        form, f"{session_id}|{token}|{ordinal}"
+                    )
+                    self._conn.execute(
+                        "INSERT INTO surface_forms (session_id, token, ordinal, nonce, ciphertext) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (session_id, token, ordinal, form_nonce, form_ciphertext),
+                    )
+        except sqlite3.Error as exc:
+            raise VaultError(f"vault write failed: {type(exc).__name__}") from exc
         _restrict(self._db_path)
 
     def load(self, session_id: str) -> dict[str, VaultEntry]:
@@ -309,6 +323,17 @@ class Vault:
 
     def close(self) -> None:
         self._conn.close()
+
+    @contextmanager
+    def _write_transaction(self) -> Iterator[None]:
+        """Hold the database write lock from the first read to the commit."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
 
     def _migrate(self) -> None:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}

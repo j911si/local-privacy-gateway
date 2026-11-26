@@ -30,6 +30,7 @@ from privacy_gateway.model import (
     Span,
     SummaryReport,
     VaultEntry,
+    VaultError,
 )
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
 from privacy_gateway.restore import restore_text
@@ -256,6 +257,8 @@ class GatewaySession:
         except Exception as exc:
             self._rollback(written, counters)
             self._gateway.audit.error(type(exc).__name__, SESSION_STAGE)
+            if isinstance(exc, VaultError):
+                self._reload()
             raise
         self._gateway.audit.session_pseudonymize(
             self._gateway._audit_id(self.session_id),
@@ -459,6 +462,17 @@ class GatewaySession:
         for token in written:
             self._entries.pop(token, None)
         self._counters = counters
+
+    def _reload(self) -> None:
+        """Take the mappings and counters another process may have written from the vault."""
+        vault = self._gateway.vault
+        self._entries = vault.load(self.session_id)
+        stored = vault.max_counters(self.session_id)
+        self._counters = {
+            label: max(self._counters.get(label, 0), stored.get(label, 0))
+            for label in {*self._counters, *stored}
+        }
+        self._known_changed()
 
     def _known_changed(self) -> None:
         self._generation += 1
