@@ -9,6 +9,7 @@ import pytest
 
 from privacy_gateway.api import Gateway, GatewaySession
 from privacy_gateway.config import load_config
+from privacy_gateway.detect.session import SubstringSweep
 from privacy_gateway.leakage import check_leakage
 from privacy_gateway.model import DetectionReport, LeakageError, VaultEntry
 from privacy_gateway.tokens import ANY_TOKEN
@@ -167,3 +168,30 @@ def test_the_leak_check_flags_a_known_value_the_word_bound_search_misses(
         check_leakage("<PERSON_001> und Wendland2024", entries, empty, registry)
     check_leakage("<PERSON_001> und Wendlandstrasse", entries, empty, registry)
     check_leakage("Wendland2024", entries, empty, registry, sweep=False)
+
+
+@pytest.mark.parametrize(
+    ("pairs", "text", "values"),
+    [
+        (
+            [WENDLAND, ANNIKA, ("landAnnika", "PERSON_USERNAME")],
+            "Gruss WendlandAnnika",
+            ("wendland", "annika"),
+        ),
+        (
+            [WENDLAND, ("awendland", "PERSON_USERNAME")],
+            "Commit von AnnikaWendland",
+            ("wendland",),
+        ),
+    ],
+)
+def test_a_longer_value_without_boundaries_does_not_hide_a_valid_shorter_one(
+    gateway: Gateway, pairs: list[tuple[str, str]], text: str, values: tuple[str, ...]
+) -> None:
+    known = {value: (data_class, f"<T_{i:03d}>") for i, (value, data_class) in enumerate(pairs)}
+    found = {text[span.start : span.end].lower() for span, _ in SubstringSweep(known).find(text)}
+    assert set(values) <= found
+    session = _seeded(gateway, *pairs)
+    output = session.pseudonymize(text)
+    assert not any(value in _plain(output) for value in values)
+    assert session.restore(output).text == text

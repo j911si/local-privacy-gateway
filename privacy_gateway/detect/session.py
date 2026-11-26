@@ -290,35 +290,53 @@ class SubstringSweep:
         ]
         raw.sort(key=lambda hit: (hit[0] - hit[1], hit[0]))
         chosen: list[tuple[int, int, Known]] = []
-        covered = bytearray(len(work))
-        for start, end, value in raw:
-            if covered.find(1, start, end) == -1:
+        starts: set[int] = set()
+        ends: set[int] = set()
+        while raw:
+            covered = bytearray(len(work))
+            for start, end, _ in chosen:
                 covered[start:end] = b"\x01" * (end - start)
-                chosen.append((start, end, value))
-        full = [hit for hit in chosen if lowered[hit[0] : hit[1]] not in self._glued_only]
-        starts = {start for start, _, _ in full}
-        ends = {end for _, end, _ in full}
+            taken: list[tuple[int, int, Known]] = []
+            for start, end, value in raw:
+                if covered.find(1, start, end) == -1:
+                    covered[start:end] = b"\x01" * (end - start)
+                    taken.append((start, end, value))
+            for start, end, _ in taken:
+                if lowered[start:end] not in self._glued_only:
+                    starts.add(start)
+                    ends.add(end)
+            rejected = False
+            for start, end, value in taken:
+                if self._valid(work, lowered[start:end], start, end, starts, ends):
+                    chosen.append((start, end, value))
+                else:
+                    rejected = True
+            if not rejected:
+                break
+            removed = set(taken)
+            raw = [hit for hit in raw if hit not in removed]
         hits: list[Hit] = []
         for start, end, value in sorted(chosen):
-            if lowered[start:end] in self._glued_only:
-                glued_left = start in ends and _right_boundary(work, end, False)
-                glued_right = end in starts and _left_boundary(work, start)
-                if not (glued_left or glued_right):
-                    continue
-            elif lowered[start:end] in self._short_mixed:
-                if not (self._free_left(work, start) or start in ends):
-                    continue
-                if not (self._free_right(work, end) or end in starts):
-                    continue
-            else:
-                numeric = mostly_digits(work[start:end])
-                if not (_left_boundary(work, start) or start in ends):
-                    continue
-                if not (_right_boundary(work, end, numeric) or end in starts):
-                    continue
             span = Span(start, end)
             hits.append((span if mapping is None else mapping.original(span), value))
         return hits
+
+    def _valid(
+        self, work: str, key: str, start: int, end: int, starts: set[int], ends: set[int]
+    ) -> bool:
+        """Boundaries of one candidate; `starts`/`ends` are the candidates taken so far."""
+        if key in self._glued_only:
+            glued_left = start in ends and _right_boundary(work, end, False)
+            glued_right = end in starts and _left_boundary(work, start)
+            return glued_left or glued_right
+        if key in self._short_mixed:
+            return (self._free_left(work, start) or start in ends) and (
+                self._free_right(work, end) or end in starts
+            )
+        numeric = mostly_digits(work[start:end])
+        return (_left_boundary(work, start) or start in ends) and (
+            _right_boundary(work, end, numeric) or end in starts
+        )
 
 
 def known_occurrences(text: str, known: Mapping[str, Known], registry: ClassRegistry) -> list[Hit]:
