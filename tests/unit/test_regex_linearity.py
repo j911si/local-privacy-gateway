@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 import signal
 import time
@@ -10,12 +11,14 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from privacy_gateway.config import Config
+from privacy_gateway.detect import structured
 
 HARD_TIMEOUT_S = 60
 MAX_FACTOR = 3.0
 MAX_SECONDS = 1.0
 NOISE_FLOOR_S = 0.02
 N = 100_000
+ADO_N = 20_000
 
 
 @pytest.fixture(autouse=True)
@@ -92,3 +95,35 @@ def test_pin_tan_otp_matches_are_unchanged(default_config: Config, text: str, va
     ]
     assert value in found
 
+
+def random_texts(alphabet: list[str], seed: int, count: int = 3000) -> list[str]:
+    rng = random.Random(seed)
+    return ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40))) for _ in range(count)]
+
+
+ADO_ALPHABET = [
+    "Server=db1", "Database=x", "User Id=u", "Password=p", "a", "aA=", "A", " ", "\t", ";", "; ",
+    "=", "\n", "1", "x y=", "Data Source=h", "abcdefghijklmnopqrstuvwxyz=", "Pwd=", ";;",
+]
+
+
+def test_ado_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.structured import ADO_RE, ado_finditer
+
+    matched = 0
+    texts = random_texts(ADO_ALPHABET, 4711)
+    texts += ["aA=" * 500 + ";", "aA=" * 500 + ";x", "a=b;" * 300, "a=b;c" * 300, ";" * 400]
+    for text in texts:
+        expected = [m.span() for m in ADO_RE.finditer(text)]
+        assert [m.span() for m in ado_finditer(text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+@pytest.mark.parametrize(
+    "unit", ["aA=", "aA=;1", "a=b;", ";", "Server=a;Database=b;" + "x" * 30, "aA= "]
+)
+def test_ado_connection_strings_scan_in_linear_time(unit: str) -> None:
+    assert_linear(
+        structured._parse_ado_strings, lambda n: unit * (n // len(unit)), n=ADO_N
+    )

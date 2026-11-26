@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -34,6 +35,8 @@ DB_URI_RE = re.compile(
     r"(?:postgresql|postgres|mysql|mongodb\+srv|mongodb|redis|amqp|mssql)://[^\s>\"')]+"
 )
 ADO_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=[^;\n]*(?:;[ \t]*[A-Za-z][A-Za-z ]{1,24}=[^;\n]*)+")
+ADO_KEY_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=")
+ADO_NEXT_RE = re.compile(r";[ \t]*[A-Za-z][A-Za-z ]{1,24}=")
 HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
 INLINE_BASIC_RE = re.compile(
@@ -292,9 +295,30 @@ def _force_host_class(child: Finding) -> Finding:
     return child
 
 
+def ado_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `ADO_RE.finditer(text)` yields, in linear time.
+
+    A value runs to the next `;` or newline, so a match needs a key right after the `;` that
+    ends the segment it starts in. Only the first key of such a segment is tried; plain
+    `finditer` rescans the rest of the line from every start, which is quadratic on `aA=aA=`.
+    """
+    position = 0
+    while (semicolon := text.find(";", position)) != -1:
+        newline = text.rfind("\n", position, semicolon)
+        start = position if newline == -1 else newline + 1
+        key = ADO_KEY_RE.search(text, start, semicolon)
+        if key is not None and ADO_NEXT_RE.match(text, semicolon) is not None:
+            match = ADO_RE.match(text, key.start())
+            if match is not None:
+                yield match
+                position = match.end()
+                continue
+        position = semicolon + 1
+
+
 def _parse_ado_strings(text: str) -> list[Finding]:
     findings: list[Finding] = []
-    for match in ADO_RE.finditer(text):
+    for match in ado_finditer(text):
         pairs = _split_pairs(match.group(0), match.start(), ";")
         keys = {name.strip().lower() for name, _, _, _ in pairs}
         if not keys & ADO_HOST_KEYS or not keys & {"database", "user id", "password", "pwd"}:
