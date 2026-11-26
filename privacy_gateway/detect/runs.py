@@ -122,3 +122,61 @@ def _tld_ahead(text: str, start: int, memo: dict[int, bool]) -> bool:
         result = result or memo.get(visited, False)
         memo[visited] = result
     return result
+
+
+PASS_PW_PATTERN = (
+    r"""(?i)(?<![\w.\-])(?:pass|pw)[ \t]*:(?!=)[ \t]*+(?!["'$(<{])(?=\S*\d)(?=\S*[A-Za-z])"""
+    r"(\S{6,}?)[.,;:)\]]*(?=\s|$)"
+)
+_PASS_PW_PREFIX = re.compile(r"""(?i)(?<![\w.\-])(?:pass|pw)[ \t]*:(?!=)[ \t]*+(?!["'$(<{])""")
+_NON_SPACE = re.compile(r"\S*")
+
+
+def pass_pw_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `pattern.finditer(text)` yields for `PASS_PW_PATTERN`, in linear time.
+
+    After the prefix, success depends only on the non-space run from the value start (a digit,
+    a letter, six characters). Such a test passes for a run if it passes for any suffix of it,
+    so once a value start fails, every later value start inside the same run fails too and is
+    skipped. Plain `finditer` rescans the run from every `pw:` in it.
+    """
+    position = 0
+    dead_end = -1
+    while (prefix := _PASS_PW_PREFIX.search(text, position)) is not None:
+        value = prefix.end()
+        if value < dead_end:
+            position = prefix.start() + 1
+            continue
+        match = pattern.match(text, prefix.start())
+        if match is not None:
+            yield match
+            position = match.end()
+            continue
+        dead_end = _NON_SPACE.match(text, value).end()  # type: ignore[union-attr]
+        position = prefix.start() + 1
+
+
+LINE_KEYWORD_SHAPE = re.compile(r"\\b(?:\(\?:[a-z|]+\)|[a-z]+)\\b(?=\[\^\\n\]\*\?)")
+
+
+def line_keyword_finditer(
+    pattern: re.Pattern[str], text: str, keyword: re.Pattern[str]
+) -> Iterator[re.Match[str]]:
+    """Yield exactly what `pattern.finditer(text)` yields for `\\bKEYWORD\\b[^\\n]*?REST`.
+
+    REST is tried at every position from the keyword end to the line end, and whether it
+    matches at a position does not depend on where the match started. A later keyword on the
+    same line sees a subset of those positions, so once a keyword fails the rest of its line
+    is skipped. Plain `finditer` rescans the line from every keyword.
+    """
+    position = 0
+    while (found := keyword.search(text, position)) is not None:
+        match = pattern.match(text, found.start())
+        if match is not None:
+            yield match
+            position = match.end()
+            continue
+        newline = text.find("\n", found.end())
+        if newline == -1:
+            return
+        position = newline + 1

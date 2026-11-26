@@ -275,3 +275,83 @@ def test_glued_iban_and_card_rules_scan_in_linear_time(
 ) -> None:
     for pattern in config_patterns(default_config, name):
         assert_linear(finditer(pattern), lambda n: unit * (n // len(unit)))
+
+
+PASS_ALPHABET = [
+    "pw", "pass", ":", " ", "\t", "\n", "a", "1", "ab12cd", ".", ")", '"', "$", "=", "x",
+]
+LINE_ALPHABET = [
+    "mysql", "mysqldump", "mariadb", "sshpass", " ", "\t", "\n", "-p", " -p", " -p ", "'", '"',
+    "secret1", "\\", "-", "$x", "ab", "u",
+]
+
+
+def test_pass_pw_finditer_equals_finditer() -> None:
+    from privacy_gateway.detect.runs import PASS_PW_PATTERN, pass_pw_finditer
+
+    pattern = re.compile(PASS_PW_PATTERN, re.MULTILINE)
+    matched = 0
+    texts = random_texts(PASS_ALPHABET, 31, 20_000)
+    texts += ["pw:" * 300, "pw:pw:ab12cd", 'pw:"pw:ab12cd x', "pw: pw:" * 50 + "a1b2c3"]
+    for text in texts:
+        expected = [m.span(1) for m in pattern.finditer(text)]
+        assert [m.span(1) for m in pass_pw_finditer(pattern, text)] == expected
+        matched += len(expected)
+    assert matched > 0
+
+
+def test_line_keyword_finditer_equals_finditer(default_config: Config) -> None:
+    rules = [
+        re.compile(p, re.MULTILINE)
+        for p in default_config.registry.get("PASSWORD").patterns
+        if p.startswith("\\b")
+    ]
+    assert len(rules) == 4
+    matched = 0
+    texts = random_texts(LINE_ALPHABET, 57, 20_000)
+    for pattern in rules:
+        for text in texts:
+            expected = [m.span(1) for m in pattern.finditer(text)]
+            assert [m.span(1) for m in patterns.finditer(pattern, text)] == expected
+            matched += len(expected)
+    assert matched > 0
+
+
+PASSWORD_WORST_CASES = [
+    'passwd: "',
+    "password: wird ",
+    "pw:",
+    "pw: ",
+    'mariadb"',
+    "mysql ",
+    "sshpass ",
+    "sshpass=",
+    "password=x.",
+]
+
+
+@pytest.mark.parametrize("unit", PASSWORD_WORST_CASES)
+def test_password_rules_scan_in_linear_time(default_config: Config, unit: str) -> None:
+    for pattern in config_patterns(default_config, "PASSWORD"):
+        if unit == "password: wird " and "(?:wird" in pattern.pattern:
+            continue
+        assert_linear(
+            lambda text, pattern=pattern: list(patterns.finditer(pattern, text)),
+            lambda n: unit * (n // len(unit)),
+        )
+
+
+@pytest.mark.parametrize("filler", [" ", "\t", ".", " .", ").", "x."])
+@pytest.mark.parametrize(
+    "head",
+    [
+        "password: x",
+        "password=x",
+        "pwd = x",
+    ],
+)
+def test_password_rules_with_a_long_blank_or_dot_run(
+    default_config: Config, head: str, filler: str
+) -> None:
+    for pattern in config_patterns(default_config, "PASSWORD"):
+        assert_linear(finditer(pattern), lambda n: head + filler * n + "y", n=20_000)
