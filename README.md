@@ -703,7 +703,11 @@ keeps working. Strategies (`PGW_PROXY_SESSION_STRATEGY`):
 | `header` | The `X-PGW-Session` header, else the per-process key. |
 | `single` | One fixed key for everything. |
 
-The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 400. The server keeps
+The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 400
+(`privacy_gateway_session`) before anything is scanned or forwarded. This holds for every request,
+not only `/v1/messages`: a `GET`, `HEAD`, `OPTIONS`, `DELETE` or passthrough request with an
+unusable key never reaches upstream, so a bad `X-PGW-Session` header cannot skip the path scan.
+The audit line records `-` as session key, never the key that was sent. The server keeps
 the 64 most recently used `GatewaySession` objects in memory; a conversation that falls out is
 reloaded from the vault.
 

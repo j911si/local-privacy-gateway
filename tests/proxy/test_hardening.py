@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Callable, Iterator
@@ -851,3 +852,118 @@ async def test_clean_keys_are_counted_not_listed_in_the_audit_line(
         [f for f in entry["fields"] if f["status"] == "checked"]
     )
     assert SECRET_MAIL not in proxy.log_text()
+
+
+BAD_SESSION_KEYS = ["bad key!", "a" * 65, "a\x01b", "../../etc", "x/y", "sessäon"]
+UNSCANNED_REQUESTS = [
+    ("GET", f"/v1/files/{SECRET_MAIL}", b""),
+    ("HEAD", f"/v1/files/{SECRET_MAIL}", b""),
+    ("OPTIONS", f"/v1/files/{SECRET_MAIL}", b""),
+    ("DELETE", f"/v1/files/{SECRET_IBAN}", b""),
+    ("GET", f"/v1/messages/{SECRET_MAIL}", b""),
+    ("GET", "/v1/models", b""),
+]
+
+
+def assert_session_refused(proxy: Proxy, status: int, data: bytes, method: str, key: str) -> None:
+    assert status == 400
+    assert proxy.seen == []
+    if method != "HEAD":
+        assert error_type(data) == "privacy_gateway_session"
+    text = proxy.log_text() + data.decode()
+    assert SECRET_MAIL not in text
+    assert SECRET_IBAN not in text
+    assert key not in text
+    (entry,) = proxy.entries()
+    assert entry["verdict"] == "error"
+    assert entry["session"] == hashlib.sha256(b"-").hexdigest()[:12]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["header", "metadata"])
+@pytest.mark.parametrize("key", BAD_SESSION_KEYS)
+@pytest.mark.parametrize(("method", "path", "body"), UNSCANNED_REQUESTS)
+async def test_an_unusable_session_header_never_skips_the_path_scan(
+    make_proxy: Callable[..., Proxy],
+    strategy: str,
+    key: str,
+    method: str,
+    path: str,
+    body: bytes,
+) -> None:
+    proxy = make_proxy(session_strategy=strategy)
+
+    status, data = await proxy.call(method, path, body, headers={"x-pgw-session": key})
+
+    assert_session_refused(proxy, status, data, method, key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "path", "body"), UNSCANNED_REQUESTS)
+async def test_an_unusable_fixed_session_key_never_skips_the_path_scan(
+    make_proxy: Callable[..., Proxy], method: str, path: str, body: bytes
+) -> None:
+    proxy = make_proxy(session_strategy="single", default_session_key="bad key!")
+
+    status, data = await proxy.call(method, path, body)
+
+    assert_session_refused(proxy, status, data, method, "bad key!")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", BAD_SESSION_KEYS)
+@pytest.mark.parametrize("path", sorted(server.TRANSFORMED_PATHS))
+async def test_an_unusable_session_header_refuses_a_transformed_body(
+    make_proxy: Callable[..., Proxy], key: str, path: str
+) -> None:
+    proxy = make_proxy(session_strategy="header")
+    body = message_with([{"type": "text", "text": f"Mail an {SECRET_MAIL}"}])
+
+    status, data = await proxy.call("POST", path, body, headers={"x-pgw-session": key})
+
+    assert_session_refused(proxy, status, data, "POST", key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["header", "metadata"])
+async def test_an_unusable_session_header_refuses_a_passthrough_body(
+    make_proxy: Callable[..., Proxy], strategy: str
+) -> None:
+    proxy = make_proxy(session_strategy=strategy, passthrough_paths=("/v1/files",))
+
+    status, data = await proxy.call(
+        "POST", "/v1/files", b"raw-bytes", headers={"x-pgw-session": "bad key!"}
+    )
+
+    assert_session_refused(proxy, status, data, "POST", "bad key!")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["header", "metadata", "single"])
+@pytest.mark.parametrize("headers", [None, {"x-pgw-session": "team-a"}, {"x-pgw-session": "  "}])
+async def test_a_usable_or_missing_session_key_keeps_the_path_scan(
+    make_proxy: Callable[..., Proxy], strategy: str, headers: dict[str, str] | None
+) -> None:
+    proxy = make_proxy(session_strategy=strategy)
+
+    blocked, data = await proxy.call("GET", f"/v1/files/{SECRET_MAIL}", headers=headers)
+    clean, _ = await proxy.call("GET", "/v1/models", headers=headers)
+
+    assert blocked == 400
+    assert error_type(data) == "invalid_request_error"
+    assert clean == 200
+    assert len(proxy.seen) == 1
+    assert SECRET_MAIL not in proxy.log_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", sorted(server.TRANSFORMED_PATHS))
+async def test_a_usable_session_header_still_transforms_a_body(
+    make_proxy: Callable[..., Proxy], path: str
+) -> None:
+    proxy = make_proxy(session_strategy="header")
+
+    status, _ = await proxy.call("POST", path, MESSAGE_BYTES, headers={"x-pgw-session": "team-a"})
+
+    assert status == 200
+    assert len(proxy.seen) == 1

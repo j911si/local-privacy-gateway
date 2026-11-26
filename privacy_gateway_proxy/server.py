@@ -145,7 +145,10 @@ async def _dispatch(
     if not _query_allowed(request.url.query):
         return _malformed(gateway, settings, trail, path, "query string is not allowed")
     if not (request.method == "POST" and path in TRANSFORMED_PATHS):
-        blocked = _path_findings(request, settings, gateway, sessions)
+        key = session_key_for(request.headers, None, settings)
+        if not is_valid_key(key):
+            return _session_refused(gateway, settings, trail, short_path(path))
+        blocked = _path_findings(request, gateway, sessions, key)
         if blocked:
             return _malformed(
                 gateway, settings, trail, short_path(path),
@@ -180,12 +183,9 @@ async def _dispatch(
 
 
 def _path_findings(
-    request: Request, settings: ProxySettings, gateway: Any, sessions: OrderedDict[str, Any]
+    request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str
 ) -> str:
     """Classes found in the decoded path segments by the read-only scan, comma-joined."""
-    key = session_key_for(request.headers, None, settings)
-    if not is_valid_key(key):
-        return ""
     leaves = [
         TextRef(("path", index), segment)
         for index, segment in enumerate(unquote(request.url.path).split("/"))
@@ -239,7 +239,7 @@ async def _transformed(
     path = request.url.path
     key = session_key_for(request.headers, body, settings)
     if not is_valid_key(key):
-        return _error("privacy_gateway_session", "session key has an unusable form", 400)
+        return _session_refused(gateway, settings, trail, path)
     session = _session_for(gateway, sessions, key)
     streaming = body.get("stream") is True
     include_system = settings.transform_system
@@ -518,6 +518,16 @@ def _malformed(
     _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
     _record(trail, "-", path, False, started, "blocked", "ok", [], None)
     return _error("invalid_request_error", message, 400)
+
+
+def _session_refused(
+    gateway: Any, settings: ProxySettings, trail: RequestAuditLog, path: str
+) -> Response:
+    """Refuse a request whose session key is unusable; the key itself is never logged."""
+    started = time.perf_counter()
+    _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
+    _record(trail, "-", path, False, started, "error", "ok", [], None)
+    return _error("privacy_gateway_session", "session key has an unusable form", 400)
 
 
 def _leak_response(exc: LeakageError) -> Response:
