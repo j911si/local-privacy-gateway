@@ -38,7 +38,7 @@ TOP_KEYS = [
     "v", "event", "ts", "request_id", "session", "path", "streaming", "duration_ms",
     "verdict", "coverage", "fields", "outgoing",
 ]
-FINDING_KEYS = {"cls", "start", "end", "token", "policy", "confidence", "stage", "hmac"}
+FINDING_KEYS = {"cls", "start", "end", "token", "policy", "confidence", "stage"}
 
 
 @pytest.fixture
@@ -113,6 +113,9 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     (entry,) = entries(audit_dir)
     assert list(entry) == TOP_KEYS
     assert entry["v"] == 2
+    assert all(
+        "hmac" not in finding for item in entry["fields"] for finding in item.get("findings", [])
+    )
     assert entry["event"] == "proxy_request"
     assert re.fullmatch(r"[0-9a-f-]{36}", entry["request_id"])
     assert entry["session"] == hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
@@ -134,11 +137,10 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     assert iban["token"] == "<IBAN_001>"
     assert iban["policy"] == "tokenize"
     assert iban["stage"] == "pattern"
-    assert re.fullmatch(r"[0-9a-f]{16}", iban["hmac"])
     secret = by_class["ANTHROPIC_API_KEY"]
     assert secret["policy"] == "redact"
     assert secret["token"] == "<ANTHROPIC_API_KEY_REDACTED>"
-    assert "hmac" not in secret
+    assert set(secret) == FINDING_KEYS
 
     metadata = field(entry, "metadata")
     assert metadata["status"] == "unchecked"

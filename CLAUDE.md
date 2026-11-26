@@ -73,10 +73,11 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   is kept back until the next delta or `content_block_stop`, so a token is never split.
 - Besides the old `PGW_AUDIT_LOG` events, `server.py` writes one `proxy_request` v2 line per
   `/v1/messages` request via `audit_trail.py` into `PGW_AUDIT_LOG_DIR` (`audit-YYYY-MM-DD.jsonl`,
-  UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings and a salted
-  `hmac`, unchecked fields with a read-only `observed` scan, `outgoing` sha256/bytes and a rescan
-  of the sent body (`GatewaySession.rescan`); a rescan hit in a checked field blocks the request.
-  `verdict: ok` only means the rules found nothing. Tests point `PGW_AUDIT_LOG_DIR` at `tmp_path`.
+  UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings (no value, no
+  value hash, no salt file), unchecked fields with a read-only `observed` scan, `outgoing`
+  sha256/bytes and a rescan of the sent body (`GatewaySession.rescan`); a rescan hit in a
+  checked field blocks the request. `verdict: ok` only means the rules found nothing. Tests
+  point `PGW_AUDIT_LOG_DIR` at `tmp_path`.
 - `GatewaySession` drops its result cache whenever the set of known values changes, and
   `pseudonymize_report_many` repeats the pass over a request's texts until no text adds a value.
   Inside one text `pseudonymize_report` repeats while the known values change (`MAX_PASSES`, 4),

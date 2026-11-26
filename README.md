@@ -890,11 +890,11 @@ proxy deletes files of that name pattern dated 180 or more days back; other file
 Each line lists every field of the request:
 
 - `status: checked` fields were pseudonymized. Each finding has class, offsets in the original
-  field text, token, policy, confidence, stage and `hmac`: the first 16 hex characters of
-  HMAC-SHA256 over the value with a per-installation salt (`audit.salt` next to the directory,
-  32 random bytes, mode `0600`). The same value gives the same `hmac` in one installation, so
-  repeats can be counted without storing the value. Secret classes (policy `redact`), `PIN` and
-  `PASSWORD` get no `hmac`.
+  field text, token, policy, confidence and stage. No value and no hash of a value is stored:
+  a hash of a short value (CVV, date of birth, phone number, name) can be reversed by trying
+  every candidate. Older versions wrote a per-value `hmac` with a salt file `audit.salt` next to
+  the directory; the proxy no longer creates or reads that file, so after an update it is unused
+  and can be deleted by hand. Lines with `hmac` from older versions stay valid `"v": 2` lines.
 - `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
   `image`, `signature`, `system`, `other`). `observed` lists classes and counts from a read-only
   scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
@@ -1098,7 +1098,8 @@ Supporting properties:
   pseudonymized text is re-scanned and searched for every stored value; any hit raises
   `LeakageError` and purges the session.
 - **Never logged.** Findings, detection reports, audit events and exception messages carry class
-  names, spans and counts — never values. The audit log records counts, not content.
+  names, spans and counts — never values. The audit log records classes, offsets, lengths and
+  counts, not content.
 - **No network in the core.** `privacy_gateway` imports no networking module; a test enforces this
   statically. All network code lives in `privacy_gateway_proxy`, which the core never imports.
 - **Per-session tokens.** Two separate documents produce no cross-linkable tokens.

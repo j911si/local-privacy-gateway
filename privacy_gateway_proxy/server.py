@@ -563,7 +563,6 @@ def _record(
     upstream_status: int | None = None,
 ) -> None:
     fields = audit_trail.entry(
-        trail,
         session_key=session_key,
         path=path,
         streaming=streaming,

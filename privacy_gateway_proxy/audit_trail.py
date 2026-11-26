@@ -9,7 +9,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from privacy_gateway.audit import NO_HMAC_CLASSES, RequestAuditLog
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.transform import (
     KEY_SUFFIX_RE,
@@ -23,7 +22,6 @@ from privacy_gateway_proxy.transform import (
 )
 
 SESSION_HASH_CHARS = 12
-REDACT_POLICY = "redact"
 BASE64_TYPE = "base64"
 TIMEOUT = "timeout"
 OK = "ok"
@@ -113,7 +111,6 @@ def unchecked_refs(transform: Any, body: dict, include_system: bool) -> list[Unc
 
 
 def entry(
-    log: RequestAuditLog,
     *,
     session_key: str,
     path: str,
@@ -143,7 +140,7 @@ def entry(
             "path": format_path(ref.path),
             "status": "checked",
             "chars": len(ref.text),
-            "findings": [_finding(log, ref.text, found) for found in field_findings],
+            "findings": [_finding(found) for found in field_findings],
         }
         if index == failed_index and failed_leaks:
             item["leaks"] = [
@@ -249,15 +246,13 @@ def _scanned_text(leaf: TextRef) -> str:
     return match.group("base")
 
 
-def _finding(log: RequestAuditLog, text: str, item: FieldFinding) -> dict[str, object]:
+def _finding(item: FieldFinding) -> dict[str, object]:
     record: dict[str, object] = {"cls": item.data_class, "start": item.start, "end": item.end}
     if item.token is not None:
         record["token"] = item.token
     record["policy"] = item.policy
     record["confidence"] = round(item.confidence, 4)
     record["stage"] = item.stage
-    if item.policy != REDACT_POLICY and item.data_class not in NO_HMAC_CLASSES:
-        record["hmac"] = log.value_hmac(text[item.start : item.end])
     return record
 
 
