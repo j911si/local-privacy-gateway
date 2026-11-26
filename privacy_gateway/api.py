@@ -22,8 +22,10 @@ from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
 from privacy_gateway.leakage import (
     MIN_LENGTH_FOR_FUZZY_SEARCH,
+    REDACTED_SUFFIX,
     check_leakage,
     exempt_from_residual,
+    issued_token_spans,
     numbered_tokens,
     redacted_token,
 )
@@ -41,7 +43,6 @@ from privacy_gateway.model import (
 )
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
 from privacy_gateway.restore import restore_text
-from privacy_gateway.tokens import ANY_TOKEN
 from privacy_gateway.vault import Vault
 
 PSEUDONYMIZE_STAGE = "pseudonymize"
@@ -51,7 +52,6 @@ RESCAN_CACHE_SIZE = 1024
 AUDIT_ID_BYTES = 6
 AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
-REDACTED_SUFFIX = "_REDACTED>"
 REDACTED_TRIM = " \t\r\n\"'`,;"
 
 
@@ -281,11 +281,7 @@ class GatewaySession:
             self._rescans.move_to_end(digest)
             return list(cached)
         registry = self._gateway.config.registry
-        tokens = [
-            Span(match.start(), match.end())
-            for match in ANY_TOKEN.finditer(text)
-            if match.group(0) in self._entries or match.group(0).endswith(REDACTED_SUFFIX)
-        ]
+        tokens = issued_token_spans(text, self._entries)
         leaks: list[Leak] = []
         for finding in self._gateway._pipeline.run(text, self._known()).findings:
             if _ignored(registry, finding.data_class):

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from privacy_gateway.classes import PERSON_LABEL, ClassRegistry, Policy
 from privacy_gateway.config import Config
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE
 from privacy_gateway.model import DetectionReport, Finding, Span
-from privacy_gateway.tokens import NUMBERED_TOKEN
 
 GENDER_SUFFIXES = ("female", "male")
 REUSED_ATTRIBUTE = "reused"
 
+TOKEN_NAME = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<label>[A-Z][A-Z0-9_]*?)_(?P<number>\d{3,})(?![A-Za-z0-9_])"
+)
 _GENDER_LABELS = tuple(f"{PERSON_LABEL}_{suffix.upper()}" for suffix in GENDER_SUFFIXES)
 
 
@@ -45,9 +48,13 @@ def _attributes_for(finding: Finding, report: DetectionReport) -> dict[str, str]
 
 
 def _reserved_numbers(text: str) -> dict[str, set[int]]:
-    """Token numbers the text already carries as literals, keyed by counter base."""
+    """Token numbers the text already carries, with or without brackets, keyed by counter base.
+
+    A value spelled like a token name (`HOSTNAME_001`) must not get that token, or the value
+    stays visible inside it.
+    """
     reserved: dict[str, set[int]] = {}
-    for match in NUMBERED_TOKEN.finditer(text):
+    for match in TOKEN_NAME.finditer(text):
         label = match.group("label")
         base = PERSON_LABEL if label in _GENDER_LABELS else label
         reserved.setdefault(base, set()).add(int(match.group("number")))

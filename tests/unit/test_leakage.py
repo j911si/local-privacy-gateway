@@ -326,6 +326,24 @@ def test_a_known_value_that_equals_a_token_name_is_no_leak_inside_that_token(
         check_leakage("Host HOST_001 steht offen.", entries, _empty_scan, registry)
 
 
+@pytest.mark.parametrize("literal", ["<HOST_001>", "<X_HOST_001_001>"])
+def test_a_known_value_inside_a_token_shaped_literal_is_a_leak(
+    default_config: Config, literal: str
+) -> None:
+    entries = {"<HOSTNAME_001>": _entry("HOST_001", "HOSTNAME")}
+    text = f"Host {literal} steht offen."
+
+    with pytest.raises(LeakageError):
+        check_leakage(text, entries, _empty_scan, default_config.registry, frozenset([literal]))
+
+
+def test_a_known_value_inside_a_redaction_marker_is_no_leak(default_config: Config) -> None:
+    entries = {"<PERSON_001>": _entry("PASSWORD", "PERSON_LAST_NAME")}
+
+    text = "Kennwort <PASSWORD_REDACTED> gesetzt."
+    assert check_leakage(text, entries, _empty_scan, default_config.registry) is None
+
+
 @pytest.mark.parametrize(
     "text",
     ["id <ACCOUNT_ID_001>Li, <ACCOUNT_ID_001>", "id Li<ACCOUNT_ID_001>", "id <ACCOUNT_ID_001> Li"],

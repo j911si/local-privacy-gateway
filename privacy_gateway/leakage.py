@@ -10,6 +10,7 @@ from privacy_gateway.model import DetectionReport, Finding, Leak, LeakageError, 
 from privacy_gateway.tokens import ANY_TOKEN, NUMBERED_TOKEN
 
 MIN_LENGTH_FOR_FUZZY_SEARCH = 4
+REDACTED_SUFFIX = "_REDACTED>"
 
 
 def glued_to_token(finding: Finding, tokens: list[Span]) -> bool:
@@ -59,7 +60,16 @@ def exempt_from_residual(finding: Finding, tokens: list[Span], text: str) -> boo
 
 def redacted_token(data_class: str) -> str:
     """The marker that replaces a value of a redacted class."""
-    return f"<{data_class}_REDACTED>"
+    return f"<{data_class}{REDACTED_SUFFIX}"
+
+
+def issued_token_spans(text: str, entries: Mapping[str, VaultEntry]) -> list[Span]:
+    """Spans of the tokens a session issued and of redaction markers, not of other look-alikes."""
+    return [
+        Span(match.start(), match.end())
+        for match in ANY_TOKEN.finditer(text)
+        if match.group(0) in entries or match.group(0).endswith(REDACTED_SUFFIX)
+    ]
 
 
 def numbered_tokens(text: str) -> frozenset[str]:
@@ -101,7 +111,7 @@ def check_leakage(
     values that were redacted (held in memory only) to their class; a copy left is a leak.
     """
     leaks: list[Leak] = []
-    token_spans = [Span(match.start(), match.end()) for match in ANY_TOKEN.finditer(text)]
+    token_spans = issued_token_spans(text, entries)
 
     report = scan(text)
     for finding in report.findings:
