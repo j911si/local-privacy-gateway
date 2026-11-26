@@ -38,8 +38,11 @@ HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
 DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
 K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
-K8S_DATA_RE = re.compile(r"^([ \t]*)data:[ \t]*$", re.MULTILINE)
-K8S_ENTRY_RE = re.compile(r"^([ \t]+)[\w.\-]+:[ \t]*(\S+)[ \t]*$")
+K8S_DATA_RE = re.compile(r"^([ \t]*)(?:data|stringData):[ \t]*$", re.MULTILINE)
+K8S_ENTRY_RE = re.compile(
+    r"^([ \t]+)[\w.\-]+:[ \t]*"
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>][-+]?\d?)|(\S(?:.*\S)?))?[ \t]*$"
+)
 
 INTERNAL_SUFFIXES = (".local", ".internal", ".corp", ".lan")
 SIGNATURE_KEYS = frozenset({"sig", "signature", "x-amz-signature", "x-goog-signature"})
@@ -371,19 +374,27 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
             continue
         for data_match in K8S_DATA_RE.finditer(block):
             indent = len(data_match.group(1))
+            scalar_indent: int | None = None
             position = data_match.end() + 1
             while position < len(block):
                 newline = block.find("\n", position)
                 line_end = len(block) if newline == -1 else newline
                 line = block[position:line_end]
-                if line.strip():
+                stripped = line.strip()
+                lead = len(line) - len(line.lstrip(" \t"))
+                if stripped and scalar_indent is not None and lead > scalar_indent:
+                    start = doc_start + position + lead
+                    findings.append(_finding(start, start + len(stripped), "KUBERNETES_SECRET"))
+                elif stripped:
                     entry = K8S_ENTRY_RE.match(line)
                     if entry is None or len(entry.group(1)) <= indent:
                         break
-                    start = doc_start + position + entry.start(2)
-                    findings.append(
-                        _finding(start, start + len(entry.group(2)), "KUBERNETES_SECRET")
-                    )
+                    scalar_indent = len(entry.group(1)) if entry.group(4) else None
+                    group = next((g for g in (2, 3, 5) if entry.group(g)), None)
+                    if group is not None:
+                        start = doc_start + position + entry.start(group)
+                        end = doc_start + position + entry.end(group)
+                        findings.append(_finding(start, end, "KUBERNETES_SECRET"))
                 position = line_end + 1
     return findings
 
