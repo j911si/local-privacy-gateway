@@ -1374,8 +1374,8 @@ Supporting properties:
   break restoration in a stream.
 - **One vault per process.** The proxy serves exactly one vault and one configuration. The auth
   token is one shared secret, not a per-user login.
-- **No TLS.** The listener speaks plain HTTP. On a private network such as Tailscale or WireGuard
-  the network encrypts the hop; on any other network token, prompts and answers are readable on
+- **No TLS.** The listener speaks plain HTTP. Over a VPN such as Tailscale or WireGuard the VPN
+  encrypts the hop; on a plain LAN or any other network, token, prompts and answers are readable on
   the way. TLS on the listener is planned for a later version.
 - **No client identity.** A session is chosen by what the client sends (`metadata.user_id` or
   `X-PGW-Session`). Whoever reaches the port, holds the token and knows a session key gets that
