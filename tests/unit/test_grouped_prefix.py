@@ -25,6 +25,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway]:
         ("card 4111 1111 1111 1111 123", "4111 1111 1111 1111", " 123"),
         ("Karte 4111 1111 1111 1111 12/27", "4111 1111 1111 1111", " 12/27"),
         ("Karte 4111-1111-1111-1111-123", "4111-1111-1111-1111", "-123"),
+        ("Karte 4111 1111 1111 1111 1", "4111 1111 1111 1111", " 1"),
     ],
 )
 def test_valid_prefix_is_replaced(gateway: Gateway, text: str, secret: str, rest: str) -> None:
@@ -34,7 +35,12 @@ def test_valid_prefix_is_replaced(gateway: Gateway, text: str, secret: str, rest
 
 
 @pytest.mark.parametrize(
-    "text", ["Bestellnummer 1234 5678 9012 3456 7", "IBAN DE00 1234 5678 9012 3456 78 X"]
+    "text",
+    [
+        "Bestellnummer 1234 5678 9012 3456 7",
+        "IBAN DE00 1234 5678 9012 3456 78 X",
+        "Bestellnummer 4111 1111 1111 1111 1",
+    ],
 )
 def test_invalid_numbers_stay(gateway: Gateway, text: str) -> None:
     assert gateway.session().pseudonymize(text) == text

@@ -37,3 +37,10 @@ def test_characters_ignorecase_pairs_fold_equal(plane: range) -> None:
 
 def test_distinct_cjk_words_get_distinct_keys() -> None:
     assert _coarse_fold("森林木") != _coarse_fold("山川口")
+
+
+def test_fold_table_stays_bounded() -> None:
+    from privacy_gateway.detect import session
+
+    _coarse_fold("".join(chr(code) for code in range(0x4E00, 0x4E00 + 3 * session.MAX_FOLD_ENTRIES)))
+    assert len(session._FOLD) <= session.MAX_FOLD_ENTRIES + 128

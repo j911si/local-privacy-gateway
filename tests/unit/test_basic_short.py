@@ -16,7 +16,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway]:
         yield instance
 
 
-@pytest.mark.parametrize("value", ["dTpwdw==", "dTpw", "YTpiYw=="])
+@pytest.mark.parametrize("value", ["dTpwdw==", "dTpw", "YTpiYw==", "dTo="])
 def test_short_basic_is_redacted(gateway: Gateway, value: str) -> None:
     out = gateway.session().pseudonymize(f"curl -H 'Authorization: Basic {value}' x")
     assert value not in out

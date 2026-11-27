@@ -641,8 +641,5 @@ def _token_shaped(text: str, span: Span, config: Config) -> bool:
 
 
 def _token_labels(config: Config) -> frozenset[str]:
-    """Every label an issued token can carry: class names and their token labels."""
-    return frozenset(
-        name for data_class in config.registry
-        for name in (data_class.name, config.registry.label_for(data_class.name))
-    )
+    """Every label an issued numbered token can carry (`PERSON`, `IBAN`, `HOSTNAME`, ...)."""
+    return frozenset(config.registry.label_for(data_class.name) for data_class in config.registry)

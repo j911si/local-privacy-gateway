@@ -44,6 +44,20 @@ def test_a_known_address_is_still_found(default_config: Config) -> None:
     ]
 
 
+@pytest.mark.parametrize("text", ["12 Positionen; 1212 1212", "9912 1212 1212"])
+def test_regrouped_number_next_to_other_digits_is_found(gateway: Gateway, text: str) -> None:
+    session = gateway.session()
+    session.pseudonymize("Kundennummer: 12121212")
+    assert "1212 1212" not in session.pseudonymize(text)
+
+
+def test_a_long_digit_run_stays_linear(default_config: Config) -> None:
+    from test_regex_linearity import assert_linear
+
+    matcher = KnownMatcher({"111111": ("CUSTOMER_ID", "<X_001>")}, default_config.registry)
+    assert_linear(matcher.find, lambda n: "1" * n, n=20_000)
+
+
 def test_regrouped_number_after_another_number_is_found(gateway: Gateway) -> None:
     session = gateway.session()
     session.pseudonymize("Kundennummer: 12121212")

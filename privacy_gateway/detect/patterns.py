@@ -41,6 +41,8 @@ PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
 GROUPED_CLASSES = frozenset({"IBAN", "CREDIT_CARD", "DEBIT_CARD"})
 GROUP_SEPARATORS = " -"
 # Printed card formats a prefix must have: 4-4-4-4 (plus a short group), Amex 4-6-5, ungrouped.
+CVC_RE = re.compile(r"\d{3,4}")
+EXPIRY_MONTH_RE = re.compile(r"0[1-9]|1[0-2]")
 CARD_FORMAT_RE = re.compile(r"\d{4}(?:[ -]\d{4}){2}[ -]\d{1,4}|\d{4}[ -]\d{6}[ -]\d{5}|\d{13,19}")
 DIFF_HEADER_RE = re.compile(
     r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
@@ -200,6 +202,10 @@ class PatternStage:
             )
             if not prefix:
                 return []
+            if data_class.name != "IBAN" and not _card_tail(
+                text, span, len(prefix), _has_context(text, match.start(), data_class.context_words)
+            ):
+                return []
             span = Span(span.start, span.start + len(prefix))
             value = prefix
         if (
@@ -253,3 +259,11 @@ def _valid_prefix(value: str, validator: Callable[[str], bool], class_name: str)
         card_shaped = class_name == "IBAN" or CARD_FORMAT_RE.fullmatch(prefix) is not None
         if prefix and card_shaped and validator(prefix):
             return prefix
+
+
+def _card_tail(text: str, span: Span, prefix: int, has_context: bool) -> bool:
+    """True when what follows a card prefix reads as a CVC or expiry, or a card word is near."""
+    tail = text[span.start + prefix : span.end].strip(GROUP_SEPARATORS)
+    if has_context or CVC_RE.fullmatch(tail):
+        return True
+    return EXPIRY_MONTH_RE.fullmatch(tail) is not None and text[span.end : span.end + 1] == "/"

@@ -222,6 +222,7 @@ def _extra_cases() -> frozenset[int]:
 
 
 _EXTRA = _extra_cases()
+MAX_FOLD_ENTRIES = 4096
 
 
 class _FoldTable(dict[int, int]):
@@ -234,7 +235,9 @@ class _FoldTable(dict[int, int]):
         else:
             unsafe = code > 0x7F or lower in "iks"
         folded = ord("?") if unsafe else ord(lower)
-        self[code] = folded
+        if code <= 0x7F or len(self) < MAX_FOLD_ENTRIES:
+            # ponytail: a text with every code point must not grow the table without bound.
+            self[code] = folded
         return folded
 
 
@@ -406,34 +409,47 @@ class KnownMatcher:
         return frozenset(whole - numbers - split), frozenset(numbers - split)
 
     def _digit_hits(self, text: str, index: _Digits) -> list[Hit]:
-        """Known numbers that differ from the text only in grouping."""
+        """Known numbers that differ from the text only in grouping.
+
+        Every check runs before the leftmost non-overlapping starts are taken, so a start that
+        fails one (a letter inside, a digit right before) cannot hide a valid one it overlaps.
+        """
         offsets = index.offsets
         result: list[Hit] = []
         for digits, value in self._by_digits.items():
-            starts = index.occurrences(digits)
-            if not index.compact(digits):
-                starts = [
-                    start
-                    for start in starts
-                    if compact_digit_run(text, offsets[start], offsets[start + len(digits) - 1] + 1)
-                ]
-            for occurrence in _non_overlapping(starts, len(digits)):
-                first, last = offsets[occurrence], offsets[occurrence + len(digits) - 1] + 1
-                lead = first
-                while lead and text[lead - 1].isdigit():
-                    lead -= 1
-                international = digits in self._signed_digits and text[lead:first] == "00"
-                if lead < first and not international:
+            size = len(digits)
+            accepted: list[tuple[int, Span]] = []
+            for start in index.occurrences(digits):
+                first, last = offsets[start], offsets[start + size - 1] + 1
+                if not index.compact(digits) and not compact_digit_run(text, first, last):
                     continue
-                span = _value_span(text, first, last, len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH)
-                if span is None:
-                    continue
-                if international:
-                    span = Span(lead, span.end)
-                if digits in self._signed_digits and text[span.start - 1 : span.start] == "+":
-                    span = Span(span.start - 1, span.end)
-                result.append((span, value))
+                span = self._number_span(text, digits, first, last)
+                if span is not None:
+                    accepted.append((start, span))
+            spans = dict(accepted)
+            for start in _non_overlapping([start for start, _ in accepted], size):
+                result.append((spans[start], value))
         return result
+
+    def _number_span(self, text: str, digits: str, first: int, last: int) -> Span | None:
+        """The span of a known number at `first`..`last`, or None when it is part of another."""
+        international = False
+        if first and text[first - 1].isdigit():
+            international = (
+                digits in self._signed_digits
+                and text[first - 2 : first] == "00"
+                and not (first > 2 and text[first - 3].isdigit())
+            )
+            if not international:
+                return None
+        span = _value_span(text, first, last, len(digits) >= MIN_DIGITS_FOR_DIGIT_SEARCH)
+        if span is None:
+            return None
+        if international:
+            span = Span(first - 2, span.end)
+        if digits in self._signed_digits and text[span.start - 1 : span.start] == "+":
+            span = Span(span.start - 1, span.end)
+        return span
 
 
 def _non_overlapping(starts: list[int], length: int) -> list[int]:

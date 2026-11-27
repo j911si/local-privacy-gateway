@@ -123,15 +123,14 @@ class OldMatcher(KnownMatcher):
         projection = "".join(text[index] for index in offsets)
         result: list[session.Hit] = []
         for digits, value in self._by_digits.items():
-            # Compact runs first, then the leftmost non-overlapping ones: an earlier run with a
-            # letter inside must not hide a valid one that overlaps it (K candidate 02#3).
+            # Every check first, then the leftmost non-overlapping ones: a start that fails a
+            # check must not hide a valid one that overlaps it (K candidate 02#3).
             starts = [m.start() for m in re.finditer(f"(?={re.escape(digits)})", projection)]
             end = 0
             for start in starts:
                 first, last = offsets[start], offsets[start + len(digits) - 1] + 1
                 if start < end or not compact_digit_run(text, first, last):
                     continue
-                end = start + len(digits)
                 lead = first
                 while lead and text[lead - 1].isdigit():
                     lead -= 1
@@ -147,6 +146,7 @@ class OldMatcher(KnownMatcher):
                     span = Span(lead, span.end)
                 if digits in self._signed_digits and text[span.start - 1 : span.start] == "+":
                     span = Span(span.start - 1, span.end)
+                end = start + len(digits)
                 result.append((span, value))
         return result
 

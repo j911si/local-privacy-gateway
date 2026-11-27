@@ -44,9 +44,9 @@ HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILIN
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
 INLINE_BASIC_RE = re.compile(
     r"(?i)(?<![\w-])(?:proxy-)?authorization:[ \t]*basic[ \t]+"
-    r"([A-Za-z0-9+/]{4,}={0,2})(?![\w+/=-])"
+    r"([A-Za-z0-9+/]{2,}={0,2})(?![\w+/=-])"
 )
-DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+DOC_SEP_RE = re.compile(r"^---[ \t]*\r?$", re.MULTILINE)
 K8S_SECRET_RE = re.compile(
     r"^[\"']?kind[\"']?:[ \t]*[\"']?Secret[\"']?[ \t]*(?:#.*)?\r?$", re.MULTILINE
 )
@@ -455,7 +455,11 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
         block = text[doc_start:doc_end]
         if K8S_SECRET_RE.search(block) is None:
             continue
+        scanned = 0
         for data_match in K8S_DATA_RE.finditer(block):
+            if data_match.start() < scanned:
+                # ponytail: a nested `data:` line was read as part of the section above.
+                continue
             indent = len(data_match.group(1))
             scalar_indent: int | None = None
             position = data_match.end() + 1
@@ -468,6 +472,8 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
                 if stripped and scalar_indent is not None and lead > scalar_indent:
                     start = doc_start + position + lead
                     findings.append(_finding(start, start + len(stripped), "KUBERNETES_SECRET"))
+                elif stripped.startswith("#"):
+                    pass
                 elif stripped:
                     entry = K8S_ENTRY_RE.match(line)
                     if entry is None or len(entry.group(1)) <= indent:
@@ -479,6 +485,7 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
                         end = doc_start + position + entry.end(group)
                         findings.append(_finding(start, end, "KUBERNETES_SECRET"))
                 position = line_end + 1
+            scanned = max(scanned, position)
     return findings
 
 

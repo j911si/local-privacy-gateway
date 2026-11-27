@@ -37,6 +37,31 @@ def test_secret_value_is_redacted(gateway: Gateway, manifest: str) -> None:
     assert SECRET not in out
 
 
+def test_comment_line_inside_string_data_keeps_scanning(gateway: Gateway) -> None:
+    manifest = f"kind: Secret # Demo\nstringData:\n  a: {SECRET}\n  # zweiter\n  b: bN4rX7qLp5tZ\n"
+    out = gateway.session().pseudonymize(manifest)
+    assert SECRET not in out
+    assert "bN4rX7qLp5tZ" not in out
+
+
+def test_crlf_document_separator_ends_the_secret(gateway: Gateway) -> None:
+    manifest = (
+        f"kind: Secret\r\nstringData:\r\n  key: {SECRET}\r\n---\r\n"
+        "kind: ConfigMap\r\ndata:\r\n  mode: fast\r\n"
+    )
+    out = gateway.session().pseudonymize(manifest)
+    assert SECRET not in out
+    assert "mode: fast" in out
+
+
+def test_nested_data_lines_scan_in_linear_time() -> None:
+    def manifest(n: int) -> str:
+        lines = ['"kind": "Secret"'] + [" " * depth + '"data":' for depth in range(n // 40)]
+        return "\n".join([*lines, " " * (n // 40) + "  key: demo"]) + "\n"
+
+    assert_linear(lambda text: structured._parse_kubernetes_secrets(text, None), manifest, n=8000)
+
+
 def test_config_map_stays_untouched(gateway: Gateway) -> None:
     manifest = "kind: ConfigMap # demo\r\ndata:\r\n  mode: fast\r\n"
     assert gateway.session().pseudonymize(manifest) == manifest
