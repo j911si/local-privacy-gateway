@@ -20,7 +20,7 @@ from privacy_gateway.detect.runs import (
     line_keyword_finditer,
     pass_pw_finditer,
 )
-from privacy_gateway.detect.validators import VALIDATORS, ip_scope
+from privacy_gateway.detect.validators import IBAN_LENGTHS, VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
 from privacy_gateway.tokens import NUMBERED_TOKEN
 
@@ -249,16 +249,32 @@ class PatternStage:
 
 
 def _valid_prefix(value: str, validator: Callable[[str], bool], class_name: str) -> str:
-    """The longest prefix that ends before a group separator and passes the check, or ""."""
+    """The longest prefix that ends before a group separator and passes the check, or "".
+
+    An IBAN glued to a word (`...3000USD`) has no separator to cut at; it is cut at the length
+    of its country instead.
+    """
     cut = len(value)
     while True:
         cut = max((value.rfind(separator, 0, cut) for separator in GROUP_SEPARATORS), default=-1)
         if cut <= 0:
-            return ""
+            return _iban_of_country_length(value, validator) if class_name == "IBAN" else ""
         prefix = value[:cut].rstrip(GROUP_SEPARATORS)
         card_shaped = class_name == "IBAN" or CARD_FORMAT_RE.fullmatch(prefix) is not None
         if prefix and card_shaped and validator(prefix):
             return prefix
+
+
+def _iban_of_country_length(value: str, validator: Callable[[str], bool]) -> str:
+    expected = IBAN_LENGTHS.get(value[:2].upper())
+    count = 0
+    for index, char in enumerate(value):
+        if char not in GROUP_SEPARATORS:
+            count += 1
+        if count == expected:
+            prefix = value[: index + 1]
+            return prefix if validator(prefix) else ""
+    return ""
 
 
 def _card_tail(text: str, span: Span, prefix: int, has_context: bool) -> bool:

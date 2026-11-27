@@ -10,14 +10,16 @@ from privacy_gateway.model import Span
 # Clusters longer than this skip NFC: canonical ordering is quadratic in the cluster length, and
 # no letter of any script needs more combining marks than this.
 MAX_CLUSTER = 32
+# Default-ignorable characters outside "Cf": the combining grapheme joiner and the variation
+# selectors. Python reports them as combining class 0, so they would otherwise split a cluster.
+IGNORABLE = frozenset({"\u034f", *(chr(code) for code in range(0xFE00, 0xFE10))})
 # Fullwidth ASCII (U+FF01..U+FF5E) folds one to one onto ASCII, so the offset map stays exact.
 FULLWIDTH_OFFSET = 0xFF01 - 0x21
 ASCII_RUN_RE = re.compile(r"[\x00-\x7f]+")
 
 
 def _ignorable(char: str) -> bool:
-    # ponytail: only "Cf"; dropping variation selectors or U+034F joined `...000\ufe0fUSD`.
-    return unicodedata.category(char) == "Cf"
+    return char in IGNORABLE or unicodedata.category(char) == "Cf"
 
 
 def _fold(char: str) -> str:

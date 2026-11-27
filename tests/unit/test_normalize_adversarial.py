@@ -1,4 +1,4 @@
-"""Normalization folds fullwidth ASCII, skips ignorables inside clusters and stays linear."""
+"""Normalization folds fullwidth ASCII, drops ignorables and stays linear; glued IBANs are cut."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway]:
     [
         (f"IBAN {FULLWIDTH_IBAN}", FULLWIDTH_IBAN),
         ("IBAN ＧＢ82ＷＥＳＴ12345698765432", "ＧＢ82ＷＥＳＴ12345698765432"),
+        ("IBAN GB82WE\u034fST12345698765432", "GB82WE\u034fST12345698765432"),
+        ("IBAN GB82WE\ufe0fST12345698765432", "GB82WE\ufe0fST12345698765432"),
         ("Herr Mu\u200b̈ller kommt", "Mu\u200b̈ller"),
     ],
 )
@@ -106,3 +108,36 @@ def test_ascii_fast_path_builds_the_same_map() -> None:
         text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
         mapping = OffsetMap(text)
         assert (mapping.text, mapping.starts, mapping.ends) == _reference(text), repr(text)
+
+
+GLUED = [
+    f"IBAN {IBAN}USD",
+    f"IBAN {IBAN}\u200bUSD",
+    "IBAN DE89 3704 0044 0532 0130 00\u200bUSD",
+    "IBAN DE89 3704 0044 0532 0130 00USD",
+]
+
+
+@pytest.mark.parametrize("text", GLUED)
+def test_iban_glued_to_a_word_is_replaced(gateway: Gateway, text: str) -> None:
+    out = gateway.session().pseudonymize(text)
+    assert "<IBAN_" in out
+    assert "0532" not in out
+
+
+@pytest.mark.parametrize("joiner", ["\ufe0e", "\ufe0f", "\u034f"])
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ("+49 151 2345{j}6789", "2345"),
+        ("DE89 3704 0044{j} 0532 0130 00", "0532"),
+        ("4111 1111{j} 1111 1111", "1111 1111"),
+        ("sk-ant-api03-Q7m3Np5Lr9Tx2Vb4{j}Kd8Hf6Jw1Zc0Xe3Ga5Yu7Io", "Q7m3Np5"),
+        ("erika{j}.beispiel@firma-test.de", "erika"),
+    ],
+)
+def test_joiner_inside_a_value_does_not_hide_it(
+    gateway: Gateway, joiner: str, value: str, kept: str
+) -> None:
+    out = gateway.session().pseudonymize(f"Wert: {value.format(j=joiner)} Ende")
+    assert kept not in out
