@@ -16,7 +16,9 @@ from privacy_gateway.config import Config
 from privacy_gateway.detect import context, patterns, structured
 
 HARD_TIMEOUT_S = 60
-MAX_FACTOR = 3.0
+# 4n against n: linear costs 4, quadratic 16; 8 is their geometric middle.
+GROWTH = 4
+MAX_FACTOR = 8.0
 MAX_SECONDS = 1.0
 NOISE_FLOOR_S = 0.02
 N = 100_000
@@ -89,21 +91,31 @@ def best_of_three(scan: Callable[[], object]) -> float:
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
-    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n, 16n.
+    """4n costs under MAX_FACTOR times n, for the first two measurable pairs of n, 4n, 16n.
 
-    The growth is checked once the large run is measurable; a scan that stays under the floor
-    even at 32n characters is accepted as fast.
+    A pair whose larger run stays under the noise floor is retried with the next size; a scan
+    under the floor even at 64n characters is accepted as fast. After the first measurable pair
+    the next larger pair is measured too, so a quadratic part that dominates only at larger
+    input cannot hide behind a favourable first pair; it is skipped only when it would exceed
+    MAX_SECONDS even for a linear scan.
     """
+    ratios: list[float] = []
+    last_large = 0.0
     for size in (n, 4 * n, 16 * n):
-        small_text, large_text = payload(size), payload(2 * size)
+        if ratios and last_large * GROWTH >= MAX_SECONDS:
+            break
+        small_text, large_text = payload(size), payload(GROWTH * size)
         large, ratio = paired_best(
             lambda small_text=small_text: scan(small_text),
             lambda large_text=large_text: scan(large_text),
         )
-        assert large < MAX_SECONDS, f"{large:.3f}s for {2 * size} characters"
+        assert large < MAX_SECONDS, f"{large:.3f}s for {GROWTH * size} characters"
         if large >= NOISE_FLOOR_S:
+            ratios.append(ratio)
+            last_large = large
+        if len(ratios) == 2:
             break
-    assert large < NOISE_FLOOR_S or ratio < MAX_FACTOR, f"factor {ratio:.2f}"
+    assert all(ratio < MAX_FACTOR for ratio in ratios), f"factors {ratios}"
 
 
 def finditer(pattern: re.Pattern[str]) -> Callable[[str], object]:
