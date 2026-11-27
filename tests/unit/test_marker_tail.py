@@ -103,9 +103,9 @@ def hard_timeout() -> Iterator[None]:
 def best_of_three(scan: Callable[[], object]) -> float:
     timings = []
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         scan()
-        timings.append(time.perf_counter() - started)
+        timings.append(time.process_time() - started)
     return min(timings)
 
 

@@ -153,10 +153,10 @@ def _timed(body: dict[str, Any]) -> float:
     gc.disable()
     try:
         for _ in range(3):
-            started = time.perf_counter()
+            started = time.process_time()
             audit_trail.scannable_strings(body)
             transform.collect_unchecked(body)
-            best = min(best, time.perf_counter() - started)
+            best = min(best, time.process_time() - started)
     finally:
         gc.enable()
     return best

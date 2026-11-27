@@ -353,10 +353,10 @@ def _many_tokens(n: int) -> tuple[str, dict[str, VaultEntry], DetectionReport]:
 
 def _check_time(n: int, registry: ClassRegistry) -> float:
     text, entries, report = _many_tokens(n)
-    started = time.perf_counter()
+    started = time.process_time()
     with pytest.raises(LeakageError) as caught:
         check_leakage(text, entries, lambda _: report, registry)
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     assert len(caught.value.leaks) == 2 * n
     return elapsed
 

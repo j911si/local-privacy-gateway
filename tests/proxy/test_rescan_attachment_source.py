@@ -132,9 +132,9 @@ def _timed(data: str) -> float:
     image = _image({"type": "base64", "media_type": "image/png", "data": data})
     best = float("inf")
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         assert not audit_trail._attachment_source(image, ("messages", 0, "content", 0))
-        best = min(best, time.perf_counter() - started)
+        best = min(best, time.process_time() - started)
     return best
 
 

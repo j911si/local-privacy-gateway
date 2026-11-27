@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import random
 import re
 import signal
@@ -37,21 +38,49 @@ def _hard_timeout() -> Iterator[None]:
         signal.signal(signal.SIGALRM, previous)
 
 
+def _cpu(scan: Callable[[], object]) -> float:
+    started = time.process_time()
+    scan()
+    return time.process_time() - started
+
+
+def paired_best(small: Callable[[], object], large: Callable[[], object]) -> tuple[float, float]:
+    """Best CPU time of five interleaved runs each, with the cyclic GC paused.
+
+    CPU time of this process instead of wall time, so load from other processes and scheduling
+    delays do not count. The small and the large run alternate, so a phase of lower clock speed
+    or a shared core hits both and not only one side of the ratio. The GC is paused because its
+    pauses depend on the heap left by earlier tests, not on the input.
+    """
+    smalls, larges = [], []
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(5):
+            smalls.append(_cpu(small))
+            larges.append(_cpu(large))
+    finally:
+        if enabled:
+            gc.enable()
+    return min(smalls), min(larges)
+
+
 def best_of_three(scan: Callable[[], object]) -> float:
-    timings = []
-    for _ in range(3):
-        started = time.perf_counter()
-        scan()
-        timings.append(time.perf_counter() - started)
-    return min(timings)
+    """Best CPU time of five runs with the cyclic GC paused (kept for absolute caps)."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        return min(_cpu(scan) for _ in range(5))
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
     small_text, large_text = payload(n), payload(2 * n)
-    small = best_of_three(lambda: scan(small_text))
-    large = best_of_three(lambda: scan(large_text))
+    small, large = paired_best(lambda: scan(small_text), lambda: scan(large_text))
     assert large < MAX_SECONDS, f"{large:.3f}s for {2 * n} characters"
     assert large < NOISE_FLOOR_S or large / small < MAX_FACTOR, f"factor {large / small:.2f}"
 

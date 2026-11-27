@@ -96,9 +96,9 @@ def _many_pins(count: int) -> str:
 
 def _seconds(gateway: Gateway, key: str, text: str) -> float:
     session = gateway.session(key)
-    started = time.perf_counter()
+    started = time.process_time()
     out = session.pseudonymize(text)
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     assert "100000" not in out and "200000" not in out
     return elapsed
 
@@ -125,9 +125,9 @@ def _masking_seconds(gateway: Gateway, key: str, values: int, lines: int) -> flo
     gc.collect()
     gc.disable()
     try:
-        started = time.perf_counter()
+        started = time.process_time()
         masks = session._redacted_spans(text, report, fresh, list(learned))
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
     finally:
         gc.enable()
     assert len(masks) == len(fresh) == lines

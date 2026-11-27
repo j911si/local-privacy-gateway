@@ -104,9 +104,9 @@ def test_equal_findings_and_empty_spans(default_config: Config) -> None:
 def best(findings: list[Finding], registry: ClassRegistry) -> float:
     timings = []
     for _ in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         resolve_overlaps(list(findings), registry)
-        timings.append(time.perf_counter() - started)
+        timings.append(time.process_time() - started)
     return min(timings)
 
 
