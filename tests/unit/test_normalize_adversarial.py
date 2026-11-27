@@ -141,3 +141,22 @@ def test_joiner_inside_a_value_does_not_hide_it(
 ) -> None:
     out = gateway.session().pseudonymize(f"Wert: {value.format(j=joiner)} Ende")
     assert kept not in out
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("IBAN G\U000e0100B82WEST12345698765432 Ende", "12345698765432"),
+        ("Tel +49 151 2345\U000e01ef6789 Ende", "6789"),
+    ],
+)
+def test_supplementary_variation_selector_does_not_hide_a_value(
+    gateway: Gateway, text: str, kept: str
+) -> None:
+    assert kept not in gateway.session().pseudonymize(text)
+
+
+@pytest.mark.parametrize("expiry", ["05/29", "05.29"])
+def test_card_followed_by_an_expiry_is_replaced(gateway: Gateway, expiry: str) -> None:
+    out = gateway.session().pseudonymize(f"Zahlung 4111 1111 1111 1111 {expiry} erledigt")
+    assert "4111" not in out

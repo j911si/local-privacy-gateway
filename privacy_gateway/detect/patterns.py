@@ -282,4 +282,4 @@ def _card_tail(text: str, span: Span, prefix: int, has_context: bool) -> bool:
     tail = text[span.start + prefix : span.end].strip(GROUP_SEPARATORS)
     if has_context or CVC_RE.fullmatch(tail):
         return True
-    return EXPIRY_MONTH_RE.fullmatch(tail) is not None and text[span.end : span.end + 1] == "/"
+    return EXPIRY_MONTH_RE.fullmatch(tail) is not None and text[span.end : span.end + 1] in ("/", ".")

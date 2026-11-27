@@ -105,6 +105,9 @@ def test_killed_process_keeps_its_committed_mappings(tmp_path: Path) -> None:
         [sys.executable, "-c", CHILD, SECOND], env=env, capture_output=True, text=True, check=False
     )
     assert child.returncode == -signal.SIGKILL
+    sent = child.stdout.strip()
+    assert all(value not in sent for value in LOST)
+    assert "<IBAN_" in sent and "<EMAIL_" in sent
     with Gateway(load_config(env=paths)) as gateway:
-        restored = gateway.session("conv").restore(child.stdout.strip(), mode="strict").text
+        restored = gateway.session("conv").restore(sent, mode="strict").text
     assert all(value in restored for value in LOST)

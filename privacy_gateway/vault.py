@@ -405,11 +405,15 @@ class Vault:
         """Remove a session with all its mappings and surface forms."""
         # ponytail: the deletion gets its own fsync; NORMAL would leave it to a checkpoint that
         # a reader on another connection can block.
-        # A session without mappings (a request-only scan session) frees no ciphertext, so it
+        # A session without mappings and name (a request-only scan session) frees no secret, so it
         # skips the VACUUM that would otherwise block for the size of the whole vault.
         self._conn.execute("PRAGMA synchronous=FULL")
         try:
-            freed = self._conn.execute(
+            named = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ? AND external_key IS NOT NULL", (session_id,)
+            ).fetchone()
+            freed = int(named is not None)
+            freed += self._conn.execute(
                 "DELETE FROM surface_forms WHERE session_id = ?", (session_id,)
             ).rowcount
             freed += self._conn.execute(

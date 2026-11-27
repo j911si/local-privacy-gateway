@@ -155,7 +155,8 @@ def short_path(path: str) -> str:
 
 def _redact_access_log() -> None:
     # httpx logs every upstream request with its full URL (path IDs, query) at INFO.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, _QueryRedactingFilter) for item in access.filters):
         access.addFilter(_QueryRedactingFilter())
@@ -441,7 +442,8 @@ async def _forward(
         limits = {
             k: v
             for k, v in response.headers.items()
-            if k.lower().startswith("anthropic-ratelimit") or k.lower() == "retry-after"
+            if (k.lower().startswith("anthropic-ratelimit") or k.lower() == "retry-after")
+            and LIMIT_VALUE_RE.fullmatch(v)
         }
         logging.getLogger("privacy_gateway_proxy").warning(
             "upstream %s on %s: %s %s",
@@ -551,16 +553,33 @@ async def _forwarded_stream(response: httpx.Response) -> AsyncIterator[bytes]:
 
 
 USAGE_RE = re.compile(rb'"usage":\s*(\{[^{}]*\})')
+USAGE_COUNTERS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    }
+)
+# Retry-After seconds, rate-limit counts and RFC 3339 reset times; nothing else is logged.
+LIMIT_VALUE_RE = re.compile(r"\d{1,12}|\d{4}-\d{2}-\d{2}T[\d:.]{2,18}(?:Z|[+-]\d{2}:\d{2})")
 
 
 def _log_usage(chunk: bytes) -> None:
     if b'"message_start"' not in chunk:
         return
     match = USAGE_RE.search(chunk)
-    if match:
-        logging.getLogger("privacy_gateway_proxy").info(
-            "upstream usage %s", match.group(1).decode("utf-8", "replace")
-        )
+    if not match:
+        return
+    try:
+        usage = json.loads(match.group(1))
+    except (ValueError, RecursionError):
+        return
+    if isinstance(usage, dict):
+        counters = {
+            k: v for k, v in usage.items() if type(v) is int and k in USAGE_COUNTERS
+        }
+        logging.getLogger("privacy_gateway_proxy").info("upstream usage %s", counters)
 
 
 async def _raw_chunks(response: httpx.Response) -> AsyncIterator[bytes]:

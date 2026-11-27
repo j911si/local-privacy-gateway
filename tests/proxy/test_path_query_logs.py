@@ -161,3 +161,43 @@ async def test_an_error_type_list_keeps_the_upstream_status(
 
     status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
     assert status == 429
+
+
+def test_transport_debug_logger_is_limited_too(gateway: Gateway, tmp_path: Path) -> None:
+    logging.getLogger("httpcore").setLevel(logging.NOTSET)
+    server.create_app(ProxySettings(audit_dir=tmp_path / "a"), gateway, client=httpx.AsyncClient())
+    assert logging.getLogger("httpcore").level >= logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_error_log_keeps_only_numeric_limit_headers(
+    gateway: Gateway, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def upstream(request: httpx.Request) -> httpx.Response:
+        headers = {
+            "retry-after": MAIL,
+            "anthropic-ratelimit-requests-remaining": "7",
+            "anthropic-ratelimit-requests-reset": "2026-11-27T12:00:00Z",
+            "anthropic-ratelimit-tokens-limit": "Erika Mustermann",
+        }
+        error = {"type": "error", "error": {"type": "rate_limit_error"}}
+        return httpx.Response(429, json=error, headers=headers)
+
+    with caplog.at_level(logging.WARNING, logger="privacy_gateway_proxy"):
+        status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
+    assert status == 429
+    assert MAIL not in caplog.text
+    assert "Mustermann" not in caplog.text
+    assert "'7'" in caplog.text
+    assert "2026-11-27T12:00:00Z" in caplog.text
+
+
+def test_usage_log_keeps_only_numeric_counters(caplog: pytest.LogCaptureFixture) -> None:
+    chunk = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+        b'{"input_tokens":2,"note":"' + MAIL.encode() + b'"}}}\n\n'
+    )
+    with caplog.at_level(logging.INFO, logger="privacy_gateway_proxy"):
+        server._log_usage(chunk)
+    assert MAIL not in caplog.text
+    assert "input_tokens" in caplog.text

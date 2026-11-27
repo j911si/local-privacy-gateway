@@ -101,3 +101,15 @@ def test_failed_purge_rolls_back_and_keeps_the_error(tmp_path: Path) -> None:
         assert vault.load(session)["<EMAIL_001>"].surface_forms == ["A@firma-test.de"]
     finally:
         vault.close()
+
+
+def test_purge_of_a_named_session_without_mappings_still_reclaims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = Vault(tmp_path / "vault.db", tmp_path / "vault.key")
+    try:
+        calls = _reclaims(vault, monkeypatch)
+        vault.purge(vault.get_or_create_session("demo-kunde-042", "cfg"))
+        assert calls == [True]
+    finally:
+        vault.close()
