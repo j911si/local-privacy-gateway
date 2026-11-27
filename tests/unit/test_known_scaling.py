@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import random
 import re
 import signal
+import string
+import sys
 import time
 from collections.abc import Callable
 
@@ -13,7 +16,13 @@ import pytest
 from privacy_gateway.config import Config
 from privacy_gateway.detect import session
 from privacy_gateway.detect.normalize import offset_map
-from privacy_gateway.detect.session import KnownMatcher, _value_span, compact_digit_run
+from privacy_gateway.detect.session import (
+    KnownMatcher,
+    SubstringSweep,
+    _coarse_fold,
+    _value_span,
+    compact_digit_run,
+)
 from privacy_gateway.model import Span
 
 HARD_TIMEOUT_S = 120
@@ -214,3 +223,118 @@ def test_many_known_values_scale_linearly(
     assert len(large_matcher.find(large_text)) >= 8_000
     assert large < 3.0, f"{large:.2f}s"
     assert large / small < 8.0, f"factor {large / small:.2f}"
+
+
+NAME_PIECES = (
+    "anna",
+    "Anna",
+    "ANNA",
+    "kis",
+    "KIS",
+    "ıks",
+    "Kiſ",
+    "berg",
+    "Berg",
+    "von",
+    "äb",
+    "ÄB",
+    "o'",
+    "x-y",
+    "s",
+)
+NAME_TEXT = (" ", "  ", "\t", "\n", ",", ".", "-", "_", "s", "x", "İ", "'")
+
+
+def random_name(rng: random.Random) -> str:
+    return " ".join(
+        "".join(rng.choice(NAME_PIECES) for _ in range(rng.randint(1, 2)))
+        for _ in range(rng.randint(2, 3))
+    )
+
+
+def name_text(rng: random.Random, forms: list[str]) -> str:
+    parts = [rng.choice((*NAME_PIECES, *NAME_TEXT)) for _ in range(rng.randint(0, 25))]
+    for _ in range(rng.randint(0, 4)):
+        form = rng.choice(forms)
+        if rng.random() < 0.5:
+            form = form.swapcase().replace(" ", rng.choice(("  ", "\t", "\n ")))
+        parts.insert(rng.randint(0, len(parts)), form)
+    return "".join(parts)
+
+
+def test_ignorecase_pairs_fold_equal_under_the_coarse_fold() -> None:
+    others = "".join(
+        chr(code) for code in range(0x80, sys.maxunicode + 1) if not 0xD800 <= code <= 0xDFFF
+    )
+    ascii_chars = "".join(chr(code) for code in range(0x80))
+    for code in range(0x80):
+        pattern = re.compile(re.escape(chr(code)), re.IGNORECASE)
+        for found in (*pattern.finditer(others), *pattern.finditer(ascii_chars)):
+            assert _coarse_fold(found.group()) == _coarse_fold(chr(code)), (code, found.group())
+
+
+@pytest.mark.parametrize("known_count", [3, 60])
+def test_multi_word_values_equal_the_old_scans(
+    default_config: Config, known_count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = random.Random(9000 + known_count)
+    hits = 0
+    for _ in range(600):
+        known = {
+            random_name(rng): (rng.choice(("PERSON_FULL_NAME", "CUSTOMER_ID")), f"<P_{i:03d}>")
+            for i in range(rng.randint(1, known_count))
+        }
+        forms = list(known)
+        texts = [name_text(rng, forms) for _ in range(4)]
+        matcher = KnownMatcher(known, default_config.registry)
+        sweep = SubstringSweep(known)
+        new = [(matcher.find(text), sweep.find(text)) for text in texts]
+        old_matcher = OldMatcher(known, default_config.registry)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                session,
+                "_spaced_matches",
+                lambda text, rules: [list(pattern.finditer(text)) for pattern, _ in rules],
+            )
+            old = [(old_matcher.find(text), sweep.find(text)) for text in texts]
+        assert new == old, (known, texts)
+        hits += sum(len(a) + len(b) for a, b in new)
+    assert hits > 2_000
+
+
+def names(k: int) -> tuple[dict[str, session.Known], str]:
+    rng = random.Random(k)
+    forms = [
+        f"{rng.choice(string.ascii_uppercase)}{''.join(rng.choice('aeiou') for _ in range(6))} "
+        f"{rng.choice(string.ascii_uppercase)}{''.join(rng.choice('bdfgk') for _ in range(7))}"
+        for _ in range(k)
+    ]
+    known = {form: ("PERSON_FULL_NAME", f"<P_{i:03d}>") for i, form in enumerate(forms)}
+    return known, "".join(f"<P_{i:03d}> sagt {form}.\n" for i, form in enumerate(forms))
+
+
+def test_many_multi_word_names_scale_linearly(default_config: Config) -> None:
+    """Measured without the cyclic GC, whose passes over 20k compiled patterns add noise."""
+    small_known, small_text = names(5_000)
+    large_known, large_text = names(20_000)
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.alarm(HARD_TIMEOUT_S)
+    gc.collect()
+    gc.disable()
+    try:
+        small_matcher = KnownMatcher(small_known, default_config.registry)
+        large_matcher = KnownMatcher(large_known, default_config.registry)
+        small_sweep, large_sweep = SubstringSweep(small_known), SubstringSweep(large_known)
+        small = best_of_two(lambda: small_matcher.find(small_text))
+        large = best_of_two(lambda: large_matcher.find(large_text))
+        small_spaced = best_of_two(lambda: small_sweep.find(small_text))
+        large_spaced = best_of_two(lambda: large_sweep.find(large_text))
+    finally:
+        gc.enable()
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert len(large_matcher.find(large_text)) >= 20_000
+    assert large < 3.0, f"{large:.2f}s"
+    assert large < 0.05 or large / small < 8.0, f"factor {large / small:.2f}"
+    assert large_spaced < 3.0, f"{large_spaced:.2f}s"
+    assert large_spaced < 0.05 or large_spaced / small_spaced < 8.0, "sweep factor"
