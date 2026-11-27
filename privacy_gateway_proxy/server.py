@@ -66,9 +66,24 @@ DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 LOGGED_SEGMENTS = 2
 ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-ROUTE_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
-NUMBER_RE = re.compile(r"\d+")
-ERROR_TYPE_RE = re.compile(r"[a-z_]{1,64}")
+# Path segments the logs may show: the API version and the route words of the Anthropic API.
+ROUTE_WORDS = frozenset(
+    {
+        "v1", "messages", "count_tokens", "batches", "results", "cancel", "models", "files",
+        "content", "skills", "versions", "complete", "health",
+    }
+)
+# A skill version is a microsecond timestamp; only there a number segment is not scanned.
+SKILL_VERSION_RE = re.compile(r"/v1/skills/[^/]+/versions/(?:1[5-9]|2[01])\d{14}")
+ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error", "authentication_error", "billing_error", "permission_error",
+        "not_found_error", "request_too_large", "rate_limit_error", "api_error",
+        "overloaded_error", "timeout_error",
+    }
+)
+MAX_ERROR_BODY = 64 * 1024
+
 
 _transform: Any
 _stream_restorer_factory: Any
@@ -127,12 +142,12 @@ class _QueryRedactingFilter(logging.Filter):
 
 
 def short_path(path: str) -> str:
-    """The first two segments plus `/…` when more follow; a segment that is no route word as `…`."""
+    """The first two segments plus `/…` when more follow; a segment outside ROUTE_WORDS as `…`."""
     if path in TRANSFORMED_PATHS:
         return path
     segments = path.split("/")
     kept = [
-        segment if not segment or ROUTE_WORD_RE.fullmatch(segment) else "…"
+        segment if not segment or segment in ROUTE_WORDS else "…"
         for segment in segments[: LOGGED_SEGMENTS + 1]
     ]
     return "/".join(kept) + ("/…" if len(segments) > LOGGED_SEGMENTS + 1 else "")
@@ -167,6 +182,11 @@ async def _dispatch(
         )
     if not _query_allowed(request.url.query):
         return _malformed(gateway, settings, trail, path, "query string is not allowed")
+    in_query = _query_findings(request, gateway, sessions, settings)
+    if in_query:
+        return _malformed(
+            gateway, settings, trail, path, f"query string contains sensitive data ({in_query})"
+        )
     if not (request.method == "POST" and path in TRANSFORMED_PATHS):
         key = session_key_for(request.headers, None, settings)
         if key is not None and not is_valid_key(key):
@@ -219,19 +239,40 @@ def _path_findings(
     request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str | None
 ) -> str:
     """Classes found in the decoded path segments by the read-only scan, comma-joined."""
-    segments = unquote(request.url.path).split("/")
+    path = unquote(request.url.path)
+    segments = path.split("/")
+    version = len(segments) - 1 if SKILL_VERSION_RE.fullmatch(path) else -1
     leaves = [
         TextRef(("path", index), segment)
         for index, segment in enumerate(segments)
-        if segment
-        and ID_SEGMENT_RE.fullmatch(segment) is None
-        and not (NUMBER_RE.fullmatch(segment) and segments[index - 1] == "versions")
+        if segment and ID_SEGMENT_RE.fullmatch(segment) is None and index != version
     ]
-    leaves.extend(
+    leaves.extend(_query_leaves(request))
+    return _scan_classes(leaves, gateway, sessions, key)
+
+
+def _query_leaves(request: Request) -> list[TextRef]:
+    return [
         TextRef(("query", index), value)
         for index, (_, value) in enumerate(parse_qsl(request.url.query, keep_blank_values=True))
         if value
-    )
+    ]
+
+
+def _query_findings(
+    request: Request, gateway: Any, sessions: OrderedDict[str, Any], settings: ProxySettings
+) -> str:
+    """Classes found in the query values, for every method and path."""
+    leaves = _query_leaves(request)
+    if not leaves:
+        return ""
+    key = session_key_for(request.headers, None, settings)
+    return _scan_classes(leaves, gateway, sessions, key if key and is_valid_key(key) else None)
+
+
+def _scan_classes(
+    leaves: list[TextRef], gateway: Any, sessions: OrderedDict[str, Any], key: str | None
+) -> str:
     session, release = _request_session(gateway, sessions, key)
     try:
         hits = audit_trail.scan(session, leaves) or []
@@ -730,13 +771,15 @@ def _session_refused(
 
 
 def _error_type(raw_body: bytes) -> str:
-    """The `error.type` of an upstream error body when it is a plain identifier, else `-`."""
+    """The `error.type` of an upstream error body when it is a known Anthropic type, else `-`."""
+    if len(raw_body) > MAX_ERROR_BODY:
+        return "-"
     try:
         error = json.loads(raw_body).get("error")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):
         return "-"
     kind = error.get("type") if isinstance(error, dict) else None
-    return kind if isinstance(kind, str) and ERROR_TYPE_RE.fullmatch(kind) else "-"
+    return kind if kind in ERROR_TYPES else "-"
 
 
 def _leak_response(exc: LeakageError) -> Response:

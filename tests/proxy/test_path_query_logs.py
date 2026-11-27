@@ -57,6 +57,24 @@ async def test_card_in_path_or_query_is_not_forwarded(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"/v1/messages?beta={CARD}",
+        f"/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions/{CARD}",
+        f"/v1/files/versions/{CARD}",
+    ],
+)
+async def test_card_in_a_transformed_query_or_after_versions_is_not_forwarded(
+    gateway: Gateway, tmp_path: Path, url: str
+) -> None:
+    method = "POST" if url.startswith("/v1/messages") else "GET"
+    status, sent, _ = await _call(gateway, tmp_path, method, url)
+    assert status == 400
+    assert not sent
+
+
+@pytest.mark.asyncio
 async def test_a_numeric_skill_version_is_still_forwarded(gateway: Gateway, tmp_path: Path) -> None:
     url = "/v1/skills/skill_01AbCdEfGhIjKlMnOpQrStUv/versions/1759178010641129"
     status, sent, _ = await _call(gateway, tmp_path, "GET", url)
@@ -96,3 +114,28 @@ async def test_upstream_error_text_stays_out_of_the_log(
 def test_error_type_ignores_unexpected_bodies() -> None:
     assert server._error_type(b"not json") == "-"
     assert server._error_type(json.dumps({"error": {"type": MAIL}}).encode()) == "-"
+    unknown = {"error": {"message": "x" * 500, "type": "sommerregen_im_projektarchiv"}}
+    assert server._error_type(json.dumps(unknown).encode()) == "-"
+    assert server._error_type(b"[" * 5000 + b"]" * 5000) == "-"
+    assert server._error_type(json.dumps({"error": {"type": "rate_limit_error"}}).encode()) == (
+        "rate_limit_error"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "logged"),
+    [("/v1/geheimes-kundenprojekt", "/v1/…"), ("/v1/files/x/y", "/v1/files/…")],
+)
+def test_short_path_shows_only_route_words(path: str, logged: str) -> None:
+    assert server.short_path(path) == logged
+
+
+@pytest.mark.asyncio
+async def test_a_deeply_nested_upstream_error_keeps_its_status(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"[" * 5000 + b"]" * 5000)
+
+    status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
+    assert status == 429

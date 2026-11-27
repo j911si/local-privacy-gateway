@@ -790,7 +790,8 @@ async def test_a_url_encoded_sensitive_segment_never_reaches_upstream(
         ("/v1/files/geheim.person@beispiel-firma.de", "/v1/files/…"),
         ("/v1/models", "/v1/models"),
         ("/health", "/health"),
-        ("/a/b/c/d", "/a/b/…"),
+        # Only Anthropic route words stay readable; other segments may carry values.
+        ("/a/b/c/d", "/…/…/…"),
     ],
 )
 def test_logged_paths_are_shortened_to_two_segments(path: str, short: str) -> None:
