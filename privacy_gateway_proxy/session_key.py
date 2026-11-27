@@ -34,18 +34,19 @@ def is_claude_code_user_id(value: object) -> bool:
 
 def session_key_for(
     headers: Mapping[str, str], body: dict | None, settings: ProxySettings
-) -> str:
-    """Pick the session key according to the configured strategy."""
+) -> str | None:
+    """Pick the session key according to the configured strategy.
+
+    None means the request names no session: it then gets a session of its own that ends
+    with the request, so it never shares tokens with another client.
+    """
     if settings.session_strategy == "single":
         return settings.default_session_key
     if settings.session_strategy == "metadata":
         key = _from_metadata(body)
         if key is not None:
             return key
-    header = _header(headers, settings.header_name)
-    if header is not None:
-        return header
-    return settings.default_session_key
+    return _header(headers, settings.header_name)
 
 
 def _from_metadata(body: dict | None) -> str | None:

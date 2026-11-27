@@ -7,9 +7,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote
@@ -153,7 +154,7 @@ async def _dispatch(
         return _malformed(gateway, settings, trail, path, "query string is not allowed")
     if not (request.method == "POST" and path in TRANSFORMED_PATHS):
         key = session_key_for(request.headers, None, settings)
-        if not is_valid_key(key):
+        if key is not None and not is_valid_key(key):
             return _session_refused(gateway, settings, trail, short_path(path))
         blocked = _path_findings(request, gateway, sessions, key)
         if blocked:
@@ -192,7 +193,7 @@ async def _dispatch(
 
 
 def _path_findings(
-    request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str
+    request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str | None
 ) -> str:
     """Classes found in the decoded path segments by the read-only scan, comma-joined."""
     leaves = [
@@ -200,7 +201,11 @@ def _path_findings(
         for index, segment in enumerate(unquote(request.url.path).split("/"))
         if segment and ID_SEGMENT_RE.fullmatch(segment) is None
     ]
-    hits = audit_trail.scan(_session_for(gateway, sessions, key), leaves) or []
+    session, release = _request_session(gateway, sessions, key)
+    try:
+        hits = audit_trail.scan(session, leaves) or []
+    finally:
+        release()
     return ", ".join(sorted({hit.data_class for hit in hits}))
 
 
@@ -248,9 +253,38 @@ async def _transformed(
     started = time.perf_counter()
     path = request.url.path
     key = session_key_for(request.headers, body, settings)
-    if not is_valid_key(key):
+    if key is not None and not is_valid_key(key):
         return _session_refused(gateway, settings, trail, path)
-    session = _session_for(gateway, sessions, key)
+    session, release = _request_session(gateway, sessions, key)
+    label = key if key is not None else f"request-{secrets.token_hex(8)}"
+    try:
+        response = await _forward(
+            request, body, settings, gateway, client, session, label, trail, tool_trail,
+            started, release,
+        )
+    except BaseException:
+        release()
+        raise
+    if not isinstance(response, StreamingResponse):
+        release()
+    return response
+
+
+async def _forward(
+    request: Request,
+    body: dict,
+    settings: ProxySettings,
+    gateway: Any,
+    client: httpx.AsyncClient,
+    session: Any,
+    key: str,
+    trail: RequestAuditLog,
+    tool_trail: RequestAuditLog,
+    started: float,
+    release: Callable[[], None],
+) -> Response:
+    """Pseudonymize, rescan, forward and restore one request; `release` ends a stream."""
+    path = request.url.path
     streaming = body.get("stream") is True
     include_system = settings.transform_system
     notice = settings.placeholder_notice
@@ -347,10 +381,16 @@ async def _transformed(
         if guard.entries:
             tool_trail.write(tool_policy.AUDIT_EVENT, guard.audit_fields(request_id))
 
+    def close_stream() -> None:
+        try:
+            audit_tools()
+        finally:
+            release()
+
     if streaming:
         restorer = _stream_restorer_factory(lenient.restore_text, guard)
         return StreamingResponse(
-            _restored_stream(response, restorer, audit_tools),
+            _restored_stream(response, restorer, close_stream),
             status_code=response.status_code,
             headers=headers,
         )
@@ -448,6 +488,35 @@ async def _raw_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
     async for chunk in response.aiter_bytes():
         _log_usage(chunk)
         yield chunk
+
+
+def _request_session(
+    gateway: Any, sessions: OrderedDict[str, Any], key: str | None
+) -> tuple[Any, Callable[[], None]]:
+    """The cached session of a key, or, without a key, a new session only for this request.
+
+    The second item purges that request session from the vault; it does nothing for a key.
+    """
+    if key is not None:
+        return _session_for(gateway, sessions, key), _keep
+    session = gateway.session()
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        purge = getattr(getattr(gateway, "vault", None), "purge", None)
+        session_id = getattr(session, "session_id", None)
+        if purge is not None and session_id:
+            purge(session_id)
+
+    return session, release
+
+
+def _keep() -> None:
+    """Release of a keyed session: it stays for the next request of that conversation."""
 
 
 def _session_for(gateway: Any, sessions: OrderedDict[str, Any], key: str) -> Any:
