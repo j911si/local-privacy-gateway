@@ -16,18 +16,20 @@ All notable changes to this project are documented in this file. The format foll
   account-holder label when the first name is an ambiguous word (`Kontoinhaber: Max Mustermann`);
   short Basic credentials (`Basic dTpwdw==`); a ticket ID shaped like a token (`OPS_471`); a
   fullwidth IBAN; an IBAN glued to a word (`...3000USD`); a value with a variation selector
-  inside; a learned number written with other grouping after another number.
+  inside (also U+E0100 and up); a card number followed by an expiry with a dot (`05.29`); a learned number written with other grouping after another number.
 - The proxy scans numeric path segments and query values, so a card number there is no longer
   forwarded. Request audit lines and the access log no longer carry path segments that are not
   route words, and upstream errors are logged by status and error type without the body. The
-  httpx logger, which wrote every upstream URL with its query at INFO, is set to WARNING.
+  httpx and httpcore loggers, which wrote every upstream URL with its query at INFO, are set to
+  WARNING; rate-limit headers and stream usage are logged only as numbers and timestamps.
 - The digit and first-word indexes of learned values and the per-field audit counts no longer grow
   with the product of input size and learned values or fields.
 - The vault runs SQLite in WAL mode with `synchronous=NORMAL` instead of an fsync on every
   commit (256 KiB with about 6,700 new values: 25 s before, 4.6 s now). A power loss or an
   operating system crash can drop the mappings of the last moments, so a placeholder issued just
   before may not be restored afterwards; nothing goes out in clear text because of it. A purge
-  still commits with a full fsync, and skips the VACUUM when the session held no mapping.
+  still commits with a full fsync, and skips the VACUUM when the session held no mapping and
+  no name.
 - Breaking: a finding of a sensitive class in a field the proxy forwards unchanged (`tools`,
   `metadata`, a signed block, the system prompt with `PGW_PROXY_TRANSFORM_SYSTEM=0`, an unknown
   field) now blocks the request with 422 before anything is sent. Before, it went out in clear
