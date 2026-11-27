@@ -21,7 +21,8 @@ All notable changes to this project are documented in this file. The format foll
   forwarded. Request audit lines and the access log no longer carry path segments that are not
   route words, and upstream errors are logged by status and error type without the body. The
   httpx and httpcore loggers, which wrote every upstream URL with its query at INFO, are set to
-  WARNING; rate-limit headers and stream usage are logged only as numbers and timestamps.
+  WARNING; upstream errors are logged without headers, stream usage only as the four token
+  counters of `message.usage`.
 - The digit and first-word indexes of learned values and the per-field audit counts no longer grow
   with the product of input size and learned values or fields.
 - The vault runs SQLite in WAL mode with `synchronous=NORMAL` instead of an fsync on every

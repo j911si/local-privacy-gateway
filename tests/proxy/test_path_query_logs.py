@@ -170,7 +170,7 @@ def test_transport_debug_logger_is_limited_too(gateway: Gateway, tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_error_log_keeps_only_numeric_limit_headers(
+async def test_error_log_carries_no_header_values(
     gateway: Gateway, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def upstream(request: httpx.Request) -> httpx.Response:
@@ -179,6 +179,7 @@ async def test_error_log_keeps_only_numeric_limit_headers(
             "anthropic-ratelimit-requests-remaining": "7",
             "anthropic-ratelimit-requests-reset": "2026-11-27T12:00:00Z",
             "anthropic-ratelimit-tokens-limit": "Erika Mustermann",
+            "anthropic-ratelimit-demo-kunde-042": "1203456789",
         }
         error = {"type": "error", "error": {"type": "rate_limit_error"}}
         return httpx.Response(429, json=error, headers=headers)
@@ -186,18 +187,22 @@ async def test_error_log_keeps_only_numeric_limit_headers(
     with caplog.at_level(logging.WARNING, logger="privacy_gateway_proxy"):
         status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
     assert status == 429
-    assert MAIL not in caplog.text
-    assert "Mustermann" not in caplog.text
-    assert "'7'" in caplog.text
-    assert "2026-11-27T12:00:00Z" in caplog.text
+    assert "rate_limit_error" in caplog.text
+    for secret in (MAIL, "Mustermann", "demo-kunde", "1203456789"):
+        assert secret not in caplog.text
 
 
 def test_usage_log_keeps_only_numeric_counters(caplog: pytest.LogCaptureFixture) -> None:
-    chunk = (
-        b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
-        b'{"input_tokens":2,"note":"' + MAIL.encode() + b'"}}}\n\n'
-    )
+    event = {
+        "type": "message_start",
+        "metadata": {"usage": {"input_tokens": 1203456789}},
+        "message": {
+            "usage": {"input_tokens": 2, "note": MAIL, "server_tool_use": {"web_search": 1}}
+        },
+    }
+    chunk = b"event: message_start\ndata: " + json.dumps(event).encode() + b"\n\n"
     with caplog.at_level(logging.INFO, logger="privacy_gateway_proxy"):
         server._log_usage(chunk)
     assert MAIL not in caplog.text
-    assert "input_tokens" in caplog.text
+    assert "1203456789" not in caplog.text
+    assert "'input_tokens': 2" in caplog.text

@@ -439,18 +439,11 @@ async def _forward(
             raw_body = await response.aread()
         finally:
             await response.aclose()
-        limits = {
-            k: v
-            for k, v in response.headers.items()
-            if (k.lower().startswith("anthropic-ratelimit") or k.lower() == "retry-after")
-            and LIMIT_VALUE_RE.fullmatch(v)
-        }
         logging.getLogger("privacy_gateway_proxy").warning(
-            "upstream %s on %s: %s %s",
+            "upstream %s on %s: %s",
             response.status_code,
             short_path(path),
             _error_type(raw_body),
-            limits,
         )
         return Response(raw_body, status_code=response.status_code, headers=headers)
     lenient = _LenientSession(session)
@@ -552,7 +545,6 @@ async def _forwarded_stream(response: httpx.Response) -> AsyncIterator[bytes]:
         await response.aclose()
 
 
-USAGE_RE = re.compile(rb'"usage":\s*(\{[^{}]*\})')
 USAGE_COUNTERS = frozenset(
     {
         "input_tokens",
@@ -561,20 +553,22 @@ USAGE_COUNTERS = frozenset(
         "cache_read_input_tokens",
     }
 )
-# Retry-After seconds, rate-limit counts and RFC 3339 reset times; nothing else is logged.
-LIMIT_VALUE_RE = re.compile(r"\d{1,12}|\d{4}-\d{2}-\d{2}T[\d:.]{2,18}(?:Z|[+-]\d{2}:\d{2})")
 
 
 def _log_usage(chunk: bytes) -> None:
     if b'"message_start"' not in chunk:
         return
-    match = USAGE_RE.search(chunk)
-    if not match:
-        return
-    try:
-        usage = json.loads(match.group(1))
-    except (ValueError, RecursionError):
-        return
+    usage = None
+    for line in chunk.splitlines():
+        if not line.startswith(b"data:") or b'"message_start"' not in line:
+            continue
+        try:
+            event = json.loads(line[5:])
+        except (ValueError, RecursionError):
+            return
+        message = event.get("message") if isinstance(event, dict) else None
+        usage = message.get("usage") if isinstance(message, dict) else None
+        break
     if isinstance(usage, dict):
         counters = {
             k: v for k, v in usage.items() if type(v) is int and k in USAGE_COUNTERS
