@@ -73,9 +73,7 @@ def correlate(
     return list(findings), entities
 
 
-def _without_system_usernames(
-    text: str, findings: list[Finding], config: Config
-) -> list[Finding]:
+def _without_system_usernames(text: str, findings: list[Finding], config: Config) -> list[Finding]:
     """Drop path-pattern usernames that are system or role names; dictionary hits stay."""
     system = {_normalize_text(name) for name in config.system_usernames}
     return [
@@ -149,31 +147,56 @@ def _initials(parts: tuple[str | None, str | None]) -> str:
     return first[0] + last[0]
 
 
-def _join_target(
-    group: _Group, people: list[_Group], names: dict[int, tuple[str | None, str | None]]
-) -> _Group | None:
-    candidates = [g for g in people if g is not group and not g.merged]
+def _join_target(group: _Group, index: dict[tuple[str, str], list[_Group]]) -> _Group | None:
     if group.data_class == PERSON_LAST_NAME:
-        matches = [g for g in candidates if names[id(g)][1] == group.key]
+        bucket = index.get((PERSON_LAST_NAME, group.key), [])
     elif group.data_class == PERSON_FIRST_NAME:
-        matches = [g for g in candidates if names[id(g)][0] == group.key]
+        bucket = index.get((PERSON_FIRST_NAME, group.key), [])
     elif group.data_class == PERSON_INITIALS:
-        wanted = _letters(group.key)
-        matches = [g for g in candidates if wanted and _initials(names[id(g)]) == wanted]
+        bucket = index.get((PERSON_INITIALS, _letters(group.key)), [])
     else:
         return None
-    return matches[0] if len(matches) == 1 else None
+    return _only(group, bucket)
+
+
+def _only(group: _Group, bucket: list[_Group]) -> _Group | None:
+    """The single unmerged group in `bucket` other than `group`, else None."""
+    found: _Group | None = None
+    for candidate in bucket:
+        if candidate is group or candidate.merged:
+            continue
+        if found is not None:
+            return None
+        found = candidate
+    return found
+
+
+def _person_index(people: list[_Group]) -> dict[tuple[str, str], list[_Group]]:
+    """People by last name, first name and initials, in their original order."""
+    index: dict[tuple[str, str], list[_Group]] = {}
+    for group in people:
+        names = _name_parts(group)
+        first, last = names
+        initials = _initials(names)
+        for kind, key in (
+            (PERSON_LAST_NAME, last),
+            (PERSON_FIRST_NAME, first),
+            (PERSON_INITIALS, initials),
+        ):
+            if key:
+                index.setdefault((kind, key), []).append(group)
+    return index
 
 
 def _resolve_persons(groups: list[_Group]) -> None:
     people = [
         g for g in groups if g.data_class in PERSON_CLASSES and g.confidence >= ENTITY_CONFIDENCE
     ]
-    names = {id(g): _name_parts(g) for g in people}
+    index = _person_index(people)
     for group in list(groups):
         if group.merged:
             continue
-        target = _join_target(group, people, names)
+        target = _join_target(group, index)
         if target is None:
             continue
         if group.key in _common_name_words() and group.confidence < PROMOTED_CONFIDENCE:
@@ -182,17 +205,20 @@ def _resolve_persons(groups: list[_Group]) -> None:
             finding.confidence = max(finding.confidence, PROMOTED_CONFIDENCE)
         target.findings.extend(group.findings)
         group.merged = True
-        groups.remove(group)
+    groups[:] = [group for group in groups if not group.merged]
 
 
 def _resolve_generic_ids(groups: list[_Group]) -> None:
+    by_key: dict[str, list[_Group]] = {}
+    for group in groups:
+        by_key.setdefault(group.key, []).append(group)
     for group in [g for g in groups if g.data_class == GENERIC_ID]:
-        matches = [g for g in groups if g is not group and g.key == group.key and not g.merged]
-        if len(matches) != 1:
+        match = _only(group, by_key[group.key])
+        if match is None:
             continue
-        matches[0].findings.extend(group.findings)
+        match.findings.extend(group.findings)
         group.merged = True
-        groups.remove(group)
+    groups[:] = [group for group in groups if not group.merged]
 
 
 def _assign_entities(groups: list[_Group]) -> dict[str, Entity]:
