@@ -263,7 +263,7 @@ stored token is lost.
 | `PGW_RESTORE_MODE` | `strict` | Default restore mode, `strict` or `lenient`. |
 | `PGW_CONFIG` | unset | Extra configuration file, applied after the user config. |
 | `PGW_SKIP_USER_CONFIG` | unset | `1`/`true`/`yes` ignores `~/.config/privacy-gateway/config.yaml`. Useful for reproducible runs and tests. |
-| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` (also `0.0.0.0`, `[::]` and private addresses such as Tailscale's `100.x`) needs an auth token, else the proxy does not start. |
+| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` needs an auth token, else the proxy does not start. Besides loopback only explicit private addresses are accepted (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` as used by Tailscale, `fc00::/7`); `0.0.0.0`, `[::]`, public, link-local addresses and host names need `PGW_PROXY_ALLOW_PUBLIC_BIND`. |
 | `PGW_PROXY_UPSTREAM` | `https://api.anthropic.com` | Upstream base URL. Only `https://` or `http://127.0.0.1` / `http://localhost` are accepted; anything else is a `ConfigError`. |
 | `PGW_PROXY_SESSION_STRATEGY` | `metadata` | How the vault session key is derived: `metadata`, `header` or `single`. |
 | `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
@@ -275,6 +275,7 @@ stored token is lost.
 | `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
 | `PGW_PROXY_UNCHECKED_FIELDS` | `block` | What happens when the rescan finds something in a field the proxy does not transform (`tools`, `thinking`, an untransformed `system`, unknown fields and blocks): `block` refuses the request with 422 `privacy_gateway_leak` before anything is sent when the finding belongs to a [blocking class](#unchecked-fields-blocking-classes); other classes are only reported. `allow` forwards everything unchanged with `verdict: ok_with_unchecked_findings` and a warning at startup (**unsafe**: the found values go upstream in clear text). Any other value stops the start. |
 | `PGW_PROXY_ALLOW_UNAUTHENTICATED` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy start on a non-loopback address without an auth token, with a warning in the startup log. Anyone who reaches the port and knows a session key gets that session's original values back. |
+| `PGW_PROXY_ALLOW_PUBLIC_BIND` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy bind to a wildcard, public or link-local address or a host name, still only with an auth token. The proxy has no TLS: token, prompts with real values and restored answers cross the network as plain HTTP. The startup log warns. |
 | `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
 | `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
@@ -783,9 +784,13 @@ keeps working. Strategies (`PGW_PROXY_SESSION_STRATEGY`):
 
 | Strategy | Key |
 |---|---|
-| `metadata` (default) | The `session_id` field of a JSON `metadata.user_id` as Claude Code sends it; otherwise the `session_<uuid>` part of `metadata.user_id`; otherwise the `X-PGW-Session` header; otherwise a random per-process key. |
-| `header` | The `X-PGW-Session` header, else the per-process key. |
+| `metadata` (default) | The `session_id` field of a JSON `metadata.user_id` as Claude Code sends it; otherwise the `session_<uuid>` part of `metadata.user_id`; otherwise the `X-PGW-Session` header; otherwise a session for this request only. |
+| `header` | The `X-PGW-Session` header, else a session for this request only. |
 | `single` | One fixed key for everything. |
+
+A request session restores the placeholders of its own answer and is purged from the vault when
+the request or its stream ends, so a client without a key never sees another client's values.
+Its next turn gets new placeholders. Before 0.2.0 all such requests shared one key per process.
 
 The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 400
 (`privacy_gateway_session`) before anything is scanned or forwarded. This holds for every request,
@@ -888,6 +893,12 @@ in such a field:
 - Payment: `IBAN`, `CREDIT_CARD`, `DEBIT_CARD`, `CVV`, `BANK_ACCOUNT`.
 - Identity: `TAX_ID`, `SOCIAL_SECURITY_ID`, `PASSPORT_ID`, `NATIONAL_ID`, `DATE_OF_BIRTH`.
 
+The rescan covers the keys of these objects too, except the field names of the Messages API and
+of JSON Schema. In the request log a key outside that list appears as `<key>` in a path, and a
+finding in the key itself has the path of its value plus `#key`. A `data` field is skipped only
+as the base64 source of an `image` or `document` block in a message or `tool_result`, with an
+allowed media type and well-formed base64; anywhere else it is scanned like any string.
+
 The list is `UNCHECKED_BLOCKING_CLASSES` in `privacy_gateway_proxy/audit_trail.py`. Every other
 class (for example `FQDN`, `URL`, `SOCIAL_MEDIA_HANDLE`, `ORGANIZATION_NAME`, `PERSON_INITIALS`,
 addresses, IDs) is only reported in `observed` and `outgoing.rescan.findings`, never with a value,
@@ -930,7 +941,20 @@ a token. The check covers every route except `GET /health`, which answers `{"sta
 nothing else. `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` overrides the refusal; that setup is unsafe and
 the startup log says so.
 
+Besides loopback the proxy binds only to explicit private addresses (RFC 1918, `100.64.0.0/10`,
+`fc00::/7`). A wildcard (`0.0.0.0`, `[::]`), a public or link-local address or a host name is
+refused unless `PGW_PROXY_ALLOW_PUBLIC_BIND=1` is set, and then still needs a token. The proxy
+speaks plain HTTP and has no TLS, so on such an address the token and every request and answer
+travel unencrypted unless the network itself encrypts them.
+
 The proxy holds no credentials of its own: `x-api-key` and `Authorization` are forwarded untouched.
+
+Request headers: `Cookie`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and `Via` are never
+forwarded. The values of all other forwarded headers are scanned with the blocking classes
+above; a finding blocks the request with 422 and the request log names the header by position
+(`headers[3]`), never by name. Not scanned are `x-api-key`, `Authorization` and the id headers
+`x-claude-code-session-id` and `x-client-request-id` when they hold a plain UUID.
+`PGW_PROXY_UNCHECKED_FIELDS=allow` forwards headers unscanned.
 
 ### Sharing one proxy across machines
 
@@ -961,7 +985,8 @@ Limits of this setup:
 
 - The host check is off for a non-loopback bind; the auth token is the access control. Limit
   reachability further with the network's access rules (Tailscale ACLs, a firewall) to your own
-  devices. Never bind `0.0.0.0` on a host with a public interface.
+  devices. A bind to `0.0.0.0` or a public address is refused unless you set
+  `PGW_PROXY_ALLOW_PUBLIC_BIND=1`; on a host with a public interface, do not.
 - Between client and proxy the prompts travel as plain HTTP with real values. The private network
   encrypts that hop, nothing else does.
 - A client without a connection to the private network gets a connection error. There is no
@@ -1311,7 +1336,8 @@ Supporting properties:
   replaced without a valid check digit; without such a label the check digit decides. German tax
   numbers written with slashes are not covered by this rule.
 - **Images, PDFs and base64.** `image` blocks and `document` blocks with a base64 or PDF source
-  pass through unchanged and are never scanned. Screenshots and scanned invoices are not protected.
+  pass through unchanged, and the `data` of a well-formed base64 source with an allowed media type
+  is never scanned. Screenshots and scanned invoices are not protected.
 - **`thinking` blocks keep their tokens.** They are signed by Anthropic, so the proxy cannot rewrite
   them. Extended-thinking text you see may contain `<IBAN_001>` instead of the value.
 - **Redaction is irreversible.** A round trip is byte-identical only for documents that contain no
@@ -1326,6 +1352,15 @@ Supporting properties:
   break restoration in a stream.
 - **One vault per process.** The proxy serves exactly one vault and one configuration. The auth
   token is one shared secret, not a per-user login.
+- **No TLS.** The listener speaks plain HTTP. On a private network such as Tailscale or WireGuard
+  the network encrypts the hop; on any other network token, prompts and answers are readable on
+  the way. TLS on the listener is planned for a later version.
+- **No client identity.** A session is chosen by what the client sends (`metadata.user_id` or
+  `X-PGW-Session`). Whoever reaches the port, holds the token and knows a session key gets that
+  session's values restored. Only a request without any key is isolated, by a session of its own.
+- **Header scan.** Header values are checked by the same rules as unchecked fields. `x-api-key`,
+  `Authorization` and UUID id headers are not scanned, and a value the rules do not find is
+  forwarded as it came.
 - **Unchecked fields are not repaired.** `tools` definitions, `metadata`, an unchanged system
   prompt (OAuth login) and signed blocks are never changed. By default a finding of a blocking class
   in one of them blocks the whole request; other classes (domains, URLs, handles, organization
