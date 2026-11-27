@@ -139,3 +139,25 @@ async def test_a_deeply_nested_upstream_error_keeps_its_status(
 
     status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
     assert status == 429
+
+
+def test_httpx_request_lines_with_full_urls_are_not_logged(gateway: Gateway, tmp_path: Path) -> None:
+    logging.getLogger("httpx").setLevel(logging.NOTSET)
+    server.create_app(ProxySettings(audit_dir=tmp_path / "a"), gateway, client=httpx.AsyncClient())
+    assert logging.getLogger("httpx").level >= logging.WARNING
+
+
+@pytest.mark.parametrize("kind", [[], {}, ["rate_limit_error"], 7])
+def test_error_type_of_another_json_type_is_a_dash(kind: object) -> None:
+    assert server._error_type(json.dumps({"error": {"type": kind}}).encode()) == "-"
+
+
+@pytest.mark.asyncio
+async def test_an_error_type_list_keeps_the_upstream_status(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"type": "error", "error": {"type": []}})
+
+    status, _, _ = await _call(gateway, tmp_path, "POST", "/v1/messages", upstream)
+    assert status == 429

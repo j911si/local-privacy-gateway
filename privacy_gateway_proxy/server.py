@@ -154,6 +154,8 @@ def short_path(path: str) -> str:
 
 
 def _redact_access_log() -> None:
+    # httpx logs every upstream request with its full URL (path IDs, query) at INFO.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, _QueryRedactingFilter) for item in access.filters):
         access.addFilter(_QueryRedactingFilter())
@@ -779,7 +781,7 @@ def _error_type(raw_body: bytes) -> str:
     except (ValueError, AttributeError, RecursionError):
         return "-"
     kind = error.get("type") if isinstance(error, dict) else None
-    return kind if kind in ERROR_TYPES else "-"
+    return kind if isinstance(kind, str) and kind in ERROR_TYPES else "-"
 
 
 def _leak_response(exc: LeakageError) -> Response:

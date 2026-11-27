@@ -405,10 +405,16 @@ class Vault:
         """Remove a session with all its mappings and surface forms."""
         # ponytail: the deletion gets its own fsync; NORMAL would leave it to a checkpoint that
         # a reader on another connection can block.
+        # A session without mappings (a request-only scan session) frees no ciphertext, so it
+        # skips the VACUUM that would otherwise block for the size of the whole vault.
         self._conn.execute("PRAGMA synchronous=FULL")
         try:
-            self._conn.execute("DELETE FROM surface_forms WHERE session_id = ?", (session_id,))
-            self._conn.execute("DELETE FROM mappings WHERE session_id = ?", (session_id,))
+            freed = self._conn.execute(
+                "DELETE FROM surface_forms WHERE session_id = ?", (session_id,)
+            ).rowcount
+            freed += self._conn.execute(
+                "DELETE FROM mappings WHERE session_id = ?", (session_id,)
+            ).rowcount
             self._conn.execute(
                 "DELETE FROM pending_mappings WHERE session_id = ?", (session_id,)
             )
@@ -417,9 +423,13 @@ class Vault:
             )
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
         finally:
             self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._reclaim()
+        if freed:
+            self._reclaim()
 
     def purge_older_than(self, days: int) -> int:
         """Remove every session older than the given number of days."""
