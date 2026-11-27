@@ -46,7 +46,8 @@ SCHEMA_KEYS = frozenset(
         "end_block_index", "encrypted_content", "encrypted_index", "context", "enabled",
         "description", "input_schema", "defer_loading", "strict", "max_uses",
         "allowed_domains", "blocked_domains", "user_location", "disable_parallel_tool_use",
-        "authorization_token", "tool_configuration", "allowed_tools",
+        "authorization_token", "tool_configuration", "allowed_tools", "safeguards",
+        "classifier_context",
         # JSON Schema keywords inside `input_schema`
         "$schema", "$ref", "$defs", "$id", "definitions", "properties", "required", "items",
         "enum", "const", "default", "title", "pattern", "minimum", "maximum",
@@ -68,6 +69,7 @@ NOTICE_TEXT = (
     "example values, and never remove them.\n"
     "</privacy-gateway>"
 )
+SAFEGUARD_KEYS = frozenset({"type", "classifier_context"})
 CONFIG_KEYS = frozenset(
     {"model", "max_tokens", "stream", "temperature", "top_p", "top_k", "thinking", "tool_choice"}
 )
@@ -113,6 +115,7 @@ def collect_request_texts(body: dict, *, include_system: bool = True) -> list[Te
         for index, message in enumerate(messages):
             if isinstance(message, dict):
                 _collect_content(message.get("content"), ("messages", index, "content"), refs)
+    _collect_safeguards(body.get("safeguards"), refs)
     return refs
 
 
@@ -155,6 +158,8 @@ def collect_unchecked(body: dict, *, include_system: bool = True) -> list[Unchec
                 _add_unchecked(refs, ("tools", index), "tools", tool)
         elif key == "metadata":
             _add_unchecked(refs, (key,), "metadata", value)
+        elif key == "safeguards" and isinstance(value, list):
+            _unchecked_safeguards(value, refs)
         elif key not in CONFIG_KEYS:
             _add_unchecked(refs, (key,), "other", value)
     return refs
@@ -517,6 +522,27 @@ def _collect_strings(value: Any, path: Path, refs: list[TextRef]) -> None:
     elif isinstance(value, list):
         for index, item in enumerate(value):
             _collect_strings(item, (*path, index), refs)
+
+
+def _collect_safeguards(safeguards: Any, refs: list[TextRef]) -> None:
+    """The classifier context of Claude Code's `safeguards` entries, transformed like tool input."""
+    if not isinstance(safeguards, list):
+        return
+    for index, item in enumerate(safeguards):
+        if isinstance(item, dict) and "classifier_context" in item:
+            _collect_keyed(
+                item["classifier_context"], ("safeguards", index, "classifier_context"), refs
+            )
+
+
+def _unchecked_safeguards(safeguards: list, refs: list[UncheckedRef]) -> None:
+    for index, item in enumerate(safeguards):
+        if not isinstance(item, dict):
+            _add_unchecked(refs, ("safeguards", index), "other", item)
+            continue
+        for key, value in item.items():
+            if key not in SAFEGUARD_KEYS:
+                _add_unchecked(refs, ("safeguards", index, key), "other", value)
 
 
 def _collect_keyed(value: Any, path: Path, refs: list[TextRef]) -> None:

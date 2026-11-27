@@ -254,3 +254,32 @@ async def test_anything_but_the_exact_billing_line_is_still_transformed(
 
     assert status == 200, data
     assert json.loads(sent[0])["system"][0]["text"] != line
+
+
+SAFEGUARD_CONTEXTS = [
+    "Arbeitsordner /home/testuser/projekt, Mail erika.beispiel@firma-test.de",
+    {"cwd": "/home/testuser/projekt", "notes": ["Konto DE89370400440532013000"]},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transform_system", [True, False])
+@pytest.mark.parametrize("context", SAFEGUARD_CONTEXTS)
+async def test_safeguards_context_is_pseudonymized_not_blocked(
+    gateway: Gateway, tmp_path: Path, context: Any, transform_system: bool
+) -> None:
+    # Interactive Claude Code 2.1.332 sends `safeguards` with a classifier context.
+    body = claude_code_body("Working directory: /srv/projekt", stream=True)
+    body["safeguards"] = [{"type": "synthetic_classifier", "classifier_context": context}]
+
+    status, data, sent, _ = await _send(
+        gateway, tmp_path, body, transform_system=transform_system
+    )
+
+    assert status == 200, data
+    upstream = sent[0].decode("utf-8")
+    for value in ("testuser", MAIL, IBAN):
+        assert value not in upstream
+    forwarded = json.loads(sent[0])["safeguards"]
+    assert forwarded[0]["type"] == "synthetic_classifier"
+    assert set(forwarded[0]) == {"type", "classifier_context"}
