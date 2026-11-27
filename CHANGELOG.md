@@ -71,6 +71,10 @@ All notable changes to this project are documented in this file. The format foll
   front of a health statement, more secret and password forms.
 - Keys of `tool_use.input` are replaced and rescanned. They are never restored.
 - systemd user unit example and a variant for a shared proxy on a private network.
+- Documentation: design principles in the README, a [coverage register](docs/COVERAGE.md) that
+  sorts the 141 configured classes by evidence, a public [roadmap](ROADMAP.md) with country and
+  language packs, and rules for contributed recognizers in CONTRIBUTING.md. The `languages`
+  setting is documented as having no effect.
 
 ### Changed
 - Every spelling of a known value gets its own token; restoring works by value only.
