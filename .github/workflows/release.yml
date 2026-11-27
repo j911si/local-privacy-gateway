@@ -8,6 +8,10 @@ name: Release
 # Only the exact approved commit is published: the owner sets the full 40-character SHA as the
 # variable RELEASE_COMMIT of the "pypi" environment before publishing the release
 # (gh variable set RELEASE_COMMIT --env pypi --body <sha>). Any other tagged commit fails.
+# Define RELEASE_COMMIT only in the environment: a repository or organization variable of the
+# same name would be used when the environment has none. The check lives in the workflow of
+# the tagged commit, so repository rules must also protect v* tags and the workflow file
+# (see the release checklist).
 on:
   release:
     types: [published]
@@ -16,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -36,7 +40,10 @@ jobs:
           enable-cache: false
       - name: Tag is on main and matches the package version
         run: |
-          git cat-file -t "refs/tags/${GITHUB_REF_NAME}" | grep -qx tag || { echo "tag ${GITHUB_REF_NAME} is not annotated"; exit 1; }
+          git fetch --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/release-tag"
+          test "$(git cat-file -t refs/release-tag)" = tag || { echo "tag ${GITHUB_REF_NAME} is not annotated"; exit 1; }
+          test "$(git rev-parse refs/release-tag^{commit})" = "${GITHUB_SHA}" || { echo "tag does not point to the event commit"; exit 1; }
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}" || { echo "checkout is not the event commit"; exit 1; }
           version=$(uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
           git fetch --no-tags origin main
@@ -50,7 +57,7 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish:
     needs: build
