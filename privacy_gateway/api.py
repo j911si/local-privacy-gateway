@@ -188,6 +188,8 @@ class GatewaySession:
         self._values: dict[tuple[str, str], str] | None = None
         self._redacted: dict[str, str] = {}
         self._generation = 0
+        self._owner = ""
+        self._confirmed: set[str] = set()
 
     def entries(self) -> Mapping[str, VaultEntry]:
         """Every token mapping this session knows."""
@@ -240,6 +242,7 @@ class GatewaySession:
         pipeline = self._gateway._pipeline
         registry = self._gateway.config.registry
         literal_tokens = numbered_tokens(text)
+        self._owner = secrets.token_hex(8)
         try:
             for attempt in range(MAX_PASSES):
                 generation = self._generation
@@ -271,6 +274,7 @@ class GatewaySession:
                         continue
                     raise
                 break
+            self._confirm([*written, *reused])
         except Exception:
             self._rollback(written, counters, redacted)
             raise
@@ -399,13 +403,14 @@ class GatewaySession:
             if assignment.token in self._entries:
                 reused.append(assignment.token)
                 continue
-            self._gateway.vault.store(
+            stored = self._gateway.vault.store(
                 self.session_id,
                 assignment.token,
                 assignment.data_class,
                 value,
                 [value],
                 assignment.attributes,
+                owner=self._owner,
             )
             self._entries[assignment.token] = VaultEntry(
                 value=value,
@@ -413,7 +418,19 @@ class GatewaySession:
                 surface_forms=[value],
                 attributes=dict(assignment.attributes),
             )
-            written.append(assignment.token)
+            (written if stored.changed else reused).append(assignment.token)
+
+    def _confirm(self, tokens: list[str]) -> None:
+        """Make every mapping the output hands out permanent before the output leaves."""
+        pending = {
+            token: self._entries[token]
+            for token in tokens
+            if token not in self._confirmed and token in self._entries
+        }
+        if not pending:
+            return
+        self._gateway.vault.confirm_tokens(self.session_id, pending)
+        self._confirmed.update(pending)
 
     def _learn_redacted(self, text: str, report: DetectionReport, learned: list[str]) -> None:
         """Keep redacted values in memory only, so every later copy is redacted too."""
@@ -481,7 +498,7 @@ class GatewaySession:
         self._rescans.clear()
         if written:
             self._known_changed()
-        self._gateway.vault.delete_tokens(self.session_id, written)
+        self._gateway.vault.delete_tokens(self.session_id, written, owner=self._owner)
         for token in written:
             self._entries.pop(token, None)
         for value in redacted:

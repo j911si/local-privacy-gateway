@@ -124,3 +124,60 @@ def test_parallel_processes_never_restore_a_foreign_name(
         for result in succeeded:
             assert fresh.restore(result["output"], session_id).text == result["letter"]
     assert set(errors) <= {"VaultError"}, errors
+
+
+STALE_CHILD = r"""
+import json, sys, time
+from pathlib import Path
+from privacy_gateway import Gateway
+
+ready, go = Path(sys.argv[1]), Path(sys.argv[2])
+with Gateway() as gateway:
+    session = gateway.session(sys.argv[3])
+    ready.touch()
+    while not go.exists():
+        time.sleep(0.001)
+    results = {}
+    try:
+        results["b"] = session.pseudonymize(sys.argv[4])
+    except Exception as exc:
+        results["b_error"] = type(exc).__name__
+    results["c"] = session.pseudonymize(sys.argv[5])
+print(json.dumps(results))
+"""
+
+
+def test_a_failed_call_in_another_process_keeps_the_mapping_this_process_issued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    letter_a = "Sehr geehrte Frau Müller, IBAN DE89370400440532013000, danke."
+    letter_b = "Sehr geehrte Frau Müller, IBAN DE02120300000000202051, danke."
+    letter_c = "Sehr geehrte Frau Schneider, danke."
+    env = _child_env(tmp_path)
+    for name in ("PGW_VAULT_DB", "PGW_VAULT_KEY_FILE", "PGW_AUDIT_LOG", "PGW_SKIP_USER_CONFIG"):
+        monkeypatch.setenv(name, env[name])
+    Vault(Path(env["PGW_VAULT_DB"]), Path(env["PGW_VAULT_KEY_FILE"])).close()
+    ready, go = tmp_path / "ready", tmp_path / "go"
+    child = subprocess.Popen(
+        [sys.executable, "-c", STALE_CHILD, str(ready), str(go), SESSION_KEY, letter_b, letter_c],
+        env=env,
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 60
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with Gateway() as gateway:
+        session = gateway.session(SESSION_KEY)
+        out_a = session.pseudonymize(letter_a)
+    go.touch()
+    stdout, stderr = child.communicate(timeout=120)
+    assert child.returncode == 0, stderr
+    results = json.loads(stdout)
+    assert results.get("b_error") == "VaultError", results
+
+    with Gateway() as fresh:
+        assert fresh.restore(out_a, session.session_id, mode="lenient").text == letter_a
+        assert fresh.restore(results["c"], session.session_id).text == letter_c
