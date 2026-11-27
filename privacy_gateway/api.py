@@ -18,6 +18,8 @@ from privacy_gateway.audit import AuditLog
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
+from privacy_gateway.detect.normalize import offset_map
+from privacy_gateway.detect.patterns import PatternStage
 from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, SpanIndex
 from privacy_gateway.leakage import (
@@ -55,6 +57,7 @@ AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
 STALE_REVISION = -1
 REDACTED_TRIM = " \t\r\n\"'`,;"
+REDACTED_RUN = re.compile(r"[^\W_]+")
 
 
 class Gateway:
@@ -64,6 +67,7 @@ class Gateway:
         self.config = config if isinstance(config, Config) else load_config(config, env=os.environ)
         self.audit = AuditLog(self.config.audit.path)
         self._pipeline = Pipeline(self.config)
+        self._patterns = PatternStage()
         self._vault: Vault | None = None
         self._audit_ids: OrderedDict[str, str] = OrderedDict()
 
@@ -190,6 +194,7 @@ class GatewaySession:
         self._known_cache: dict[str, tuple[str, str]] | None = None
         self._values: dict[tuple[str, str], str] | None = None
         self._redacted: dict[str, str] = {}
+        self._masked: dict[str, tuple[str, str]] = {}
         self._generation = 0
         self._owner = ""
         self._confirmed: set[str] = set()
@@ -257,8 +262,8 @@ class GatewaySession:
                 pseudonymized = pseudonymize_text(
                     text, report, self._gateway.config, counters=self._counters
                 )
-                self._write(text, pseudonymized, written, reused)
                 self._learn_redacted(text, report, redacted)
+                self._write(text, pseudonymized, written, reused, redacted)
                 try:
                     check_leakage(
                         pseudonymized.text,
@@ -357,6 +362,8 @@ class GatewaySession:
                     known.setdefault(form, (entry.data_class, token))
         for value, data_class in self._redacted.items():
             known.setdefault(value, (data_class, redacted_token(data_class)))
+        for original, (data_class, token) in self._masked.items():
+            known.setdefault(original, (data_class, token))
         self._known_cache = known
         return known
 
@@ -365,6 +372,8 @@ class GatewaySession:
             self._values = {}
             for token, entry in self._entries.items():
                 self._values.setdefault((entry.data_class, entry.value), token)
+            for original, (data_class, token) in self._masked.items():
+                self._values.setdefault((data_class, original), token)
         return self._values
 
     def _bind_tokens(self, text: str, report: DetectionReport) -> DetectionReport:
@@ -390,6 +399,7 @@ class GatewaySession:
         pseudonymized: PseudonymizedText,
         written: list[str],
         reused: list[str],
+        redacted: list[str],
     ) -> None:
         if pseudonymized.assignments:
             known = self._known()
@@ -408,6 +418,8 @@ class GatewaySession:
             if assignment.token in self._entries:
                 reused.append(assignment.token)
                 continue
+            original = value
+            value = self._without_redacted(value, redacted)
             stored = self._gateway.vault.store(
                 self.session_id,
                 assignment.token,
@@ -425,6 +437,57 @@ class GatewaySession:
             )
             self._track(stored)
             (written if stored.changed else reused).append(assignment.token)
+            if value != original:
+                self._masked[original] = (assignment.data_class, assignment.token)
+
+    def _without_redacted(self, value: str, learned: list[str]) -> str:
+        """`value` with every redacted value inside it replaced by its marker.
+
+        A tokenized finding can enclose a value of a redacted class (`?pin=4711` in a URL); the
+        overlap resolution keeps only the larger finding, so the vault would get the secret.
+        """
+        registry = self._gateway.config.registry
+        mapping = offset_map(value)
+        work = value if mapping is None else mapping.text
+        spans: list[tuple[Span, str]] = []
+        for finding in self._gateway._patterns.run(work, self._gateway.config, []):
+            data_class = registry.get(finding.data_class)
+            if data_class.policy is not Policy.REDACT:
+                continue
+            span = finding.span if mapping is None else mapping.original(finding.span)
+            secret = value[span.start : span.end].strip(REDACTED_TRIM)
+            if not secret:
+                continue
+            spans.append((span, data_class.name))
+            if secret not in self._redacted:
+                self._redacted[secret] = data_class.name
+                learned.append(secret)
+                self._known_cache = None
+                self._known_changed()
+        for match in REDACTED_RUN.finditer(value):
+            data_class_name = self._redacted.get(match.group(0))
+            if data_class_name is not None:
+                spans.append((Span(match.start(), match.end()), data_class_name))
+        for secret, data_class_name in self._redacted.items():
+            if REDACTED_RUN.fullmatch(secret) or secret not in value:
+                continue
+            start = value.find(secret)
+            while start != -1:
+                spans.append((Span(start, start + len(secret)), data_class_name))
+                start = value.find(secret, start + 1)
+        if not spans:
+            return value
+        parts: list[str] = []
+        position = 0
+        for span, data_class_name in sorted(spans, key=lambda item: (item[0].start, -item[0].end)):
+            if span.end <= position:
+                continue
+            parts.append(value[position : max(position, span.start)])
+            if span.start >= position:
+                parts.append(redacted_token(data_class_name))
+            position = span.end
+        parts.append(value[position:])
+        return "".join(parts)
 
     def _confirm(self, tokens: list[str]) -> None:
         """Make every mapping the output hands out permanent before the output leaves."""
@@ -499,8 +562,8 @@ class GatewaySession:
         generation = self._generation
         residue = replace(report, findings=kept)
         learned = pseudonymize_text(output, residue, self._gateway.config, counters=self._counters)
-        self._write(output, learned, written, reused)
         self._learn_redacted(output, residue, redacted)
+        self._write(output, learned, written, reused, redacted)
         return self._generation != generation
 
     def _rollback(
@@ -520,6 +583,12 @@ class GatewaySession:
             self._entries.pop(token, None)
         for value in redacted:
             self._redacted.pop(value, None)
+        dropped = set(written)
+        self._masked = {
+            original: binding
+            for original, binding in self._masked.items()
+            if binding[1] not in dropped
+        }
         if redacted:
             self._known_changed()
         self._counters = counters
@@ -529,6 +598,11 @@ class GatewaySession:
         vault = self._gateway.vault
         self._revision = vault.revision(self.session_id)
         self._entries = vault.load(self.session_id)
+        self._masked = {
+            original: binding
+            for original, binding in self._masked.items()
+            if binding[1] in self._entries
+        }
         self._known_cache = None
         self._values = None
         self._rescans.clear()
