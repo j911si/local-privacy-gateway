@@ -181,6 +181,10 @@ STOP_WORDS = frozenset(
     }
 )
 TOKEN_SHAPED_RE = re.compile(r"[A-Z][A-Z0-9_]*_\d{3,}")
+PERSON_LABEL_RE = re.compile(
+    r"(?i)(?:kontoinhaber|inhaber|karteninhaber|patientin|versicherte|kundin|empfänger"
+    r"|ansprechpartner|mitarbeiter|account holder|cardholder)"
+)
 
 HEALTH_MARKERS = (
     "diagnose",
@@ -395,9 +399,7 @@ class ContextStage:
         self._initials(text, config, out)
         self._handles(text, config, out)
         self._countries(text, config, out)
-        return self._deduplicate(
-            [f for f in out if not TOKEN_SHAPED_RE.fullmatch(text[f.span.start : f.span.end])]
-        )
+        return self._deduplicate([f for f in out if not _token_shaped(text, f.span, config)])
 
     def _emit(
         self,
@@ -533,7 +535,8 @@ class ContextStage:
                 continue
             if match.group("generic") and not _has_first_name(text[span.start : span.end]):
                 continue
-            if self._label_name_allowed(text[span.start : span.end]):
+            person_label = PERSON_LABEL_RE.match(text, match.start()) is not None
+            if self._label_name_allowed(text[span.start : span.end], person_label):
                 self._emit(config, out, span, "PERSON_FULL_NAME", 0.9, {"source": "label"})
         for match in LABEL_PART_RE.finditer(text):
             span = _group_span(text, match, 2)
@@ -545,9 +548,13 @@ class ContextStage:
             self._emit(config, out, span, data_class, 0.9, {"source": "label"})
 
     @staticmethod
-    def _label_name_allowed(name: str) -> bool:
+    def _label_name_allowed(name: str, person_label: bool = False) -> bool:
         words = [word.lower() for word in re.split(r"[\s-]+", name) if word[:1].isupper()]
-        blocked = STOP_WORDS | NAME_DENY_WORDS | _common_name_words()
+        blocked = STOP_WORDS | NAME_DENY_WORDS
+        if not (person_label and len(words) >= 2):
+            # ponytail: after an account-holder label `Max Mustermann` is a person, after `Name:`
+            # or alone an ambiguous word may be a product or a common noun.
+            blocked = blocked | _common_name_words()
         if any(word in blocked for word in words):
             return False
         if name.isupper() or len(name) < MIN_SALUTATION_NAME_LENGTH:
@@ -622,3 +629,20 @@ class ContextStage:
     def _countries(self, text: str, config: Config, out: list[Finding]) -> None:
         for span, data_class in _country_matcher().find(text):
             self._emit(config, out, span, data_class, 0.8)
+
+
+def _token_shaped(text: str, span: Span, config: Config) -> bool:
+    """True for a value shaped like an issued token: a known class name plus `_` and digits."""
+    match = TOKEN_SHAPED_RE.fullmatch(text, span.start, span.end)
+    if match is None:
+        return False
+    label = text[span.start : span.end].rsplit("_", 1)[0]
+    return label in _token_labels(config)
+
+
+def _token_labels(config: Config) -> frozenset[str]:
+    """Every label an issued token can carry: class names and their token labels."""
+    return frozenset(
+        name for data_class in config.registry
+        for name in (data_class.name, config.registry.label_for(data_class.name))
+    )

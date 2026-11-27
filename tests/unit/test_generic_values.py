@@ -85,11 +85,19 @@ def test_generic_word_with_digit_or_separator_stays_a_finding(
     assert ContextStage().run(text, default_config, [])
 
 
-@pytest.mark.parametrize("value", ["HOST_001", "ACCOUNT_ID_001", "PERSON_FULL_NAME_012"])
+# The exception covers the labels issued tokens carry (`HOSTNAME`, `PERSON`, class names); an
+# identifier with another prefix, such as the ticket `OPS_471`, is a value (K candidate 02#4).
+@pytest.mark.parametrize("value", ["HOSTNAME_001", "ACCOUNT_ID_001", "PERSON_FULL_NAME_012"])
 def test_token_shaped_values_are_not_context_findings(value: str, default_config: Config) -> None:
     text = f"Kundennummer: {value} und Service: {value}"
     found: list[Finding] = ContextStage().run(text, default_config, [])
     assert all(text[f.span.start : f.span.end] != value for f in found)
+
+
+@pytest.mark.parametrize("text", ["Ticket: OPS_471", "Kundennummer: HOST_001"])
+def test_identifier_with_other_prefix_is_a_finding(text: str, default_config: Config) -> None:
+    found = ContextStage().run(text, default_config, [])
+    assert [text[f.span.start : f.span.end] for f in found] == [text.split(": ")[1]]
 
 
 def test_token_like_value_with_fewer_digits_is_not_token_shaped(default_config: Config) -> None:
@@ -142,7 +150,7 @@ def plain_gateway(default_config: Config, tmp_path: Path) -> Gateway:
         ("Pfad /home/runner/work und /Users/Shared/x", "Der runner und Shared laufen."),
         ("Max Klein schrieb. Max antwortete.", "max_tokens=5; Math.max(a, b); max wins"),
         ("Account: Admin, Service: API", "Der Admin ruft die API auf."),
-        ("Kundennummer: HOST_001", "Siehe HOST_001 und <HOST_001>."),
+        ("Kundennummer: HOSTNAME_001", "Siehe HOSTNAME_001 und <HOSTNAME_001>."),
     ],
 )
 def test_session_does_not_learn_generic_values(
