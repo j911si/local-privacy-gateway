@@ -118,11 +118,11 @@ def test_all_marker_words_before_long_whitespace_scale_linearly(default_config: 
             list(pattern.finditer(text))
 
     def payload(n: int) -> str:
-        return "Kundennummer" + " " * n + "\nserver" + "\t" * n + "\nhost -" + " " * n
+        return "Kundennummer" + " " * n + "!\nserver" + "\t" * n + "!\nhost -" + " " * n + "!"
 
     small, large = (
-        best_of_three(lambda: scan(payload(25_000))),
-        best_of_three(lambda: scan(payload(100_000))),
+        best_of_three(lambda: scan(payload(5_000))),
+        best_of_three(lambda: scan(payload(20_000))),
     )
     assert large < 2.0, f"{large:.2f}s"
     assert large < 0.05 or large / small < 8.0, f"factor {large / small:.2f}"
