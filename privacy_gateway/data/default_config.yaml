@@ -467,15 +467,15 @@ classes:
   ANTHROPIC_API_KEY:
     category: SECRET
     policy: redact
-    patterns: ['\bsk-ant-[A-Za-z0-9_\-]{40,}']
+    patterns: ['(?<![^\W_])sk-ant-[A-Za-z0-9_\-]{40,}']
   OPENAI_API_KEY:
     category: SECRET
     policy: redact
-    patterns: ['\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_\-]{20,}']
+    patterns: ['(?<![^\W_])sk-(?!ant-)(?:proj-)?[A-Za-z0-9_\-]{20,}']
   STRIPE_SECRET_KEY:
     category: SECRET
     policy: redact
-    patterns: ['\bsk_(?:live|test)_[A-Za-z0-9]{20,}']
+    patterns: ['(?<![^\W_])sk_(?:live|test)_[A-Za-z0-9]{20,}']
   API_SECRET:
     category: SECRET
     policy: redact
@@ -533,7 +533,7 @@ classes:
   JWT:
     category: SECRET
     policy: redact
-    patterns: ['\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b']
+    patterns: ['(?<![^\W_])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b']
   OAUTH_CODE:
     category: SECRET
     policy: redact
@@ -567,7 +567,7 @@ classes:
   AWS_ACCESS_KEY:
     category: SECRET
     policy: redact
-    patterns: ['\b(?:AKIA|ASIA)[A-Z0-9]{16}\b']
+    patterns: ['(?<![^\W_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![^\W_])']
   AWS_SECRET_KEY:
     category: SECRET
     policy: redact
@@ -586,7 +586,7 @@ classes:
     policy: redact
     patterns:
       - '"private_key_id":\s*"[a-f0-9]{40}"'
-      - '\bAIza[0-9A-Za-z_-]{35}\b'
+      - '(?<![^\W_])AIza[0-9A-Za-z_-]{35}(?![^\W_])'
   KUBERNETES_SECRET:
     category: SECRET
     policy: redact
@@ -594,16 +594,16 @@ classes:
     category: SECRET
     policy: redact
     patterns:
-      - '\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b'
-      - '\bgithub_pat_[A-Za-z0-9_]{80,}\b'
+      - '(?<![^\W_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}(?![^\W_])'
+      - '(?<![^\W_])github_pat_[A-Za-z0-9_]{80,}\b'
   GITLAB_TOKEN:
     category: SECRET
     policy: redact
-    patterns: ['\bglpat-[A-Za-z0-9_-]{20,}\b']
+    patterns: ['(?<![^\W_])glpat-[A-Za-z0-9_-]{20,}\b']
   PERSONAL_ACCESS_TOKEN:
     category: SECRET
     policy: redact
-    patterns: ['\bxox[baprs]-[A-Za-z0-9-]{10,}\b']
+    patterns: ['(?<![^\W_])xox[baprs]-[A-Za-z0-9-]{10,}(?![^\W_])']
     context_words: ['pat', 'personal access token']
   DATABASE_CONNECTION_STRING:
     category: SECRET
