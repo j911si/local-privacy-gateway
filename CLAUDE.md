@@ -31,7 +31,8 @@ claude --model "sonnet[1m]"                          # else Claude Code assumes 
 Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY_UPSTREAM`,
 `PGW_PROXY_SESSION_STRATEGY`, `PGW_PROXY_TRANSFORM_SYSTEM`, `PGW_PROXY_PLACEHOLDER_NOTICE`,
 `PGW_PROXY_DEBUG_DIR`, `PGW_PROXY_DEBUG_ORIGINALS`, `PGW_AUDIT_LOG_DIR`,
-`PGW_PROXY_RESCAN_BUDGET`.
+`PGW_PROXY_RESCAN_BUDGET`, `PGW_PROXY_PASSTHROUGH_PATHS`, `PGW_PROXY_AUTH_TOKEN`,
+`PGW_PROXY_AUTH_TOKEN_FILE`, `PGW_PROXY_ALLOW_UNAUTHENTICATED`, `PGW_PROXY_UNCHECKED_FIELDS`.
 
 ## Architecture
 
@@ -43,8 +44,25 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Each stage receives the accumulated findings read-only and returns **only its new findings**
   (`detect/base.py`). The shared interfaces in the plan are a contract — do not change a signature
   without updating the plan's "Shared interfaces" section.
-- `correlate()` gives every occurrence of the same value one `entity_id`, so the pseudonymizer
-  emits one token per entity, not per occurrence.
+- `correlate()` gives every occurrence of the same value one `entity_id`. The pseudonymizer emits
+  one token per (entity, exact span text), so each spelling restores byte for byte; `restore_text`
+  always replaces a token by its `entry.value`.
+- Replacement and leak check share one search for known values (`known_occurrences` /
+  `KnownMatcher` in `detect/session.py`); `SubstringSweep` is the independent second search that
+  re-replaces and blocks only when something remains. Do not add a second matcher to `leakage.py`.
+- A pattern with the named groups `label` and `value` skips the class validator and
+  `context_required`, and `value` is the span (`TAX_ID` behind `Steuer-ID:`).
+- `context.LABEL_NAME_RE` takes names behind person labels; behind the generic label `name`
+  (group `generic`) a match needs a word from the first-name list. Deriving single name parts
+  from a full name was tried twice and removed: it made the leak check block valid requests.
+- The proxy replaces and rescans the keys of objects inside `tool_use.input` (audit paths
+  `input{0}#key`, `coverage.checked_keys`), answers a malformed body, a query outside
+  `QUERY_NAMES` or a finding in a path segment with HTTP 400 `invalid_request_error`, and writes
+  `verdict: ok_with_unchecked_findings` when only unchecked fields have findings and
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`; by default (`block`) a rescan hit of a class in
+  `audit_trail.UNCHECKED_BLOCKING_CLASSES` in an unchecked field blocks with 422 before the
+  upstream call, except the exact Claude Code `metadata.user_id`
+  (`session_key.CLAUDE_CODE_USER_IDS`) and billing line in `system[0]` (`BILLING_LINE_RE`).
 - `api.py` fails closed: any exception or `LeakageError` purges the session and re-raises; no
   output is produced. `tests/integration/test_no_network.py` statically forbids importing
   `socket`, `http`, `urllib.request`, `requests`, `httpx`, `aiohttp`, `ssl`, `ftplib`, `smtplib`.
@@ -59,10 +77,17 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
   is kept back until the next delta or `content_block_stop`, so a token is never split.
 - Besides the old `PGW_AUDIT_LOG` events, `server.py` writes one `proxy_request` v2 line per
   `/v1/messages` request via `audit_trail.py` into `PGW_AUDIT_LOG_DIR` (`audit-YYYY-MM-DD.jsonl`,
-  UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings and a salted
-  `hmac`, unchecked fields with a read-only `observed` scan, `outgoing` sha256/bytes and a rescan
-  of the sent body (`GatewaySession.rescan`); a rescan hit in a checked field blocks the request.
-  `verdict: ok` only means the rules found nothing. Tests point `PGW_AUDIT_LOG_DIR` at `tmp_path`.
+  UTC, 180-day rotation in `audit.RequestAuditLog`): checked fields with findings (no value, no
+  value hash, no salt file), unchecked fields with a read-only `observed` scan, `outgoing`
+  sha256/bytes and a rescan of the sent body (`GatewaySession.rescan`); a rescan hit in a
+  checked field blocks the request. `verdict: ok` only means the rules found nothing.
+- No log and no debug dump name carries the session key (plain, shortened or hashed): it
+  restores a session through the proxy. The v2 `session` is `audit_trail.audit_id(key)`, a
+  random 12-hex id held in memory per process; the old `proxy_request` event has no session
+  field. `tests/proxy/test_audit_data_minimization.py` checks this.
+- `tests/conftest.py` points `HOME`, the XDG directories, the vault, the key and both audit
+  logs into `tmp_path` for every test, so a test that drops a `PGW_*` path still never
+  writes the user's real files (`tests/unit/test_test_isolation.py`).
 - `GatewaySession` drops its result cache whenever the set of known values changes, and
   `pseudonymize_report_many` repeats the pass over a request's texts until no text adds a value.
   Inside one text `pseudonymize_report` repeats while the known values change (`MAX_PASSES`, 4),
@@ -89,7 +114,7 @@ Other env vars: `PGW_RESTORE_MODE`, `PGW_CONFIG`, `PGW_PROXY_LISTEN`, `PGW_PROXY
 - Values never appear in findings, reports, audit events or exception messages — only class names,
   spans and counts.
 - Commit per task with a conventional message; end the body with
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>`.
 
 ## Documentation
 

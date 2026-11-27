@@ -17,11 +17,11 @@ from privacy_gateway import Gateway
 from privacy_gateway.config import Config
 from privacy_gateway.model import DetectionReport
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
-from privacy_gateway_proxy import server, transform
+from privacy_gateway_proxy import audit_trail, server, transform
 from privacy_gateway_proxy.settings import ProxySettings, audit_dir_for, load_settings
 
 UPSTREAM = "https://upstream.test"
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 NAME = "Müller"
 IBAN = "DE89370400440532013000"
 EMAIL = "anna.mueller@kunde-beispiel.example"
@@ -38,7 +38,7 @@ TOP_KEYS = [
     "v", "event", "ts", "request_id", "session", "path", "streaming", "duration_ms",
     "verdict", "coverage", "fields", "outgoing",
 ]
-FINDING_KEYS = {"cls", "start", "end", "token", "policy", "confidence", "stage", "hmac"}
+FINDING_KEYS = {"cls", "start", "end", "token", "policy", "confidence", "stage"}
 
 
 @pytest.fixture
@@ -113,13 +113,17 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     (entry,) = entries(audit_dir)
     assert list(entry) == TOP_KEYS
     assert entry["v"] == 2
+    assert all(
+        "hmac" not in finding for item in entry["fields"] for finding in item.get("findings", [])
+    )
     assert entry["event"] == "proxy_request"
     assert re.fullmatch(r"[0-9a-f-]{36}", entry["request_id"])
-    assert entry["session"] == hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
+    assert re.fullmatch(r"[0-9a-f]{12}", entry["session"])
+    assert entry["session"] != hashlib.sha256(CONVERSATION.encode()).hexdigest()[:12]
     assert entry["path"] == "/v1/messages"
     assert entry["streaming"] is False
     assert entry["verdict"] == "ok"
-    assert entry["coverage"] == {"checked_fields": 2, "unchecked_fields": 1}
+    assert entry["coverage"] == {"checked_fields": 2, "checked_keys": 0, "unchecked_fields": 1}
 
     notice = field(entry, "messages[0].content[0].text")
     assert notice["status"] == "checked"
@@ -134,11 +138,10 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
     assert iban["token"] == "<IBAN_001>"
     assert iban["policy"] == "tokenize"
     assert iban["stage"] == "pattern"
-    assert re.fullmatch(r"[0-9a-f]{16}", iban["hmac"])
     secret = by_class["ANTHROPIC_API_KEY"]
     assert secret["policy"] == "redact"
     assert secret["token"] == "<ANTHROPIC_API_KEY_REDACTED>"
-    assert "hmac" not in secret
+    assert set(secret) == FINDING_KEYS
 
     metadata = field(entry, "metadata")
     assert metadata["status"] == "unchecked"
@@ -159,7 +162,7 @@ async def test_entry_follows_the_contract_schema(gateway: Gateway, audit_dir: Pa
 async def test_the_log_holds_no_canary_value(gateway: Gateway, audit_dir: Path) -> None:
     seen: list[httpx.Request] = []
     tools = [{"name": "Read", "description": f"Siehe {URL} und {EMAIL}", "input_schema": {}}]
-    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+    async with build(gateway, audit_dir, ok_handler(seen), unchecked_fields="allow") as client:
         await client.post("/v1/messages", json=body_with(LETTER, tools=tools))
 
     sent = seen[0].content.decode("utf-8")
@@ -201,7 +204,7 @@ async def test_unchecked_fields_are_listed_with_observed_and_left_unchanged(
         {"role": "assistant", "content": [thinking, {"type": "text", "text": "Ja"}]},
         {"role": "user", "content": "Weiter"},
     ]
-    async with build(gateway, audit_dir, ok_handler(seen)) as client:
+    async with build(gateway, audit_dir, ok_handler(seen), unchecked_fields="allow") as client:
         response = await client.post("/v1/messages", json=body)
 
     assert response.status_code == 200
@@ -210,7 +213,7 @@ async def test_unchecked_fields_are_listed_with_observed_and_left_unchanged(
     assert sent["messages"][1]["content"][0] == thinking
     assert sent["messages"][0]["content"][2] == image
     (entry,) = entries(audit_dir)
-    assert entry["verdict"] == "ok"
+    assert entry["verdict"] == "ok_with_unchecked_findings"
     tool = field(entry, "tools[0]")
     assert tool == {
         "path": "tools[0]",
@@ -319,6 +322,24 @@ async def test_an_upstream_failure_is_logged_as_error(gateway: Gateway, audit_di
     assert response.status_code == 502
     (entry,) = entries(audit_dir)
     assert entry["verdict"] == "error"
+    assert entry["outgoing"]["upstream_status"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 400, 429])
+async def test_the_upstream_status_is_logged(
+    gateway: Gateway, audit_dir: Path, status: int
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"type": "error", "error": {"type": "x", "message": "y"}})
+
+    async with build(gateway, audit_dir, handler) as client:
+        response = await client.post("/v1/messages", json=body_with("Hallo"))
+
+    assert response.status_code == status
+    (entry,) = entries(audit_dir)
+    assert entry["outgoing"]["upstream_status"] == status
+    assert entry["verdict"] in ("ok", "ok_with_unchecked_findings")
 
 
 @pytest.mark.asyncio
@@ -337,6 +358,8 @@ async def test_streaming_requests_are_logged(gateway: Gateway, audit_dir: Path) 
 async def test_the_old_audit_log_keeps_its_format(
     gateway: Gateway, audit_dir: Path, tmp_path: Path
 ) -> None:
+    # The format stays except for `session_key`: the key restores a session through the
+    # proxy, so it is a credential and no reader needs it in this log.
     old = tmp_path / "old.jsonl"
     gateway.audit = type(gateway.audit)(old)
     async with build(gateway, audit_dir, ok_handler([])) as client:
@@ -345,8 +368,34 @@ async def test_the_old_audit_log_keeps_its_format(
     events = [json.loads(line) for line in old.read_text(encoding="utf-8").splitlines()]
     (event,) = [item for item in events if item["event"] == "proxy_request"]
     assert "v" not in event
-    assert event["session_key"] == CONVERSATION
+    assert "session_key" not in event
+    assert set(event) == {
+        "ts", "event", "path", "fields", "tokens", "leakage", "streaming", "duration_ms",
+        "system_transformed",
+    }
+    assert CONVERSATION not in old.read_text(encoding="utf-8")
     assert len(entries(audit_dir)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_session_audit_id_is_random_and_stable_within_a_session(
+    gateway: Gateway, audit_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = "9f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff"
+    second = body_with("Hallo")
+    second["metadata"] = {"user_id": f"user_abc_account_def_session_{other}"}
+    async with build(gateway, audit_dir, ok_handler([])) as client:
+        await client.post("/v1/messages", json=body_with("Hallo"))
+        await client.post("/v1/messages", json=body_with("Hallo"))
+        await client.post("/v1/messages", json=second)
+    monkeypatch.setattr(audit_trail, "_audit_ids", type(audit_trail._audit_ids)())
+    async with build(gateway, audit_dir, ok_handler([])) as client:
+        await client.post("/v1/messages", json=body_with("Hallo"))
+
+    first, again, foreign, restarted = (entry["session"] for entry in entries(audit_dir))
+    assert first == again
+    assert foreign != first
+    assert restarted != first
 
 
 def test_audit_dir_comes_from_the_environment(tmp_path: Path) -> None:
@@ -456,13 +505,15 @@ async def test_an_untransformed_system_prompt_is_unchecked_with_observed(
 ) -> None:
     seen: list[httpx.Request] = []
     body = body_with("Hallo", system=system)
-    async with build(gateway, audit_dir, ok_handler(seen), transform_system=False) as client:
+    async with build(
+        gateway, audit_dir, ok_handler(seen), transform_system=False, unchecked_fields="allow"
+    ) as client:
         response = await client.post("/v1/messages", json=body)
 
     assert response.status_code == 200
     assert json.loads(seen[0].content)["system"] == system
     (entry,) = entries(audit_dir)
-    assert entry["verdict"] == "ok"
+    assert entry["verdict"] == "ok_with_unchecked_findings"
     prompt = field(entry, path)
     assert prompt["status"] == "unchecked"
     assert prompt["reason"] == "system"

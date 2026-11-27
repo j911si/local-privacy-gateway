@@ -63,9 +63,9 @@ def test_run_finditer_equals_finditer(
 
 def test_base64_like_text_is_scanned_in_linear_time(default_config: Config) -> None:
     text = "iVBORw0KGgo" * 10_000
-    started = time.perf_counter()
+    started = time.process_time()
     Pipeline(default_config).run(text)
-    assert time.perf_counter() - started < 5
+    assert time.process_time() - started < 5
 
 
 DOTTED = (
@@ -107,6 +107,6 @@ def test_the_default_fqdn_pattern_takes_the_linear_path(default_config: Config) 
 
 
 def test_dotted_text_is_scanned_in_linear_time(default_config: Config) -> None:
-    started = time.perf_counter()
+    started = time.process_time()
     Pipeline(default_config).run("A." * 55_000)
-    assert time.perf_counter() - started < 5
+    assert time.process_time() - started < 5

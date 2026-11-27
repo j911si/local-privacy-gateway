@@ -6,7 +6,9 @@ import pytest
 
 from privacy_gateway.api import Gateway
 from privacy_gateway.config import Config
-from privacy_gateway.model import LeakageError
+from privacy_gateway.detect.session import known_occurrences
+from privacy_gateway.model import LeakageError, Span
+from privacy_gateway.tokens import ANY_TOKEN
 
 # (introducing text, the value's digits or letters to look for afterwards)
 SEEDS = {
@@ -110,6 +112,18 @@ def test_a_known_value_in_any_spelling_never_blocks_a_later_text(
         session = gateway.session()
         session.pseudonymize(intro)
         try:
-            session.pseudonymize(later)
+            output = session.pseudonymize(later)
         except LeakageError as error:
             pytest.fail(f"blocked: {[(x.kind, x.data_class) for x in error.leaks]}")
+        known = {
+            form: (entry.data_class, token)
+            for token, entry in session.entries().items()
+            for form in [entry.value, *entry.surface_forms]
+        }
+        tokens = [Span(m.start(), m.end()) for m in ANY_TOKEN.finditer(output)]
+        left = [
+            span
+            for span, _ in known_occurrences(output, known, default_config.registry)
+            if not any(token.contains(span) for token in tokens)
+        ]
+        assert not left, "a known value is still in the output"

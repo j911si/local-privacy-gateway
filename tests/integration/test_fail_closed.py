@@ -24,7 +24,9 @@ SECRETS = (
 )
 
 
-def unchanged(text: str, report: DetectionReport, config: Config) -> PseudonymizedText:
+def unchanged(
+    text: str, report: DetectionReport, config: Config, counters: dict[str, int] | None = None
+) -> PseudonymizedText:
     return PseudonymizedText(text=text, assignments=[])
 
 
@@ -112,3 +114,10 @@ def test_ignored_class_is_left_in_place(
     with Gateway(config_path) as gateway:
         result = gateway.pseudonymize(text)
     assert IBAN in result.text
+
+
+def test_a_document_without_session_key_gets_the_substring_sweep(gateway: Gateway) -> None:
+    text = "Sehr geehrter Herr Wendland, Ihr Login lautet Wendland2024."
+    result = gateway.pseudonymize(text)
+    assert "Wendland" not in result.text
+    assert gateway.restore(result.text, result.session_id, "strict").text == text

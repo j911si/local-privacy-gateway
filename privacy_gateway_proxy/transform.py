@@ -3,11 +3,61 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-Path = tuple[str | int, ...]
+
+@dataclass(frozen=True)
+class Slot:
+    """The value at one position of a JSON object, addressed by position so no key is rendered."""
+
+    index: int
+
+
+@dataclass(frozen=True)
+class KeyAt:
+    """The key text at one position of a JSON object."""
+
+    index: int
+
+
+@dataclass(frozen=True)
+class KeyOf:
+    """The key of the value at the preceding path."""
+
+
+KEY_OF = KeyOf()
+Path = tuple[str | int | Slot | KeyAt | KeyOf, ...]
+UNKNOWN_KEY = "<key>"
+SCHEMA_KEYS = frozenset(
+    {
+        # Messages API request, message, content block, tool and tool_choice fields
+        "model", "max_tokens", "messages", "system", "metadata", "user_id", "stop_sequences",
+        "stream", "temperature", "top_p", "top_k", "tools", "tool_choice", "thinking",
+        "service_tier", "container", "mcp_servers", "context_management", "output_config",
+        "output_format", "budget_tokens", "display", "effort", "format", "edits", "trigger",
+        "keep", "clear_at_least", "clear_tool_inputs", "exclude_tools", "value", "role",
+        "content", "type", "text", "source", "media_type", "data", "url", "file_id", "id",
+        "name", "input", "tool_use_id", "is_error", "cache_control", "ttl", "signature",
+        "citations", "cited_text", "document_index", "document_title", "start_char_index",
+        "end_char_index", "start_page_number", "end_page_number", "start_block_index",
+        "end_block_index", "encrypted_content", "encrypted_index", "context", "enabled",
+        "description", "input_schema", "defer_loading", "strict", "max_uses",
+        "allowed_domains", "blocked_domains", "user_location", "disable_parallel_tool_use",
+        "authorization_token", "tool_configuration", "allowed_tools", "safeguards",
+        "classifier_context",
+        # JSON Schema keywords inside `input_schema`
+        "$schema", "$ref", "$defs", "$id", "definitions", "properties", "required", "items",
+        "enum", "const", "default", "title", "pattern", "minimum", "maximum",
+        "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems",
+        "maxItems", "uniqueItems", "additionalProperties", "anyOf", "oneOf", "allOf", "not",
+        "examples", "nullable", "propertyNames", "patternProperties",
+        # the proxy's own label for request headers in audit paths
+        "headers",
+    }
+)
 
 NOTICE_MARKER = "<privacy-gateway>"
 NOTICE_TEXT = (
@@ -19,6 +69,7 @@ NOTICE_TEXT = (
     "example values, and never remove them.\n"
     "</privacy-gateway>"
 )
+SAFEGUARD_KEYS = frozenset({"type", "classifier_context"})
 CONFIG_KEYS = frozenset(
     {"model", "max_tokens", "stream", "temperature", "top_p", "top_k", "thinking", "tool_choice"}
 )
@@ -30,6 +81,11 @@ CHECKED_BLOCK_KEYS = {
     "document": frozenset({"source"}),
 }
 WHOLE_BLOCK_REASONS = {"thinking": "thinking", "redacted_thinking": "thinking", "image": "image"}
+
+
+KEY_SUFFIX_RE = re.compile(
+    r"(?P<base>.*<[A-Z][A-Z0-9_]*_(?:\d{3,}|REDACTED)>.*)#(?P<number>\d+)", re.DOTALL
+)
 
 
 @runtime_checkable
@@ -59,6 +115,7 @@ def collect_request_texts(body: dict, *, include_system: bool = True) -> list[Te
         for index, message in enumerate(messages):
             if isinstance(message, dict):
                 _collect_content(message.get("content"), ("messages", index, "content"), refs)
+    _collect_safeguards(body.get("safeguards"), refs)
     return refs
 
 
@@ -101,9 +158,59 @@ def collect_unchecked(body: dict, *, include_system: bool = True) -> list[Unchec
                 _add_unchecked(refs, ("tools", index), "tools", tool)
         elif key == "metadata":
             _add_unchecked(refs, (key,), "metadata", value)
+        elif key == "safeguards" and isinstance(value, list):
+            _unchecked_safeguards(value, refs)
         elif key not in CONFIG_KEYS:
             _add_unchecked(refs, (key,), "other", value)
     return refs
+
+
+def request_shape_error(body: dict) -> str | None:
+    """A value-free message when the body lacks the basic Messages API form, else None."""
+    if "system" in body:
+        system = body["system"]
+        if isinstance(system, list):
+            for index, block in enumerate(system):
+                problem = _block_error(block, ("system", index))
+                if problem:
+                    return problem
+        elif not isinstance(system, str):
+            return "system must be a string or a list of content blocks"
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return "messages must be a list"
+    for index, message in enumerate(messages):
+        path: Path = ("messages", index)
+        if not isinstance(message, dict):
+            return f"{format_path(path)} must be an object"
+        content = message.get("content")
+        if isinstance(content, str):
+            continue
+        if not isinstance(content, list):
+            return f"{format_path((*path, 'content'))} must be a string or a list"
+        for position, block in enumerate(content):
+            problem = _block_error(block, (*path, "content", position))
+            if problem:
+                return problem
+    return None
+
+
+def _block_error(block: Any, path: Path) -> str | None:
+    if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+        return f"{format_path(path)} must be an object with a string type"
+    block_type = block["type"]
+    if block_type == "text" and not isinstance(block.get("text"), str):
+        return f"{format_path((*path, 'text'))} must be a string"
+    if block_type == "tool_result" and "content" in block:
+        content = block["content"]
+        if isinstance(content, list):
+            for index, item in enumerate(content):
+                problem = _block_error(item, (*path, "content", index))
+                if problem:
+                    return problem
+        elif not isinstance(content, str):
+            return f"{format_path((*path, 'content'))} must be a string or a list"
+    return None
 
 
 def collect_strings(value: Any, path: Path = ()) -> list[TextRef]:
@@ -113,14 +220,31 @@ def collect_strings(value: Any, path: Path = ()) -> list[TextRef]:
     return refs
 
 
+def collect_keyed(value: Any, path: Path = ()) -> list[TextRef]:
+    """Every non-empty string leaf and every key below `value`; objects are addressed by position."""
+    refs: list[TextRef] = []
+    _collect_keyed(value, path, refs)
+    return refs
+
+
 def format_path(path: Path) -> str:
-    """Render a path as `messages[0].content[1].text`."""
+    """Render a path as `messages[0].content[1].text`; object keys as `{position}`.
+
+    A key outside `SCHEMA_KEYS` may carry a value, so it is rendered as `<key>`.
+    """
     rendered = ""
     for part in path:
-        if isinstance(part, int):
+        if isinstance(part, Slot):
+            rendered += f"{{{part.index}}}"
+        elif isinstance(part, KeyAt):
+            rendered += f"{{{part.index}}}#key"
+        elif isinstance(part, KeyOf):
+            rendered += "#key"
+        elif isinstance(part, int):
             rendered += f"[{part}]"
         else:
-            rendered += f".{part}" if rendered else str(part)
+            name = part if part in SCHEMA_KEYS else UNKNOWN_KEY
+            rendered += f".{name}" if rendered else name
     return rendered
 
 
@@ -132,13 +256,20 @@ def pseudonymize_request(
     if not refs:
         return new_body, 0
     replaced = sess.pseudonymize_many([ref.text for ref in refs])
+    renames: dict[Path, dict[int, str]] = {}
     for ref, text in zip(refs, replaced, strict=True):
-        _set_at(new_body, ref.path, text)
+        last = ref.path[-1]
+        if isinstance(last, KeyAt):
+            renames.setdefault(ref.path[:-1], {})[last.index] = text
+        else:
+            _set_at(new_body, ref.path, text)
+    for parent_path, names in renames.items():
+        _rename_keys(_at(new_body, parent_path), names)
     return new_body, len(refs)
 
 
 def restore_response(body: dict, sess: TextSession) -> dict:
-    """Return a copy of the response with text blocks and tool_use inputs restored."""
+    """Return a copy of the response with text blocks restored; tool_use input stays as sent."""
     new_body = copy.deepcopy(body)
     content = new_body.get("content")
     if not isinstance(content, list):
@@ -148,20 +279,51 @@ def restore_response(body: dict, sess: TextSession) -> dict:
             continue
         if block.get("type") == "text" and isinstance(block.get("text"), str):
             block["text"] = sess.restore_text(block["text"])
-        elif block.get("type") == "tool_use" and "input" in block:
-            block["input"] = restore_json(block["input"], sess.restore_text)
     return new_body
 
 
 def restore_json(value: Any, restore: Callable[[str], str]) -> Any:
-    """Apply `restore` to every string leaf, leaving other types untouched."""
+    """Apply `restore` to every string leaf and key, leaving other types untouched."""
     if isinstance(value, str):
         return restore(value)
     if isinstance(value, dict):
-        return {key: restore_json(item, restore) for key, item in value.items()}
+        keys = _restored_keys(list(value), restore)
+        return {key: restore_json(item, restore) for key, item in zip(keys, value.values(), strict=True)}
     if isinstance(value, list):
         return [restore_json(item, restore) for item in value]
     return value
+
+
+def _restored_keys(keys: list[str], restore: Callable[[str], str]) -> list[str]:
+    """Restore object keys without losing one: a key that would collide stays as it came.
+
+    Keys with a `#n` suffix (added by `_rename_keys`) are restored last, without the suffix.
+    """
+    restored: list[str] = [""] * len(keys)
+    taken: set[str] = set()
+    suffixed: list[int] = []
+    for index, key in enumerate(keys):
+        if KEY_SUFFIX_RE.fullmatch(key):
+            suffixed.append(index)
+        else:
+            restored[index] = _claim(key, restore(key), taken)
+    for index in suffixed:
+        key = keys[index]
+        match = KEY_SUFFIX_RE.fullmatch(key)
+        base = match.group("base") if match else key
+        candidate = restore(base)
+        restored[index] = _claim(key, candidate if candidate != base else restore(key), taken)
+    return restored
+
+
+def _claim(key: str, candidate: str, taken: set[str]) -> str:
+    if candidate in taken:
+        candidate, number = key, 2
+        while candidate in taken:
+            candidate = f"{key}#{number}"
+            number += 1
+    taken.add(candidate)
+    return candidate
 
 
 def _prepared(body: dict, include_system: bool, notice: bool) -> tuple[dict, list[TextRef]]:
@@ -235,8 +397,26 @@ def _text_source(source: Any) -> bool:
 
 
 def _add_unchecked(refs: list[UncheckedRef], path: Path, reason: str, value: Any) -> None:
-    if collect_strings(value):
+    if collect_strings(value) or _unknown_key(path[-1] if path else None) or _has_key(value):
         refs.append(UncheckedRef(path, reason, value))
+
+
+def _unknown_key(part: Any) -> bool:
+    return isinstance(part, str) and part not in SCHEMA_KEYS
+
+
+def _has_key(value: Any) -> bool:
+    """True when an object below `value` has a key outside `SCHEMA_KEYS`."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if any(_unknown_key(key) for key in item):
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
 
 
 def _insert_notice(body: dict) -> bool:
@@ -265,12 +445,41 @@ def _starts_with_notice(content: list) -> bool:
     return isinstance(first.get("text"), str) and first["text"].startswith(NOTICE_MARKER)
 
 
+# Entry points from Claude Code's own list (2.1.332); the version is release plus build hash.
+BILLING_ENTRYPOINTS = (
+    "cli", "sdk-cli", "sdk-ts", "sdk-py", "claude-vscode", "claude-desktop",
+    "claude-desktop-3p", "local-agent", "local_agent", "ssh-remote", "remote",
+    "remote_cowork", "desktop_app", "claude-in-teams", "claude-code-github-action", "bench",
+)
+BILLING_LINE_RE = re.compile(
+    r"x-anthropic-billing-header: cc_version=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}(?:\.[0-9a-f]{1,8})?; "
+    r"cc_entrypoint=(?:" + "|".join(re.escape(name) for name in BILLING_ENTRYPOINTS) + r");"
+)
+
+
+def _is_billing_block(index: int, block: dict) -> bool:
+    """The exact Claude Code billing line in `system[0]`: client version and entry point only.
+
+    The upstream answers 429 to a subscription request whose billing line was replaced.
+    """
+    return (
+        index == 0
+        and set(block) == {"type", "text"}
+        and isinstance(block["text"], str)
+        and BILLING_LINE_RE.fullmatch(block["text"]) is not None
+    )
+
+
 def _collect_system(system: Any, refs: list[TextRef]) -> None:
     if isinstance(system, str):
         _add(refs, ("system",), system)
     elif isinstance(system, list):
         for index, block in enumerate(system):
-            if isinstance(block, dict) and block.get("type") == "text":
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and not _is_billing_block(index, block)
+            ):
                 _add_if_str(refs, ("system", index, "text"), block.get("text"))
 
 
@@ -289,7 +498,7 @@ def _collect_content(content: Any, path: Path, refs: list[TextRef]) -> None:
         elif block_type == "tool_result":
             _collect_tool_result(block.get("content"), (*path, index, "content"), refs)
         elif block_type == "tool_use":
-            _collect_strings(block.get("input"), (*path, index, "input"), refs)
+            _collect_keyed(block.get("input"), (*path, index, "input"), refs)
         elif block_type == "document":
             _collect_document(block.get("source"), (*path, index, "source"), refs)
 
@@ -321,6 +530,39 @@ def _collect_strings(value: Any, path: Path, refs: list[TextRef]) -> None:
             _collect_strings(item, (*path, index), refs)
 
 
+def _collect_safeguards(safeguards: Any, refs: list[TextRef]) -> None:
+    """The classifier context of Claude Code's `safeguards` entries, transformed like tool input."""
+    if not isinstance(safeguards, list):
+        return
+    for index, item in enumerate(safeguards):
+        if isinstance(item, dict) and "classifier_context" in item:
+            _collect_keyed(
+                item["classifier_context"], ("safeguards", index, "classifier_context"), refs
+            )
+
+
+def _unchecked_safeguards(safeguards: list, refs: list[UncheckedRef]) -> None:
+    for index, item in enumerate(safeguards):
+        if not isinstance(item, dict):
+            _add_unchecked(refs, ("safeguards", index), "other", item)
+            continue
+        for key, value in item.items():
+            if key not in SAFEGUARD_KEYS:
+                _add_unchecked(refs, ("safeguards", index, key), "other", value)
+
+
+def _collect_keyed(value: Any, path: Path, refs: list[TextRef]) -> None:
+    if isinstance(value, str):
+        _add(refs, path, value)
+    elif isinstance(value, dict):
+        for index, (key, item) in enumerate(value.items()):
+            _add(refs, (*path, KeyAt(index)), key)
+            _collect_keyed(item, (*path, Slot(index)), refs)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _collect_keyed(item, (*path, index), refs)
+
+
 def _add(refs: list[TextRef], path: Path, text: str) -> None:
     if text:
         refs.append(TextRef(path, text))
@@ -331,8 +573,38 @@ def _add_if_str(refs: list[TextRef], path: Path, text: Any) -> None:
         _add(refs, path, text)
 
 
+def _child(target: Any, part: str | int | Slot | KeyAt) -> Any:
+    if isinstance(part, Slot):
+        return target[list(target)[part.index]]
+    return target[part]
+
+
+def _at(body: Any, path: Path) -> Any:
+    target = body
+    for part in path:
+        target = _child(target, part)
+    return target
+
+
 def _set_at(body: dict, path: Path, text: str) -> None:
-    target: Any = body
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = text
+    target = _at(body, path[:-1])
+    last = path[-1]
+    target[list(target)[last.index] if isinstance(last, Slot) else last] = text
+
+
+def _rename_keys(target: dict, names: dict[int, str]) -> None:
+    keys = list(target)
+    changed = {index: text for index, text in names.items() if keys[index] != text}
+    if not changed:
+        return
+    taken = {key for index, key in enumerate(keys) if index not in changed}
+    for index, text in changed.items():
+        candidate, number = text, 2
+        while candidate in taken:
+            candidate = f"{text}#{number}"
+            number += 1
+        taken.add(candidate)
+        keys[index] = candidate
+    values = list(target.values())
+    target.clear()
+    target.update(zip(keys, values, strict=True))

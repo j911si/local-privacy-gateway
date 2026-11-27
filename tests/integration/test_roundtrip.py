@@ -7,6 +7,7 @@ import pytest
 
 from privacy_gateway import Gateway
 from privacy_gateway.classes import Policy
+from privacy_gateway.detect.patterns import PatternStage
 
 TOKEN_RE = re.compile(r"<[A-Z][A-Z_]*_\d{3}>")
 
@@ -80,7 +81,15 @@ def expected_restore(text: str, gateway: Gateway) -> str:
     """The original with irreversible findings replaced by their redaction marker."""
     registry = gateway.config.registry
     result = text
-    findings = sorted(gateway.scan(text).findings, key=lambda f: f.span.start, reverse=True)
+    scanned = gateway.scan(text).findings
+    tokenized = [f.span for f in scanned if registry.get(f.data_class).policy is Policy.TOKENIZE]
+    nested = [
+        finding
+        for finding in PatternStage().run(text, gateway.config, [])
+        if registry.get(finding.data_class).policy is Policy.REDACT
+        and any(span.contains(finding.span) for span in tokenized)
+    ]
+    findings = sorted([*scanned, *nested], key=lambda f: f.span.start, reverse=True)
     for finding in findings:
         data_class = registry.get(finding.data_class)
         if data_class.policy is Policy.REDACT:

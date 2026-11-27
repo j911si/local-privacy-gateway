@@ -1,5 +1,7 @@
 # Local Privacy Gateway
 
+**International by Design. Local by Policy. Privacy by Default.**
+
 A local, offline gateway that removes sensitive data from text before it reaches an external
 LLM and puts it back afterwards. Detection is deterministic and rule-based; every detected value
 is replaced by a reversible token such as `<IBAN_001>`, the mapping is stored AES-256-GCM-encrypted
@@ -18,10 +20,30 @@ request to `/v1/messages` also writes an audit entry without any values. Per fie
 and what was forwarded unchecked, and it records whether a final rescan of the outgoing body found
 anything.
 
+## Design principles
+
+These principles guide the project. The second column says how far each one is implemented
+in 0.2.0; the [roadmap](ROADMAP.md) has the planned work.
+
+| Principle | In 0.2.0 |
+|---|---|
+| International by Design | Every rule runs on every text; no detector depends on the language of the text. Global formats (IBAN, cards, e-mail, IP addresses, phone numbers with a country code, cloud keys, labelled secrets) work everywhere. Country-specific identifiers and the vocabulary for names, labels and addresses cover German and English only. Country and language packs are planned. |
+| Local by Policy | Detection, the vault and all logs stay on your machine. The core package has no network code, and a test enforces that. The proxy sends only the pseudonymized request to the upstream you configure. |
+| Privacy by Default | Fail closed when a known value survives. Sensitive findings in fields the proxy cannot change block the request. Tool calls get placeholders unless a rule allows a value. A proxy off loopback needs a token. None of this is a guarantee for data the rules do not describe. |
+| Provider Independent | The library and the CLI work on any text for any model. The proxy speaks the Anthropic Messages API only. |
+| Extensible by Design | Classes, patterns, context words and dictionaries can be added in a YAML layer without code changes. New check-digit validators still need code. |
+| Transparent by Design | A value-free log line per request shows what was replaced and what went out unchecked. The [coverage register](docs/COVERAGE.md) and the [known limits](#known-limits) say what is not found. |
+| Open Source | MIT license. Contributions for new countries and languages: [CONTRIBUTING.md](CONTRIBUTING.md#contributing-a-recognizer). |
+
+The configuration defines 141 entity classes. Many of them are only found behind a label or
+through your own dictionary, and some have no default rule at all. The
+[coverage register](docs/COVERAGE.md) sorts them by evidence.
+
 ---
 
 ## Table of contents
 
+- [Design principles](#design-principles)
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [CLI usage](#cli-usage)
@@ -64,8 +86,8 @@ Text runs through a fixed stage order, defined in exactly one place
 | **StructuredStage** | Parses first, classifies components second: URLs (host, path, query parameters, embedded credentials, signature parameters), e-mail addresses, JWTs, PEM private-key blocks, database connection strings, HTTP headers and cookies. |
 | **PatternStage** | One regex set per class where a format exists: IBAN, BIC, credit card, IPv4/IPv6, MAC, GPS, phone numbers, dates, tax and social-security IDs, VIN, vehicle registration, cloud keys (`AKIA…`, `ghp_…`, `glpat-…`, `sk-ant-…`, `xox…`). Each candidate must pass its validator — Luhn, IBAN MOD-97, `ipaddress`, VIN check digit, calendar date — or it is dropped. |
 | **DictionaryStage** | Exact and case-insensitive multi-word matching against configured lists plus bundled first/last-name and city lists. Bundled name hits are low-confidence candidates; they only become findings when a context rule or correlation confirms them. |
-| **ContextStage** | Deterministic markers: salutations (`Frau`, `Herr`, `Mr`, `Mrs`, `Ms`), `Kundennummer:`, `Konto`, `Vertrag`, `Ticket`, `namespace:`, `pod/`, `password`, `pin`, address grammar, job and department markers. |
-| **`correlate()`** | Gives every occurrence of the same value one `entity_id`, so the pseudonymizer emits one token per entity rather than one per occurrence. |
+| **ContextStage** | Deterministic markers: salutations (`Frau`, `Herr`, `Mr`, `Mrs`, `Ms`), `Kundennummer:`, `Konto`, `Vertrag`, `Ticket`, `namespace:`, `pod/`, `password`, `pin`, person labels (`Name:`, `Kontoinhaber`, `Customer:`), a birth date in front of `geboren`/`born`, address grammar, job and department markers. |
+| **`correlate()`** | Gives every occurrence of the same value one `entity_id`, so repeated occurrences share a token. Each spelling of an entity gets its own token (`Anna`, `ANNA` and `anna` are one entity with three tokens), so every occurrence is restored byte for byte. |
 | **`min_confidence` filter** | Drops everything below the configured threshold (default `0.5`). |
 | **`resolve_overlaps()`** | Resolves overlapping findings by class priority, then span length, then stage order. |
 
@@ -263,13 +285,21 @@ stored token is lost.
 | `PGW_RESTORE_MODE` | `strict` | Default restore mode, `strict` or `lenient`. |
 | `PGW_CONFIG` | unset | Extra configuration file, applied after the user config. |
 | `PGW_SKIP_USER_CONFIG` | unset | `1`/`true`/`yes` ignores `~/.config/privacy-gateway/config.yaml`. Useful for reproducible runs and tests. |
-| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. |
+| `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` needs an auth token, else the proxy does not start. Besides loopback only explicit private addresses are accepted (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` as used by Tailscale, `fc00::/7`); `0.0.0.0`, `[::]`, public, link-local addresses and host names need `PGW_PROXY_ALLOW_PUBLIC_BIND`. |
 | `PGW_PROXY_UPSTREAM` | `https://api.anthropic.com` | Upstream base URL. Only `https://` or `http://127.0.0.1` / `http://localhost` are accepted; anything else is a `ConfigError`. |
 | `PGW_PROXY_SESSION_STRATEGY` | `metadata` | How the vault session key is derived: `metadata`, `header` or `single`. |
-| `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
+| `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Not needed for an OAuth login, see below. |
 | `PGW_PROXY_PLACEHOLDER_NOTICE` | `1` | `0`/`false`/`no`/`off` suppresses the short notice that explains the placeholder format to the model. |
 | `PGW_PROXY_DEBUG_DIR` | unset | Directory for one JSON dump per transformed request (mode `0600` in a `0700` directory). Contains the **pseudonymized** body. |
-| `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take. Past it the request fails with 503 and nothing is sent. |
+| `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take; must be finite and above zero. Past it the request fails with 503 and nothing is sent. |
+| `PGW_PROXY_PASSTHROUGH_PATHS` | unset (empty) | Comma-separated exact paths that may receive `POST`/`PUT`/`PATCH`/`DELETE` and are forwarded unchanged. Every other such request outside `/v1/messages` and `/v1/messages/count_tokens` gets 422. |
+| `PGW_PROXY_AUTH_TOKEN` | unset | When set, every request except `GET /health` needs the header `x-pgw-auth` with this value, else 401. The header is never forwarded or logged. `install-launchd` refuses this variable; use the file variant. |
+| `PGW_PROXY_AUTH_TOKEN_FILE` | unset | Path to a file holding the token. The file must not be readable by group or others (mode `0600`), else the proxy does not start. Cannot be combined with `PGW_PROXY_AUTH_TOKEN`. |
+| `PGW_PROXY_UNCHECKED_FIELDS` | `block` | What happens when the rescan finds something in a field the proxy does not transform (`tools`, `thinking`, an untransformed `system`, unknown fields and blocks): `block` refuses the request with 422 `privacy_gateway_leak` before anything is sent when the finding belongs to a [blocking class](#unchecked-fields-blocking-classes); other classes are only reported. `allow` forwards everything unchanged with `verdict: ok_with_unchecked_findings` and a warning at startup (**unsafe**: the found values go upstream in clear text). Any other value stops the start. |
+| `PGW_PROXY_ALLOW_UNAUTHENTICATED` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy start on a non-loopback address without an auth token, with a warning in the startup log. Anyone who reaches the port and knows a session key gets that session's original values back. |
+| `PGW_PROXY_ALLOW_PUBLIC_BIND` | unset (off) | **Unsafe.** `1`/`true`/`yes`/`on` lets the proxy bind to a wildcard, public or link-local address or a host name, still only with an auth token. The proxy has no TLS: token, prompts with real values and restored answers cross the network as plain HTTP. The startup log warns. |
+| `PGW_PROXY_TOOL_RESTORE_POLICY` | unset (empty allowlist) | YAML file with the rules for restoring placeholders inside tool calls, see [Tool calls](#tool-calls-restore-policy). Without it nothing inside `tool_use.input` is restored. An unreadable or invalid file stops the start. |
+| `PGW_PROXY_TOOL_RESTORE_ON_DENY` | `keep_token` | What happens to a placeholder no rule releases: `keep_token` leaves it in the tool call, `block` refuses the answer (HTTP 422, or an `error` event in a stream). Any other value stops the start. |
 | `PGW_PROXY_DEBUG_ORIGINALS` | unset (off) | `1`/`true`/`yes`/`on` additionally dumps the **original, untransformed** body of a request that failed the leak check. Clear text. |
 
 ---
@@ -335,8 +365,8 @@ api_key=<API_KEY_REDACTED>
 pgw restore --session ID [FILE|-] [--config PATH] [--mode strict|lenient] [--out PATH]
 ```
 
-Maps the tokens in the model's answer back to the stored values. The n-th occurrence of a token
-restores the n-th recorded surface form; further occurrences use the canonical value.
+Maps the tokens in the model's answer back to the stored values. Every spelling has its own
+token, so a token always restores to exactly the text it replaced.
 
 - **`strict`** (default, configurable via `restore.mode` / `PGW_RESTORE_MODE`): every token must be
   known. An unknown token is an error and aborts with exit code 1. Use it when you must be certain
@@ -384,7 +414,7 @@ no sensitive data detected
 
 ### `pgw classes`
 
-Every registered class as `name`, `policy`, `priority`, tab-separated. 140 classes with the bundled
+Every registered class as `name`, `policy`, `priority`, tab-separated. 141 classes with the bundled
 defaults; your own configuration adds to and overrides that list.
 
 ```bash
@@ -548,7 +578,7 @@ It copies **every `PGW_*` variable that is set in the installing shell** into th
 installing shell is therefore the configuration of the service:
 
 ```bash
-PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd
+PGW_PROXY_AUTH_TOKEN_FILE=~/.config/privacy-gateway/proxy-auth-token uv run pgw-proxy install-launchd
 ```
 
 The command prints the variables it took over. Re-run it after changing one — the plist is
@@ -587,8 +617,8 @@ RestartSec=2
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
 Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
-# Uncomment when the client logs in with OAuth instead of an API key:
-# Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
+# Auth token (mode 0600 file, never the token itself in this unit):
+# Environment=PGW_PROXY_AUTH_TOKEN_FILE=%h/.config/privacy-gateway/proxy-auth-token
 
 [Install]
 WantedBy=default.target
@@ -613,8 +643,8 @@ uses `UMask=0077` and the sandboxing options a user manager allows (`NoNewPrivil
 
 If another machine has to reach the proxy, bind it only to an address that nothing but trusted
 devices can reach, such as a private VPN interface, never to `0.0.0.0`. On a non-loopback address
-the `Host` header check is off (the proxy logs a warning at startup) and there is no auth token, so
-network reachability is the only access control.
+the `Host` header check is off (the proxy logs a warning at startup), and the proxy only starts
+with `PGW_PROXY_AUTH_TOKEN_FILE` set.
 
 ### Pointing a client at it
 
@@ -640,7 +670,7 @@ claude-private() {
 ```
 
 Note that `PGW_*` variables belong to the **proxy process**, not to the client. Putting
-`PGW_PROXY_TRANSFORM_SYSTEM=0` into this function has no effect on a proxy that launchd or systemd
+`PGW_PROXY_UNCHECKED_FIELDS=allow` into this function has no effect on a proxy that launchd or systemd
 already started; it belongs in the service environment (see above).
 
 ### What is transformed
@@ -650,7 +680,8 @@ Transformed on `POST /v1/messages` and `POST /v1/messages/count_tokens`:
 - **Request:** `system` (string, or the `text` of `type: "text"` blocks), `messages[].content`
   (string or `text` blocks), `tool_result` content (string or `text` blocks), every string leaf
   inside `tool_use.input`, and `source.data` of a `document` block whose `source.type` is `text`.
-- **Response:** `content[].text` and every string leaf in `tool_use.input`.
+- **Response:** `content[].text`. Placeholders inside `tool_use.input` are restored only where
+  the [tool restore policy](#tool-calls-restore-policy) allows it; by default nowhere.
 
 Never touched, forwarded unchanged and **not scanned**:
 
@@ -662,26 +693,109 @@ Never touched, forwarded unchanged and **not scanned**:
 
 A user name inside a home-directory path is personal data too. `/Users/<name>/`, `/home/<name>/`
 and `C:\Users\<name>\` give a `PERSON_USERNAME` finding for the `<name>` part, so the path comes
-out as `/Users/<PERSON_002>/...` and is restored on the way back, including in tool calls. Claude
+out as `/Users/<PERSON_002>/...` and is restored on the way back in text. In tool calls it is
+restored only when a policy rule allows the class `PERSON_USERNAME` for that argument. Claude
 Code puts such paths into every request (working directory, memory directory, instruction files).
 
 Fields that are never changed are still read: the rescan of the outgoing body covers `tools`,
 `metadata` and an unchanged system prompt, and the request log reports what it finds there.
 
-`GET` and every path outside `/v1/messages…` is proxied verbatim. A `POST` to a `/v1/messages…`
-path the proxy cannot transform — unparsable body, non-object body, a body with `Content-Encoding`,
-or a sub-path such as `/v1/messages/batches` — is refused with HTTP 422 and never reaches the
-upstream. That is deliberate: forwarding it unchanged would mean forwarding clear text.
+`GET`, `HEAD` and `OPTIONS` requests to other paths are forwarded without a body. Their path is
+scanned first: if the rules find something in a segment, the request gets HTTP 400 and is not
+forwarded. UUIDs and plain numbers count as ids and are skipped. `POST`, `PUT`, `PATCH` and `DELETE`
+to another path need that path in `PGW_PROXY_PASSTHROUGH_PATHS`, otherwise they get HTTP 422.
+
+A `POST` to `/v1/messages` that the proxy cannot transform never reaches the upstream, because
+forwarding it unchanged would mean forwarding clear text. A body with `Content-Encoding` gets
+HTTP 422. A body that is not a JSON object of the expected form gets HTTP 400.
 
 ### Streaming
 
 SSE is parsed event by event. `text_delta` is restored incrementally with a holdback: any trailing
 fragment that could be the beginning of a token is kept back until the next delta or
 `content_block_stop`, so a token is never split across deltas. `input_json_delta` is buffered per
-content block and emitted as one restored delta at `content_block_stop`, which makes tool calls
-appear slightly later in the stream (typically under a second). Every other event —
+content block and emitted as one delta at `content_block_stop`, after the tool restore policy has
+decided on every placeholder in it, which makes tool calls appear slightly later in the stream
+(typically under a second). Input that does not parse as JSON is forwarded with every placeholder
+kept. Every other event —
 `message_start`, `ping`, `thinking_delta`, `signature_delta`, `message_delta`, `message_stop`,
 `error` — is forwarded byte-identical.
+
+### Tool calls: restore policy
+
+A placeholder inside a tool call is not restored unless a rule allows it. This closes a direct
+path for prompt injection: text the model reads (a web page, a file, a tool result) can tell it
+to put `<IBAN_001>` into `Bash`, `WebFetch` or an MCP tool, and without the policy the client
+would receive and run the real value. Placeholders in text blocks are restored.
+
+Without `PGW_PROXY_TOOL_RESTORE_POLICY` the allowlist is empty. Claude Code then writes the
+placeholders, not the values, into files it creates with `Write` or `Edit`, and shell commands
+see the placeholders too. If you want real values in files, allow exactly those arguments:
+
+```yaml
+# PGW_PROXY_TOOL_RESTORE_POLICY=~/.config/privacy-gateway/tool-restore.yaml
+rules:
+  - tool: Write
+    argument: content
+    classes: [IBAN, EMAIL, PERSON_FULL_NAME]
+    target:
+      argument: file_path
+      under: /home/me/projects/letters
+  - tool: Edit
+    argument: new_string
+    classes: [IBAN]
+    target: {argument: file_path, under: /home/me/projects/letters}
+  - tool: MultiEdit
+    argument: edits[*].new_string
+    classes: [IBAN]
+```
+
+Each rule needs all three of:
+
+- `tool`: one exact, case-sensitive tool name (letters, digits, `_`, `-`). There are no patterns:
+  `Write` does not cover `write`, `Write_evil`, `mcp__x__Write` or a name with a hidden character.
+- `argument`: the path of a string inside the input. Object keys are joined with `.`, `[*]` stands
+  for any element of a list. The path has to reach the string itself: `items` does not reach into
+  a list, `items[*]` does.
+- `classes`: the data classes that may be restored there, as listed by `pgw classes`
+  (the class of the value, for example `PERSON_FULL_NAME`, not the token label `PERSON`).
+
+The optional `target` applies the rule only when another argument holds an absolute path under
+the directory `under`. The path is checked as a string: `//` and `/./` are normalized. A path with
+`..`, a relative path, a path holding a placeholder, or a missing or non-string argument fails
+the check, and the placeholder stays.
+
+Object keys inside a tool input are never restored. A rule without `argument` or `classes`, an
+unknown key, an unknown class, a tool name with a pattern, or a file that is not valid YAML stops
+the proxy with an error message that names the position, not the content.
+
+With `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` a placeholder that no rule releases makes the proxy
+refuse the answer. A non-streaming answer becomes HTTP 422 `privacy_gateway_tool_restore_denied`
+and the client gets nothing of the tool call. In a stream, tool calls before it have already
+been sent; the blocked call's input is replaced by an `error` event of the same type and the
+stream ends there. The default `keep_token` leaves the placeholder in place and lets the agent
+continue.
+
+Each decision is logged in `tool-restore-YYYY-MM-DD.jsonl` next to the request log, one
+`tool_restore` record per answer with placeholders in tool calls:
+
+```json
+{"v": 2, "event": "tool_restore", "ts": "...", "request_id": "<same as the proxy_request line>",
+ "streaming": false, "on_deny": "keep_token",
+ "entries": [{"tool": "Bash", "path": "content[0].input{0}", "cls": "IBAN", "decision": "kept"}]}
+```
+
+`decision` is `restored`, `kept` or `blocked`. `path` addresses object members by position like the
+request log, so no key text appears. The tool name comes from the model: characters outside
+letters, digits, `_` and `-` are written as `\uXXXX`, and the name is cut to 64 characters. No
+value, no token and no hash of either is written. The file has its own name so readers of
+`audit-*.jsonl` do not see an unknown event.
+
+Limits: the policy decides per argument, not per effect. A value released into `Write.content`
+can still leave the machine if the model later runs that file, uploads it, or reads it back into
+a tool argument that has no rule. Keep rules narrow and use `target` for file tools. A symbolic
+link under `under` that points elsewhere is not detected, because the check sees only the string. In block mode a stream
+has already sent the start of the blocked call, its id and tool name, before the proxy ends it.
 
 ### Sessions
 
@@ -690,11 +804,19 @@ keeps working. Strategies (`PGW_PROXY_SESSION_STRATEGY`):
 
 | Strategy | Key |
 |---|---|
-| `metadata` (default) | The `session_id` field of a JSON `metadata.user_id` as Claude Code sends it; otherwise the `session_<uuid>` part of `metadata.user_id`; otherwise the `X-PGW-Session` header; otherwise a random per-process key. |
-| `header` | The `X-PGW-Session` header, else the per-process key. |
+| `metadata` (default) | The `session_id` field of a JSON `metadata.user_id` as Claude Code sends it; otherwise the `session_<uuid>` part of `metadata.user_id`; otherwise the `X-PGW-Session` header; otherwise a session for this request only. |
+| `header` | The `X-PGW-Session` header, else a session for this request only. |
 | `single` | One fixed key for everything. |
 
-The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 400. The server keeps
+A request session restores the placeholders of its own answer and is purged from the vault when
+the request or its stream ends, so a client without a key never sees another client's values.
+Its next turn gets new placeholders. Before 0.2.0 all such requests shared one key per process.
+
+The key must match `[A-Za-z0-9._-]{1,64}`; anything else is refused with HTTP 400
+(`privacy_gateway_session`) before anything is scanned or forwarded. This holds for every request,
+not only `/v1/messages`: a `GET`, `HEAD`, `OPTIONS`, `DELETE` or passthrough request with an
+unusable key never reaches upstream, so a bad `X-PGW-Session` header cannot skip the path scan.
+The audit line records the audit id of `-`, never the key that was sent. The server keeps
 the 64 most recently used `GatewaySession` objects in memory; a conversation that falls out is
 reloaded from the vault.
 
@@ -729,29 +851,92 @@ is visible to the model as ordinary conversation content, counts as one more fie
 line, and never goes into `system` — it sits in the messages because an OAuth client's system
 prompt cannot be changed (see below). Disable it with `PGW_PROXY_PLACEHOLDER_NOTICE=0`.
 
-### OAuth / Claude subscription: `PGW_PROXY_TRANSFORM_SYSTEM=0`
+### OAuth / Claude subscription
 
-A client logged in with OAuth (a Claude Pro/Max subscription instead of an API key) gets
-`429 rate_limit_error` with the body `"Error"` and **without** any `anthropic-ratelimit-*` header
-for every request whose `system` prompt the proxy had changed, while an otherwise identical
-passthrough request answers with 200.
+A client logged in with OAuth (a Claude Pro/Max subscription instead of an API key) works with the
+default `PGW_PROXY_TRANSFORM_SYSTEM=1`, so the system prompt is pseudonymized like the messages.
+Tested on 2026-11-27 with Claude Code 2.1.332 and a subscription login, in `claude -p` and in an
+interactive session with tool calls, against an isolated proxy.
 
-```bash
-export PGW_PROXY_TRANSFORM_SYSTEM=0   # 0/false/no/off; default 1
-```
+Claude Code sends a billing line as the first system block
+(`x-anthropic-billing-header: cc_version=...; cc_entrypoint=...;`). The proxy forwards exactly this
+line unchanged; it holds only the client version and entry point. Before 0.2.0 the proxy replaced
+it, and the upstream answered every subscription request with `429 rate_limit_error`. That is why
+older versions of this README recommended `PGW_PROXY_TRANSFORM_SYSTEM=0`. Anything else in the first
+system block is transformed as usual. The billing line is Claude Code behaviour, not documented
+Anthropic behaviour, so a later client version may need another check.
 
-With the switch the `system` field — string or block list — reaches the upstream byte for byte, is
-not counted in `fields`, and the audit line carries `system_transformed: false`. The `messages` are
-pseudonymized as before.
+In an interactive session Claude Code also sends a top-level `safeguards` list whose
+`classifier_context` carries the working directory and other context for Anthropic's safety
+classifier. The proxy pseudonymizes that context like tool input, so the classifier sees the same
+view as the model.
 
-The explanation — Anthropic checks the Claude Code system prompt against a fingerprint on OAuth
-requests, so one changed byte is enough — is a **hypothesis**, verified empirically on 2026-09-23,
-not documented Anthropic behaviour. Treat the switch as a workaround, not as a supported feature.
+At the start of an interactive session Claude Code sends a small probe request (`max_tokens: 1`,
+no system prompt). In the test above it got 429 in each of three sessions while every following
+request got 200; the session was not affected. Whether the same probe gets 429 without the proxy
+was not checked.
 
-**Consequence, and it matters:** everything the system prompt carries — project instruction files,
-memory files, skill descriptions, tool documentation — leaves the machine unchanged. Only the
-conversation content is protected. With an API key the switch is not needed and you get the full
-protection.
+`PGW_PROXY_TRANSFORM_SYSTEM=0` still forwards the `system` field byte for byte. The audit line then
+carries `system_transformed: false`, and everything the system prompt carries (project instruction
+files, memory paths, skill descriptions) leaves the machine unchanged. With the default
+`PGW_PROXY_UNCHECKED_FIELDS=block` the untransformed system prompt is rescanned, and a path such as
+`/home/<name>/…` (the working directory or the auto-memory path) is a `PERSON_USERNAME` finding that
+blocks every request with 422.
+
+**Upgrade note (OAuth login with `PGW_PROXY_TRANSFORM_SYSTEM=0` from 0.1.0):** remove the setting
+from the environment of the proxy process and restart the proxy.
+
+### Unchecked fields: blocking classes
+
+Fields the proxy does not transform (`tools`, `thinking` and `redacted_thinking`, `metadata`, an
+untransformed `system`, unknown fields and blocks) are never changed, because some are signed. With
+the default `PGW_PROXY_UNCHECKED_FIELDS=block` the rescan of the outgoing body blocks the request
+(422 `privacy_gateway_leak`, `verdict: blocked`, nothing sent) when it finds one of these classes
+in such a field:
+
+- Secrets and credentials, every class with policy `redact`: `API_KEY`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `STRIPE_SECRET_KEY`, `API_SECRET`, `CLIENT_SECRET`, `PASSWORD`, `PIN`, `TAN`,
+  `OTP`, `ACCESS_TOKEN`, `REFRESH_TOKEN`, `JWT`, `OAUTH_CODE`, `SESSION_ID`, `SESSION_COOKIE`,
+  `AUTH_COOKIE`, `CSRF_TOKEN`, `PRIVATE_KEY`, `SSH_PRIVATE_KEY`, `TLS_PRIVATE_KEY`,
+  `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`, `AZURE_SECRET`, `GCP_CREDENTIAL`, `KUBERNETES_SECRET`,
+  `GITHUB_TOKEN`, `GITLAB_TOKEN`, `PERSONAL_ACCESS_TOKEN`, `DATABASE_CONNECTION_STRING`,
+  `SIGNED_URL`, `SAS_TOKEN`.
+- HTTP headers and cookies, which often carry credentials: `CUSTOM_HEADER`, `HEADER_VALUE`,
+  `COOKIE`, `COOKIE_VALUE`.
+- People: `PERSON_FIRST_NAME`, `PERSON_LAST_NAME`, `PERSON_FULL_NAME`, `PERSON_ALIAS`,
+  `PERSON_USERNAME`, `CARDHOLDER`.
+- Contact: `EMAIL`, `PHONE`, `MOBILE_PHONE`, `PHONE_INTERNATIONAL`, `FAX`.
+- Payment: `IBAN`, `CREDIT_CARD`, `DEBIT_CARD`, `CVV`, `BANK_ACCOUNT`.
+- Identity: `TAX_ID`, `SOCIAL_SECURITY_ID`, `PASSPORT_ID`, `NATIONAL_ID`, `DATE_OF_BIRTH`.
+
+The rescan covers the keys of these objects too, except the field names of the Messages API and
+of JSON Schema. In the request log a key outside that list appears as `<key>` in a path, and a
+finding in the key itself has the path of its value plus `#key`. A `data` field is skipped only
+as the base64 source of an `image` or `document` block in a message or `tool_result`, with an
+allowed media type and well-formed base64; anywhere else it is scanned like any string.
+
+The list is `UNCHECKED_BLOCKING_CLASSES` in `privacy_gateway_proxy/audit_trail.py`. Every other
+class (for example `FQDN`, `URL`, `SOCIAL_MEDIA_HANDLE`, `ORGANIZATION_NAME`, `PERSON_INITIALS`,
+addresses, IDs) is only reported in `observed` and `outgoing.rescan.findings`, never with a value,
+and the request goes out with `verdict: ok_with_unchecked_findings`. Values under the public
+example domains never count (`detect/public.py`), and neither do placeholders this session issued.
+
+Two exact client values never block, and only in exactly this form:
+
+- `metadata.user_id` as Claude Code sends it, either
+  `{"device_id":"<64 lowercase hex>","account_uuid":"<uuid or empty>","session_id":"<uuid>"}`
+  (these three keys in this order, no spaces) or `user_<64 hex>_account_<uuid or empty>_session_<uuid>`
+  (lowercase UUIDs). Any other key, character or text makes it an ordinary field. Other
+  `metadata` fields are always checked.
+- The billing line in the first system block when the system prompt is untransformed: a block
+  `{"type": "text", "text": …}` without further keys whose text is exactly
+  `x-anthropic-billing-header: cc_version=<version>; cc_entrypoint=<word>;`, with a version of
+  digits, letters and dots and an entrypoint of lowercase letters, digits, `_` and `-`. Any
+  further key, header or text in that block makes the whole block an ordinary field, and its
+  `CUSTOM_HEADER` finding blocks.
+
+`PGW_PROXY_UNCHECKED_FIELDS=allow` turns the block off. That is unsafe: everything the rules
+find in these fields goes upstream in clear text, as in earlier versions.
 
 ### Access control
 
@@ -764,11 +949,28 @@ $ curl -s -H 'Host: evil.example' -X POST http://127.0.0.1:8787/v1/messages -d '
 {"type":"error","error":{"type":"privacy_gateway_forbidden","message":"host header is not loopback"}}
 ```
 
-There is **no proxy auth token**. Anything that can reach the port and knows or guesses a session
-key can have that session's tokens restored. On a single-user machine bound to loopback that is
-acceptable; on a shared machine it is not.
+The proxy auth token is off by default on loopback. Without it, anything that can reach the port
+and knows or guesses a session key can have that session's tokens restored. On a single-user
+machine bound to loopback that is acceptable; on a shared machine, set `PGW_PROXY_AUTH_TOKEN_FILE`.
+On any other address (`0.0.0.0`, `[::]`, a LAN or VPN address) the proxy refuses to start without
+a token. The check covers every route except `GET /health`, which answers `{"status":"ok"}` and
+nothing else. `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` overrides the refusal; that setup is unsafe and
+the startup log says so.
+
+Besides loopback the proxy binds only to explicit private addresses (RFC 1918, `100.64.0.0/10`,
+`fc00::/7`). A wildcard (`0.0.0.0`, `[::]`), a public or link-local address or a host name is
+refused unless `PGW_PROXY_ALLOW_PUBLIC_BIND=1` is set, and then still needs a token. The proxy
+speaks plain HTTP and has no TLS, so on such an address the token and every request and answer
+travel unencrypted unless the network itself encrypts them.
 
 The proxy holds no credentials of its own: `x-api-key` and `Authorization` are forwarded untouched.
+
+Request headers: `Cookie`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and `Via` are never
+forwarded. The values of all other forwarded headers are scanned with the blocking classes
+above; a finding blocks the request with 422 and the request log names the header by position
+(`headers[3]`), never by name. Not scanned are `x-api-key`, `Authorization` and the id headers
+`x-claude-code-session-id` and `x-client-request-id` when they hold a plain UUID.
+`PGW_PROXY_UNCHECKED_FIELDS=allow` forwards headers unscanned.
 
 ### Sharing one proxy across machines
 
@@ -779,24 +981,28 @@ on one host, bind it to that host's address on the private network and point the
 ships with a loopback bind. Its commented Tailscale variant reads the Tailscale IPv4 address when
 the service starts (`tailscale ip -4`), refuses to start when there is none and listens on that
 address only. Prompt B in [`docs/AGENT-INSTALL.md`](docs/AGENT-INSTALL.md) switches the unit to
-that variant for you, and Prompt C connects a client.
+that variant for you, and Prompt C connects a client. The proxy needs an auth token on that
+address.
 
 ```bash
 # on the proxy host
+umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token
+export PGW_PROXY_AUTH_TOKEN_FILE=~/.config/privacy-gateway/proxy-auth-token
 uv run pgw-proxy serve --listen "$(tailscale ip -4 | head -n1):8787"
 
-# on every client
+# on every client (the same token, sent as the x-pgw-auth header)
 export ANTHROPIC_BASE_URL=http://<proxy-host>:8787
+export ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: <token>"
 claude --model "sonnet[1m]"
 curl http://<proxy-host>:8787/health        # {"status":"ok"} when the proxy is reachable
 ```
 
 Limits of this setup:
 
-- The host check is off for a non-loopback bind and the proxy has no token. The only protection is
-  that devices outside the private network cannot reach the address. Limit it further with the
-  network's access rules (Tailscale ACLs, a firewall) to your own devices. Never bind `0.0.0.0` on a
-  host with a public interface.
+- The host check is off for a non-loopback bind; the auth token is the access control. Limit
+  reachability further with the network's access rules (Tailscale ACLs, a firewall) to your own
+  devices. A bind to `0.0.0.0` or a public address is refused unless you set
+  `PGW_PROXY_ALLOW_PUBLIC_BIND=1`; on a host with a public interface, do not.
 - Between client and proxy the prompts travel as plain HTTP with real values. The private network
   encrypts that hop, nothing else does.
 - A client without a connection to the private network gets a connection error. There is no
@@ -811,10 +1017,14 @@ Limits of this setup:
 | Code | `error.type` | When |
 |---|---|---|
 | 400 | `privacy_gateway_session` | The session key does not match `[A-Za-z0-9._-]{1,64}`. |
+| 400 | `invalid_request_error` | The body of a `POST /v1/messages` is not a JSON object of the expected form, the query string has a parameter outside the allowed list, or the rules found something in a path segment. Nothing is sent upstream. |
+| 400 | `privacy_gateway_rejected` | The path is not in normal form: dot segments, `//` or percent-encoded characters. Nothing is sent upstream. |
+| 401 | `privacy_gateway_unauthorized` | `PGW_PROXY_AUTH_TOKEN` is set and `x-pgw-auth` is missing or wrong. Nothing is sent upstream. |
 | 403 | `privacy_gateway_forbidden` | `Host` header is not loopback while bound to loopback. |
 | 413 | `privacy_gateway_too_large` | Request body larger than 32 MiB. |
-| 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: unparsable body, non-object body, `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Nothing is sent upstream. |
-| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field. Nothing is sent upstream. The message lists class names and a count, never values. |
+| 422 | `privacy_gateway_rejected` | `POST` to `/v1/messages…` that cannot be transformed: `Content-Encoding` set, or a sub-path such as `/v1/messages/batches`. Also any `POST`/`PUT`/`PATCH`/`DELETE` to another path not listed in `PGW_PROXY_PASSTHROUGH_PATHS`, and a `GET`/`HEAD`/`OPTIONS` with a body. Nothing is sent upstream. |
+| 422 | `privacy_gateway_tool_restore_denied` | `PGW_PROXY_TOOL_RESTORE_ON_DENY=block` and a tool call in a non-streaming answer holds a placeholder that no rule releases. The client gets none of the answer. In a stream the same type arrives as an `error` event. The message lists class names and a count. |
+| 422 | `privacy_gateway_leak` | The leak check, or the rescan of the body about to be sent, found residue in a transformed field, or (with the default `PGW_PROXY_UNCHECKED_FIELDS=block`) a finding of a blocking class in an unchecked field. Nothing is sent upstream. The message lists class names and a count, never values. |
 | 502 | `privacy_gateway_upstream` | The upstream connection failed. |
 | 503 | `privacy_gateway_timeout` | The rescan of the body exceeded `PGW_PROXY_RESCAN_BUDGET`. Nothing is sent upstream. |
 
@@ -828,12 +1038,13 @@ $ curl -s -X POST http://127.0.0.1:8787/v1/messages -H 'content-type: applicatio
 ### Debug mode
 
 `PGW_PROXY_DEBUG_DIR` points at a directory into which the proxy writes every transformed request
-body as `<timestamp>-<session_key>.json` with mode `0600`, in a directory created with mode `0700`.
+body as `<timestamp>-<audit_id>.json` with mode `0600`, in a directory created with mode `0700`.
+`<audit_id>` is the random `session` id of the request log, never the session key.
 That is exactly the pseudonymized JSON that goes upstream, so it answers "what really left the
 machine".
 
 A request that fails the leak check is written as
-`<timestamp>-<session_key>-FAILED-original.json` and contains the **original, untransformed body**,
+`<timestamp>-<audit_id>-FAILED-original.json` and contains the **original, untransformed body**,
 because that is the only way to see which value tripped the check. Such a request is never sent
 upstream. That second dump is clear text and therefore needs its own switch:
 
@@ -853,14 +1064,16 @@ core's `pseudonymize`, `session_pseudonymize`, `restore`, `vault_purge` and `err
 sequence for one non-streaming request:
 
 ```json
-{"ts": "2026-09-23T07:14:58.905939+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 0, "reused_tokens": 0, "leakage": "ok", "duration_ms": 47}
-{"ts": "2026-09-23T07:14:58.908523+00:00", "event": "session_pseudonymize", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "new_tokens": 2, "reused_tokens": 0, "leakage": "ok", "duration_ms": 2}
-{"ts": "2026-09-23T07:14:58.929209+00:00", "event": "proxy_request", "session_key": "11111111-2222-3333-4444-555555555555", "path": "/v1/messages", "fields": 2, "tokens": 2, "leakage": "ok", "streaming": false, "duration_ms": 75, "system_transformed": true}
-{"ts": "2026-09-23T07:14:58.929707+00:00", "event": "restore", "session_id": "699ed07dca0e4b63b82d5c5e31d32eec", "restored_count": 1, "unknown_token_count": 0, "mode": "lenient"}
+{"ts": "2026-09-23T07:14:58.905939+00:00", "event": "session_pseudonymize", "audit_id": "3f9a61c0d27e", "new_tokens": 0, "reused_tokens": 0, "leakage": "ok", "duration_ms": 47}
+{"ts": "2026-09-23T07:14:58.908523+00:00", "event": "session_pseudonymize", "audit_id": "3f9a61c0d27e", "new_tokens": 2, "reused_tokens": 0, "leakage": "ok", "duration_ms": 2}
+{"ts": "2026-09-23T07:14:58.929209+00:00", "event": "proxy_request", "path": "/v1/messages", "fields": 2, "tokens": 2, "leakage": "ok", "streaming": false, "duration_ms": 75, "system_transformed": true}
+{"ts": "2026-09-23T07:14:58.929707+00:00", "event": "restore", "audit_id": "3f9a61c0d27e", "restored_count": 1, "unknown_token_count": 0, "mode": "lenient"}
 ```
 
 `fields` is the number of transformed strings, `tokens` the number of mappings the session holds,
-`leakage` is `ok`, `failed`, `rejected` or `upstream_error`. Follow it live with
+`leakage` is `ok`, `failed`, `rejected` or `upstream_error`. `audit_id` is a random id per vault
+session, kept only in the process's memory, so it groups the events of one session but cannot be
+used with `pgw restore`; after a restart the same session gets a new id. Follow it live with
 `tail -f ~/.local/share/privacy-gateway/audit.jsonl`.
 
 ### Request log (v2)
@@ -873,19 +1086,23 @@ proxy deletes files of that name pattern dated 180 or more days back; other file
 Each line lists every field of the request:
 
 - `status: checked` fields were pseudonymized. Each finding has class, offsets in the original
-  field text, token, policy, confidence, stage and `hmac`: the first 16 hex characters of
-  HMAC-SHA256 over the value with a per-installation salt (`audit.salt` next to the directory,
-  32 random bytes, mode `0600`). The same value gives the same `hmac` in one installation, so
-  repeats can be counted without storing the value. Secret classes (policy `redact`), `PIN` and
-  `PASSWORD` get no `hmac`.
-- `status: unchecked` fields are forwarded unchanged (`reason`: `thinking`, `tools`, `metadata`,
-  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from a read-only
-  scan. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
+  field text, token, policy, confidence and stage. No value and no hash of a value is stored:
+  a hash of a short value (CVV, date of birth, phone number, name) can be reversed by trying
+  every candidate. Older versions wrote a per-value `hmac` with a salt file `audit.salt` next to
+  the directory; the proxy no longer creates or reads that file, so after an update it is unused
+  and can be deleted by hand. Lines with `hmac` from older versions stay valid `"v": 2` lines.
+- `status: unchecked` fields are never changed (`reason`: `thinking`, `tools`, `metadata`,
+  `image`, `signature`, `system`, `other`). `observed` lists classes and counts from the rescan.
+  With `PGW_PROXY_UNCHECKED_FIELDS=block` (default) a finding of a blocking class in any of
+  them blocks the request; with `allow` they are forwarded as they are. With `PGW_PROXY_TRANSFORM_SYSTEM=0` the system prompt (`system`, or each `system[i]`
   block) is such a field with `reason: system`.
 - `outgoing` holds `sha256` and `bytes` of the body sent upstream (never the body itself),
-  `leakage` and a `rescan`: the full detection runs again over every string of that body. A hit
-  in a checked field sets `verdict: blocked` and nothing is sent; hits in unchecked fields are
-  only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
+  `leakage`, `upstream_status` (the HTTP status the upstream answered with, `null` when nothing
+  was sent or the connection failed; the verdict does not depend on it) and a `rescan`: the full
+  detection runs again over every string of that body. A hit
+  in a checked field sets `verdict: blocked` and nothing is sent. So does a hit of a blocking class in
+  an unchecked field under the default `PGW_PROXY_UNCHECKED_FIELDS=block`; other hits there, and
+  all of them under `allow`, are only reported. Values under `example.com`, `example.org`, `example.net`, `json-schema.org` and
   `w3.org` (the `$schema` URLs of tool definitions, documentation addresses) are public by
   definition and are not reported (`detect/public.py`). With `verdict: blocked` the hash describes
   the body that was held back; after a failed leak check `sha256` is `null`. A rescan that exceeds `PGW_PROXY_RESCAN_BUDGET` stops
@@ -900,11 +1117,29 @@ Each line lists every field of the request:
   `original_value` (a value the session stored is still in the text), `residual_finding` (the
   detection finds something that is not a token) or `unknown_token` (a token this session never
   issued).
-- `verdict` is `ok`, `blocked` or `error` (upstream connection failed, rescan timeout, or the
-  body was rejected).
+- `verdict` is `ok`, `ok_with_unchecked_findings`, `blocked` or `error` (upstream connection
+  failed, rescan timeout, or a request was rejected). `ok_with_unchecked_findings` means nothing
+  was blocked, but the rescan found something in at least one unchecked field that was forwarded
+  (a non-blocking class, a known client value, or anything with
+  `PGW_PROXY_UNCHECKED_FIELDS=allow`); look at the `observed` lists of the `unchecked` fields. A request with a body that is not a JSON object, a
+  wrong basic form (`messages`, a message, `content`, a block, `system`) or a query string outside
+  the allowed parameters gets HTTP 400 (`invalid_request_error`) and `verdict: blocked`.
+- The keys of the objects inside `tool_use.input` are checked like values. A key field has the
+  path of its object plus `{n}#key`; objects are addressed by position, so a key never appears in
+  a path. If two keys of one object become equal after replacement, the later one gets a suffix
+  (`#2`, `#3`). The restore removes it again when the key has a reversible token. A redacted key
+  keeps the suffix, and a key that already ends in `#2` in your own data can lose it. `coverage` counts values and keys separately as
+  `checked_fields` and `checked_keys`, next to `unchecked_fields`.
+- Query strings are forwarded only with the parameters `beta`, `limit`, `before_id` and `after_id`
+  and values of letters, digits and `_.:-` (up to 128 characters); anything else is refused with
+  HTTP 400. The access log of uvicorn never shows the query.
 
-`session` is the first 12 hex characters of `sha256(session_key)`. Values, parts of values and
-error texts never appear.
+`session` is a random audit id of 12 hex characters (`secrets.token_hex(6)`). The proxy draws
+it the first time it sees a session key and keeps the pair in memory only (the 4096 most recent
+keys), so the lines of one conversation share it until the process restarts. It is never derived
+from the key: the key restores a session's tokens through the proxy, so it counts as a credential
+and appears in no log, neither plain nor shortened nor hashed. The old `audit.jsonl` no longer
+has a `session_key` field. Values, parts of values and error texts never appear.
 
 **`verdict: ok` only means the rules found nothing.** It is no proof that a request is free of
 personal data: forms the patterns, dictionaries and context rules do not know pass unnoticed, and
@@ -1000,7 +1235,7 @@ restore:
 person:
   record_gender_from_salutation: true   # false: never put a gender into a PERSON token
 
-languages: [de, en]
+languages: [de, en]             # reserved: read, but has no effect in 0.2.0
 
 min_confidence: 0.5             # 0..1; findings below this are dropped
 ```
@@ -1065,7 +1300,9 @@ Supporting properties:
   pseudonymized text is re-scanned and searched for every stored value; any hit raises
   `LeakageError` and purges the session.
 - **Never logged.** Findings, detection reports, audit events and exception messages carry class
-  names, spans and counts — never values. The audit log records counts, not content.
+  names, spans and counts — never values. The audit log records classes, offsets, lengths and
+  counts, not content. Audit records use random ids for correlation, never the session key or the
+  vault session id.
 - **No network in the core.** `privacy_gateway` imports no networking module; a test enforces this
   statically. All network code lives in `privacy_gateway_proxy`, which the core never imports.
 - **Per-session tokens.** Two separate documents produce no cross-linkable tokens.
@@ -1077,12 +1314,16 @@ Supporting properties:
   rest against someone who copies `vault.db` alone. Someone who can read your home directory as
   your user reads both files and decrypts everything. There is no passphrase, no key rotation, no
   multi-user separation.
-- **Prompt injection that turns restored values into actions.** Restoration happens on the way back
-  to the client. A model instructed by text inside a file it read can put `<IBAN_001>` into a tool
-  call; the proxy restores it, and the *real* value is what your local tool then executes or sends.
-  The gateway prevents the value from reaching the model, not from reaching a tool.
-- **Anything at the proxy port.** There is no auth token. Any local process that reaches
-  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle.
+- **Prompt injection, in part.** A model instructed by text inside a file it read can put
+  `<IBAN_001>` into a tool call. By default the proxy does not restore it there, so the tool gets
+  the placeholder. A rule you add re-opens that path for its tool, argument and classes, and a
+  released value can travel on: through a file the model later executes or uploads, or through
+  text the model reads back. Text answers are restored, so whatever you copy from them by hand
+  carries the real value. Placeholders are numbered in order and easy to guess.
+- **Anything at the proxy port.** Without `PGW_PROXY_AUTH_TOKEN`, any local process that reaches
+  `127.0.0.1:8787` and knows a session key can use the proxy as a restore oracle. A non-loopback
+  bind without a token is refused unless `PGW_PROXY_ALLOW_UNAUTHENTICATED=1` is set; with it,
+  every device that reaches the port is such a process.
 - **Whatever the rules do not describe.** See below.
 
 ### Known limits
@@ -1097,40 +1338,107 @@ Supporting properties:
 - **Name parts across turns.** A session recognizes only the surface forms it has stored. If turn 1
   contains `Frau Anna Müller` and turn 2 contains only `Müller`, turn 2 may go out in the clear or
   receive a second token. Within one document `correlate()` joins them; across turns it does not.
-  (An automatic derivation of name parts was implemented and removed again: it made the leak check
-  reject legitimate requests.)
+  (An automatic derivation of name parts was implemented twice and removed both times: it made the
+  leak check reject legitimate requests such as `Termin Hollerbach-Petersen`.)
+- **Names behind a label.** `Kontoinhaber`, `Customer:`, `Patient:` and similar labels turn the two
+  or three capitalized words behind them into a person name. The generic label `Name:` (also
+  `Display Name:`, `Model Name:`) does so only when one of the words is in the first-name list, so
+  `name: Run Unit Tests` stays and a person with a first name outside the list stays too. A single
+  word behind a label is not taken (`Kontoinhaber Müller`), and capitalized words behind a person
+  label in technical text (`Customer: Order History`) are replaced like a person.
+- **Labelled numbers.** `PIN`, `TAN` and `OTP` are redacted when the digits follow the word directly
+  or after up to 40 characters and a `:` or `=` on the same line, so `PIN-Länge: 123456` is redacted
+  too. An 11-digit number directly behind `Steuer-ID`, `Steuernummer`, `IdNr`, `TIN` or `Tax ID` is
+  replaced without a valid check digit; without such a label the check digit decides. German tax
+  numbers written with slashes are not covered by this rule.
 - **Images, PDFs and base64.** `image` blocks and `document` blocks with a base64 or PDF source
-  pass through unchanged and are never scanned. Screenshots and scanned invoices are not protected.
+  pass through unchanged, and the `data` of a well-formed base64 source with an allowed media type
+  is never scanned. Screenshots and scanned invoices are not protected.
 - **`thinking` blocks keep their tokens.** They are signed by Anthropic, so the proxy cannot rewrite
   them. Extended-thinking text you see may contain `<IBAN_001>` instead of the value.
 - **Redaction is irreversible.** A round trip is byte-identical only for documents that contain no
   `redact` class; everything else comes back with `<CLASS_REDACTED>`.
 - **`ß`/`SS` case folding** is not covered by the leak check, so a value written `Straße` in the
   input and `STRASSE` in the output would not be flagged.
+- **Availability of the proxy.** Detection runs on the proxy's event loop, so one large request
+  holds every other request and `/health` until it is done (1 MiB of prose about 29 s, measured
+  with a cold vault). Requests that wait longer than the 10 s connect timeout meanwhile fail with
+  502 (11 of 14 in a test with four 256 KiB and ten small requests). Nothing is forwarded in
+  clear text because of it. There is no admission limit and no time budget for the
+  pseudonymization itself (the rescan stops after 10 s with 503), memory grows by about 220 MiB
+  per MiB of input, and a request whose client has disconnected is still sent upstream.
+  Resource limits and parallel requests are the focus of 0.2.1 ([roadmap](ROADMAP.md)).
+- **Numbers in forwarded JSON.** Detection reads strings. A JSON number, for example an ID stored
+  as a number inside a tool input or in the `classifier_context` of Claude Code's `safeguards`,
+  is neither replaced nor rescanned and goes out as it is.
+- **VIN without a check digit.** A VIN is found only when its check digit (position 9) is valid.
+  Many European VINs do not use one (`WVWZZZ1JZXW000001`) and go out unchanged.
+- **Look-alike characters.** Fullwidth letters and digits are folded to ASCII and invisible
+  format characters (Unicode category Cf, such as a zero-width space), variation selectors and
+  the combining grapheme joiner are dropped before the rules run; a base character followed by
+  more than 32 combining marks is left as it is. Letters of other scripts that only look Latin,
+  such as a Cyrillic `А` inside an IBAN, are not mapped, so such a value is not found.
 - **Generic markers are off by default.** Words like "reference", "number" or "name" are not
   context markers, because they produce too many false positives. Add them per class with
   `context_words` if your documents need them.
 - **Streaming holdback.** The holdback covers token fragments of up to 80 characters after a `<`,
   and bracket-less uppercase fragments of up to 73 characters. A class name longer than that can
   break restoration in a stream.
-- **No proxy auth token**, and the proxy serves exactly one vault and one configuration per
-  process.
-- **Unchecked fields go out as they are.** `tools` definitions, `metadata`, an unchanged system
-  prompt (OAuth login) and signed blocks are forwarded byte for byte. They are rescanned and
-  reported, not repaired. Tool definitions of connected services often contain example addresses
-  and handles.
-- **Case after restore.** If a first name and a user name in a path are the same word
-  (`Anna`, `/Users/anna/`), both share one token and the restored text uses the spelling of
-  the first occurrence. A name at the start of a sentence can come back in lower case. Paths are
-  restored exactly.
+- **One vault per process.** The proxy serves exactly one vault and one configuration. The auth
+  token is one shared secret, not a per-user login.
+- **No TLS.** The listener speaks plain HTTP. Over a VPN such as Tailscale or WireGuard the VPN
+  encrypts the hop; on a plain LAN or any other network, token, prompts and answers are readable on
+  the way. TLS on the listener is planned for a later version.
+- **No client identity.** A session is chosen by what the client sends (`metadata.user_id` or
+  `X-PGW-Session`). Whoever reaches the port, holds the token and knows a session key gets that
+  session's values restored. Only a request without any key is isolated, by a session of its own.
+- **Header scan.** Header values are checked by the same rules as unchecked fields. `x-api-key`,
+  `Authorization` and UUID id headers are not scanned, and a value the rules do not find is
+  forwarded as it came.
+- **Unchecked fields are not repaired.** `tools` definitions, `metadata`, an unchanged system
+  prompt (OAuth login) and signed blocks are never changed. By default a finding of a blocking class
+  in one of them blocks the whole request; other classes (domains, URLs, handles, organization
+  names) and everything under `PGW_PROXY_UNCHECKED_FIELDS=allow` are forwarded byte for byte and
+  only reported. Values the rules do not find go out either way.
+- **Spellings are separate placeholders.** `Anna`, `ANNA` and the `anna` in `/Users/anna/` each
+  restore exactly, but the model sees three different tokens and cannot tell that they name the
+  same person.
+- **Learned names in a request path.** The path scan runs the rules, not the values a conversation
+  has learned. A name that only a context rule found earlier is not recognized in a path.
 - **Token-shaped text in your own input.** Text that already contains something like `<IBAN_001>`
-  (docs about this gateway, for example) passes the leak check as literal text. If a later real
-  value gets the same token, a restored answer can show that value where the model quoted the
-  literal. Nothing leaves your machine through this.
+  (docs about this gateway, for example) stays as literal text. A new token skips numbers that
+  already appear in the text it is issued for, but a literal that first shows up in a later turn
+  can still match a token issued earlier; a restored answer can then show that value where the
+  model quoted the literal. Nothing leaves your machine through this.
 - **Prompt caching.** A new known value changes older messages of the same conversation, which
   invalidates Anthropic's prompt cache for that one request.
 - **Rescan budget.** `PGW_PROXY_RESCAN_BUDGET` is checked between strings; one very long string can
   run past it. A custom `FQDN` pattern in your YAML falls back to the slower regex scan.
+- **Large requests block the proxy.** Detection runs in the event loop. Measured on the release
+  candidate: about 9 s of CPU per MiB of prose for one request, so a body near the 32 MiB limit
+  holds every other session for minutes. The default rules run in linear time; a pattern you change
+  in your YAML falls back to the plain regex scan and has no such guarantee.
+- **Redacted values live in memory only.** Once a password, PIN or TAN is redacted, later copies in
+  the same document or conversation are redacted too. That memory ends with the process and with
+  each separate `pgw` call, so a copy in a later CLI call or after a proxy restart is caught only
+  if a rule finds it again. A short PIN such as `2024` also replaces the same number as a year.
+- **Parallel writers on one vault.** Several processes may share `vault.db` and a session key. A
+  token is claimed inside one transaction; when two writers collide, the loser fails closed with
+  `VaultError` and the next request gets a free token. Under heavy parallel use of one session
+  many requests fail this way.
+- **Detection edges.** An IBAN glued to capital letters (`IBANDE89…`) and a card number glued to a
+  word other than a card word (`id4111…`) are not found. Escaped JSON is covered up to three
+  escape levels, escaped password values up to 512 characters.
+- **Countries and languages.** Identifiers of countries other than Germany and the United States
+  (French NIR, Spanish DNI, UK National Insurance number and many more) are found only behind a
+  label, and labels, salutations and address grammar exist in German and English only. Full list
+  in the [coverage register](docs/COVERAGE.md).
+- **Plain dates.** A date on its own is not replaced, with or without a year (`14.03.2025`,
+  `14.03.`, `2025-03-14`). Only a date in front of a birth marker (`geboren`, `born`,
+  `Geburtsdatum`) or a health statement counts as a birth date.
+- **Unknown names without a salutation.** Two capitalized words that are in no bundled list stay
+  as they are unless a salutation (`Herr`, `Frau`, `Mr`) stands in front. A person label such as
+  `Name:` helps only when the first name is in the bundled list.
 - **Out of scope:** ML/NER models, OCR, binary documents, multi-user vaults, key rotation.
 
 ### Further reading
@@ -1158,7 +1466,10 @@ pseudonymization. The request was not sent upstream.
    `outgoing.leakage` is `fail`, the leak check stopped it and the field with `leaks` names the
    field path, the kind of leak and the class, for example `original_value PERSON_USERNAME`. If
    it is `ok`, the final rescan stopped it and `outgoing.rescan.findings` lists path, class and
-   offsets. The older `audit.jsonl` has the session key and the timestamp.
+   offsets. A path in an unchecked field (`tools[…]`, `system` with
+   `PGW_PROXY_TRANSFORM_SYSTEM=0`, a `thinking` block, an unknown field) means the default
+   `PGW_PROXY_UNCHECKED_FIELDS=block` stopped it: the proxy cannot replace values there, see
+   [Unchecked fields: blocking classes](#unchecked-fields-blocking-classes). The older `audit.jsonl` has the timestamp, but no session key.
 2. If that is not enough, turn on `PGW_PROXY_DEBUG_DIR` **and** `PGW_PROXY_DEBUG_ORIGINALS=1`, reproduce, and read the
    `-FAILED-original.json` dump. It is clear text, so delete it afterwards.
 3. Identify the class that fired. Usually one of two things is happening: a value appears in two
@@ -1176,8 +1487,8 @@ body was not transformable at all (see the status table above).
 
 The `Host` header is not loopback. Use `http://127.0.0.1:8787` or `http://localhost:8787` in
 `ANTHROPIC_BASE_URL`, not a LAN address or a hostname that resolves elsewhere. If you really need
-to bind to a non-loopback address, the check turns itself off — and so does your only access
-control, which the startup log warns about. For several machines use the private-network setup in
+to bind to a non-loopback address, the check turns itself off and the proxy needs an auth token
+to start. For several machines use the private-network setup in
 [Sharing one proxy across machines](#sharing-one-proxy-across-machines).
 
 ### Claude Code reports a connection error with a shared proxy
@@ -1190,11 +1501,11 @@ again every ten seconds.
 
 ### HTTP 429 with an empty body and no rate-limit headers
 
-You are logged in with OAuth (Pro/Max subscription) and the proxy changed the system prompt. Set
-`PGW_PROXY_TRANSFORM_SYSTEM=0` in the environment of the **proxy process** — for a launchd service
-that means re-running `PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd`, for systemd
-it means adding the `Environment=` line and `systemctl --user restart`. A real rate limit looks
-different: it carries `anthropic-ratelimit-*` headers and a JSON error body.
+With an OAuth login, check that the proxy is 0.2.0 or later: older versions replaced Claude Code's
+billing line in the system prompt, and the upstream answers such requests with 429 (see
+[OAuth / Claude subscription](#oauth--claude-subscription)). A single 429 on the small probe at the
+start of an interactive session does not stop the session. A real rate limit carries
+`anthropic-ratelimit-*` headers and a JSON error body.
 
 ### Claude Code compacts the conversation over and over
 
@@ -1259,10 +1570,8 @@ ASSUMPTIONS AND DEFAULTS (use these, do not ask):
 - Model default for the shell function: sonnet[1m]. The [1m] suffix is required, never drop it.
 - OS detection: `uname -s` -> "Darwin" means macOS (use launchd), "Linux" means Linux (use a
   systemd user unit). Anything else: skip the service step and report it.
-- Login type: if the environment variable ANTHROPIC_API_KEY is set and non-empty, the user has an
-  API key, so leave PGW_PROXY_TRANSFORM_SYSTEM unset (full protection). If it is empty or unset,
-  assume an OAuth/subscription login and set PGW_PROXY_TRANSFORM_SYSTEM=0, because Anthropic
-  answers OAuth requests with a modified system prompt with HTTP 429.
+- Login type: API key and OAuth/subscription login both work with the defaults. Do not set
+  PGW_PROXY_TRANSFORM_SYSTEM.
 - Do not modify any existing shell configuration except appending one clearly marked block to the
   user's shell rc file (~/.zshrc for zsh, ~/.bashrc for bash). Never edit or reorder existing lines.
 - If any step fails, stop, do not improvise a workaround, and report exactly what failed with the
@@ -1331,8 +1640,7 @@ STEPS:
 
 7. Install the background service.
    macOS: from the install directory run
-     `PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd`
-     (omit the PGW_PROXY_TRANSFORM_SYSTEM prefix if ANTHROPIC_API_KEY was set, see assumptions).
+     `uv run pgw-proxy install-launchd`
      Expected output: "installed /Users/<you>/Library/LaunchAgents/com.privacy-gateway.proxy.plist",
      a list of the PGW_* variables taken over, the log directory, and a line
      "export ANTHROPIC_BASE_URL=http://127.0.0.1:8787".
@@ -1353,12 +1661,11 @@ STEPS:
        Environment=PATH=<dirname of uv>:/usr/local/bin:/usr/bin:/bin
        Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
        Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
-       Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
 
        [Install]
        WantedBy=default.target
 
-     Omit the PGW_PROXY_TRANSFORM_SYSTEM line if ANTHROPIC_API_KEY was set. Then run
+     Then run
      `systemctl --user daemon-reload` and `systemctl --user enable --now privacy-gateway.service`.
    If neither service manager is available, skip this step, and in the report tell the user to run
    `uv run pgw-proxy serve --listen 127.0.0.1:8787` in the foreground instead.
@@ -1403,7 +1710,6 @@ STEPS:
 11. Final report. Print, in this order:
     - Installed version and commit hash (`git -C <install dir> rev-parse --short HEAD`).
     - The install directory, the config file, the vault database path and the vault key path.
-    - Whether PGW_PROXY_TRANSFORM_SYSTEM=0 was set, and the one-sentence reason.
     - The result of every smoke test with its actual status code.
     - How to use it: open a new shell and run `claude-private`.
     - Where the audit logs are: `~/.local/share/privacy-gateway/audit.jsonl` (events, watch it with

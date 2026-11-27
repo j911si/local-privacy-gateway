@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from privacy_gateway.model import ConfigError
 from privacy_gateway_proxy import cli, launchd
 from privacy_gateway_proxy.settings import ProxySettings
 
@@ -270,3 +271,72 @@ def test_log_startup_warns_about_a_non_loopback_bind(
         cli.log_startup(ProxySettings(listen_host="0.0.0.0"))
 
     assert "non-loopback" in caplog.text
+
+
+def test_launchd_env_refuses_a_plain_auth_token() -> None:
+    with pytest.raises(ConfigError) as caught:
+        cli.launchd_env({"PGW_PROXY_AUTH_TOKEN": "tok-canary-123", "PATH": "/opt/bin"})
+
+    assert "tok-canary-123" not in str(caught.value)
+    assert "PGW_PROXY_AUTH_TOKEN_FILE" in str(caught.value)
+
+
+def test_launchd_env_takes_over_the_token_file_path() -> None:
+    env = cli.launchd_env({"PGW_PROXY_AUTH_TOKEN_FILE": "/home/me/.config/pgw/token"})
+
+    assert env == {"PGW_PROXY_AUTH_TOKEN_FILE": "/home/me/.config/pgw/token"}
+
+
+def test_log_startup_warns_about_a_non_loopback_bind_without_a_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        cli.log_startup(ProxySettings(listen_host="192.0.2.1"))
+
+    assert "no auth token" in caplog.text
+
+
+def test_log_startup_is_quiet_about_the_token_when_one_is_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        cli.log_startup(ProxySettings(listen_host="192.0.2.1", auth_token="tok-canary-123"))
+
+    assert "no auth token" not in caplog.text
+    assert "tok-canary-123" not in caplog.text
+    assert "auth_token=set" in caplog.text
+
+
+def test_log_startup_names_the_tool_restore_policy_size_and_mode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        cli.log_startup(ProxySettings(tool_restore_on_deny="block"))
+
+    assert "tool_restore_rules=0 tool_restore_on_deny=block" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("PGW_PROXY_TOOL_RESTORE_POLICY", "rules:\n  - tool: Write\n    canary-4711: 1\n"),
+        ("PGW_PROXY_TOOL_RESTORE_ON_DENY", "canary-4711"),
+    ],
+)
+def test_serve_refuses_to_start_with_a_bad_tool_restore_setting(
+    name: str,
+    text: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if name == "PGW_PROXY_TOOL_RESTORE_POLICY":
+        policy = tmp_path / "policy.yaml"
+        policy.write_text(text, encoding="utf-8")
+        text = str(policy)
+    monkeypatch.setenv(name, text)
+
+    assert cli.main(["serve"]) == cli.EXIT_ERROR
+    error = capsys.readouterr().err
+    assert "tool restore" in error
+    assert "canary-4711" not in error

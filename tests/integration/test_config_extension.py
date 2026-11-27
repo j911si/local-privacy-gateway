@@ -63,3 +63,18 @@ def test_overridden_secret_is_restorable(extended_gateway: Gateway) -> None:
         assert "pk_live_8Xq2Rm4Tn7Vz1Cb5" in gateway.restore(
             result.text, result.session_id
         ).text
+
+
+def test_a_known_value_shaped_like_its_own_token_does_not_stay_visible(
+    gateway_env: dict[str, str], tmp_path: Path
+) -> None:
+    config = tmp_path / "hosts.yaml"
+    config.write_text("dictionaries:\n  HOSTNAME: [HOSTNAME_001]\n", encoding="utf-8")
+    text = "Server HOSTNAME_001 antwortet nicht."
+    with Gateway(config) as gateway:
+        session = gateway.session("token-shaped-value")
+        output = session.pseudonymize(text)
+        assert "HOSTNAME_001" not in output
+        assert session.restore(output, "strict").text == text
+        result = gateway.pseudonymize(text)
+        assert "HOSTNAME_001" not in result.text

@@ -10,9 +10,16 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from privacy_gateway.model import PrivacyGatewayError
+from privacy_gateway.model import ConfigError, PrivacyGatewayError
 from privacy_gateway_proxy import launchd
-from privacy_gateway_proxy.settings import ProxySettings, is_loopback, load_settings, parse_listen
+from privacy_gateway_proxy.settings import (
+    UNCHECKED_ALLOW,
+    ProxySettings,
+    is_loopback,
+    is_private_address,
+    load_settings,
+    parse_listen,
+)
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -34,6 +41,11 @@ def program_args(repo_root: Path = REPO_ROOT) -> list[str]:
 
 def launchd_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The `PGW_*` variables of the installing shell, plus `PATH` so `uv` is found."""
+    if environ.get("PGW_PROXY_AUTH_TOKEN"):
+        raise ConfigError(
+            "PGW_PROXY_AUTH_TOKEN would be written to the plist in plain text; "
+            "put the token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE instead"
+        )
     env = {name: value for name, value in environ.items() if name.startswith("PGW_")}
     path = environ.get("PATH")
     if path is not None:
@@ -57,7 +69,8 @@ def log_startup(settings: ProxySettings) -> None:
     log = logging.getLogger("privacy_gateway_proxy")
     log.info(
         "settings listen=%s:%s upstream=%s transform_system=%s placeholder_notice=%s "
-        "debug_dir=%s debug_originals=%s",
+        "debug_dir=%s debug_originals=%s auth_token=%s tool_restore_rules=%s "
+        "tool_restore_on_deny=%s unchecked_fields=%s",
         settings.listen_host,
         settings.listen_port,
         settings.upstream_base_url,
@@ -65,12 +78,37 @@ def log_startup(settings: ProxySettings) -> None:
         settings.placeholder_notice,
         settings.debug_dir,
         settings.debug_originals,
+        "set" if settings.auth_token else "unset",
+        len(settings.tool_restore_rules),
+        settings.tool_restore_on_deny,
+        settings.unchecked_fields,
     )
+    if settings.unchecked_fields == UNCHECKED_ALLOW:
+        log.warning(
+            "PGW_PROXY_UNCHECKED_FIELDS=allow: values the rules find in tools, thinking, an "
+            "untransformed system prompt or other unchecked fields are sent upstream in clear text"
+        )
     if not is_loopback(settings.listen_host):
         log.warning(
             "listening on the non-loopback address %s: the host header check is off",
             settings.listen_host,
         )
+        if not settings.auth_token:
+            log.warning("listening on a non-loopback address with no auth token")
+        if not is_private_address(settings.listen_host):
+            log.warning(
+                "listening on %s, which is not a private address, because "
+                "PGW_PROXY_ALLOW_PUBLIC_BIND is set: the proxy has no TLS, so the auth token, "
+                "requests and restored answers cross the network in clear",
+                settings.listen_host,
+            )
+        if not settings.auth_token and settings.allow_unauthenticated:
+            log.warning(
+                "UNAUTHENTICATED proxy on %s because PGW_PROXY_ALLOW_UNAUTHENTICATED is set: "
+                "anyone who reaches the port and knows a session key can restore that "
+                "session's original values; set PGW_PROXY_AUTH_TOKEN_FILE instead",
+                settings.listen_host,
+            )
 
 
 def _serve(args: argparse.Namespace) -> int:

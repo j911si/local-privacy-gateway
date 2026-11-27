@@ -31,21 +31,21 @@ def test_metadata_strategy_uses_json_session_id() -> None:
 def test_metadata_strategy_ignores_malformed_json_user_id() -> None:
     body = {"metadata": {"user_id": '{"device_id": "abc", "session_id"'}}
 
-    assert session_key_for({}, body, SETTINGS) == "default"
+    assert session_key_for({}, body, SETTINGS) is None
 
 
 def test_metadata_strategy_ignores_json_without_session_id() -> None:
     body = {"metadata": {"user_id": json.dumps({"device_id": "9f" * 32})}}
 
-    assert session_key_for({}, body, SETTINGS) == "default"
+    assert session_key_for({}, body, SETTINGS) is None
 
 
 def test_metadata_strategy_ignores_json_with_unusable_session_id() -> None:
     blank = {"metadata": {"user_id": json.dumps({"session_id": "  "})}}
     number = {"metadata": {"user_id": json.dumps({"session_id": 42})}}
 
-    assert session_key_for({}, blank, SETTINGS) == "default"
-    assert session_key_for({}, number, SETTINGS) == "default"
+    assert session_key_for({}, blank, SETTINGS) is None
+    assert session_key_for({}, number, SETTINGS) is None
 
 
 def test_metadata_strategy_falls_back_to_header() -> None:
@@ -54,20 +54,20 @@ def test_metadata_strategy_falls_back_to_header() -> None:
     assert session_key_for(headers, {"metadata": {}}, SETTINGS) == "team-a"
 
 
-def test_metadata_strategy_falls_back_to_default() -> None:
-    assert session_key_for({}, None, SETTINGS) == "default"
+def test_metadata_strategy_falls_back_to_no_key() -> None:
+    assert session_key_for({}, None, SETTINGS) is None
 
 
 def test_metadata_strategy_ignores_user_id_without_session() -> None:
     body = {"metadata": {"user_id": "user_abc_account_def"}}
 
-    assert session_key_for({}, body, SETTINGS) == "default"
+    assert session_key_for({}, body, SETTINGS) is None
 
 
 def test_metadata_strategy_ignores_non_string_user_id() -> None:
     body = {"metadata": {"user_id": 42}}
 
-    assert session_key_for({}, body, SETTINGS) == "default"
+    assert session_key_for({}, body, SETTINGS) is None
 
 
 def test_header_strategy_uses_header_only() -> None:
@@ -75,7 +75,7 @@ def test_header_strategy_uses_header_only() -> None:
     body = {"metadata": {"user_id": USER_ID}}
 
     assert session_key_for({"x-pgw-session": "team-b"}, body, settings) == "team-b"
-    assert session_key_for({}, body, settings) == "default"
+    assert session_key_for({}, body, settings) is None
 
 
 def test_single_strategy_always_returns_default() -> None:
@@ -88,7 +88,7 @@ def test_single_strategy_always_returns_default() -> None:
 def test_blank_header_is_ignored() -> None:
     settings = ProxySettings(session_strategy="header", default_session_key="default")
 
-    assert session_key_for({"x-pgw-session": "  "}, {}, settings) == "default"
+    assert session_key_for({"x-pgw-session": "  "}, {}, settings) is None
 
 
 def test_valid_session_keys() -> None:

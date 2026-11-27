@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import stat
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from privacy_gateway import Gateway
-from privacy_gateway.audit import AuditLog, RequestAuditLog, load_salt, rotate
+from privacy_gateway import Gateway, audit
+from privacy_gateway.audit import AuditLog, RequestAuditLog, rotate
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -26,7 +25,7 @@ def test_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     (event,) = _read(path)
     assert event["event"] == "pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert "doc_sha256" not in event
     assert event["counts"] == {"IBAN": 1}
     assert event["token_count"] == 3
@@ -40,7 +39,7 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).session_pseudonymize("s1", 2, 3, "ok", 17)
     (event,) = _read(path)
     assert event["event"] == "session_pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["new_tokens"] == 2
     assert event["reused_tokens"] == 3
     assert event["leakage"] == "ok"
@@ -51,7 +50,6 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
 def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     AuditLog(path).proxy_request(
-        session_key="conv-1",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -61,7 +59,6 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
         system_transformed=False,
     )
     AuditLog(path).proxy_request(
-        session_key="conv-2",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -71,7 +68,7 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     )
     event, default_event = _read(path)
     assert event["event"] == "proxy_request"
-    assert event["session_key"] == "conv-1"
+    assert "session_key" not in event
     assert event["path"] == "/v1/messages"
     assert event["fields"] == 4
     assert event["tokens"] == 2
@@ -88,7 +85,7 @@ def test_restore_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).restore("s1", 4, 1, "lenient")
     (event,) = _read(path)
     assert event["event"] == "restore"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["restored_count"] == 4
     assert event["unknown_token_count"] == 1
     assert event["mode"] == "lenient"
@@ -144,7 +141,7 @@ def test_disabled_log_writes_nothing(tmp_path: Path) -> None:
     log = AuditLog(None)
     log.pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     log.session_pseudonymize("s1", 1, 0, "ok", 1)
-    log.proxy_request("conv-1", "/v1/messages", 1, 1, "ok", False, 1)
+    log.proxy_request("/v1/messages", 1, 1, "ok", False, 1)
     log.restore("s1", 1, 0, "strict")
     log.vault_purge(1)
     log.error(exc_type="RuntimeError", stage="pattern")
@@ -207,27 +204,20 @@ def test_request_log_appends(tmp_path: Path) -> None:
     assert [record["n"] for record in _read(path)] == [1, 2]
 
 
-def test_salt_is_created_once_beside_the_directory(tmp_path: Path) -> None:
-    first = RequestAuditLog(tmp_path / "audit").value_hmac("DE89370400440532013000")
-    salt_path = tmp_path / "audit.salt"
-    assert len(salt_path.read_bytes()) == 32
-    assert stat.S_IMODE(os.stat(salt_path).st_mode) == 0o600
-    second = RequestAuditLog(tmp_path / "audit").value_hmac("DE89370400440532013000")
-    assert first == second
-    assert re.fullmatch(r"[0-9a-f]{16}", first)
-    assert first != RequestAuditLog(tmp_path / "audit").value_hmac("DE00000000000000000000")
+def test_request_log_creates_no_salt_and_has_no_value_hash(tmp_path: Path) -> None:
+    log = RequestAuditLog(tmp_path / "audit", clock=lambda: NOW)
+    log.write("proxy_request", {"verdict": "ok"})
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["audit"]
+    assert not hasattr(log, "value_hmac")
+    for name in ("load_salt", "SALT_NAME", "SALT_BYTES", "HMAC_HEX_CHARS", "NO_HMAC_CLASSES"):
+        assert not hasattr(audit, name)
 
 
-def test_a_damaged_salt_fails_closed(tmp_path: Path) -> None:
-    (tmp_path / "audit.salt").write_bytes(b"short")
-    with pytest.raises(ValueError, match="unexpected size"):
-        load_salt(tmp_path / "audit.salt")
-
-
-def test_hmac_differs_between_installations(tmp_path: Path) -> None:
-    one = RequestAuditLog(tmp_path / "a" / "audit").value_hmac("Müller")
-    two = RequestAuditLog(tmp_path / "b" / "audit").value_hmac("Müller")
-    assert one != two
+def test_an_old_salt_file_is_neither_read_nor_deleted(tmp_path: Path) -> None:
+    old = tmp_path / "audit.salt"
+    old.write_bytes(b"short")
+    RequestAuditLog(tmp_path / "audit", clock=lambda: NOW).write("proxy_request", {})
+    assert old.read_bytes() == b"short"
 
 
 def test_rotation_deletes_180_days_and_keeps_179_and_foreign_files(tmp_path: Path) -> None:

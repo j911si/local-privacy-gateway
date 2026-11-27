@@ -8,10 +8,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from privacy_gateway_proxy.transform import restore_json as _restore_json
+from privacy_gateway_proxy.tool_policy import ERROR_TYPE, ToolGuard
 
 _SEPARATOR = re.compile(rb"\r?\n\r?\n")
-_HOLDBACK = re.compile(r"(?:<[^>\s]{0,80}|[A-Z][A-Z_]{0,72}(?:_\d{0,2})?)$")
+_HOLDBACK = re.compile(
+    r"(?:<[^>\s]{0,80}|[`\"']?[A-Z][A-Z0-9_]{0,72}(?:_\d{0,2})?)$"
+    r"|(?P<q>[`\"'])(?:[A-Za-z][A-Za-z0-9_]{0,72}(?P=q)?)?$"
+)
 
 
 @dataclass
@@ -49,22 +52,42 @@ def _parse_block(block: bytes, raw: bytes) -> SSEEvent:
 
 
 class StreamRestorer:
-    """Rewrites text and tool-input deltas, forwarding every other event unchanged."""
+    """Rewrites text deltas, and tool-input deltas only through a guard; the rest is unchanged.
 
-    def __init__(self, restore: Callable[[str], str]) -> None:
+    Without a guard tool input passes as the model sent it. When the guard blocks a tool call,
+    an `error` event replaces its input and everything after it is dropped.
+    """
+
+    def __init__(self, restore: Callable[[str], str], tools: ToolGuard | None = None) -> None:
         self._restore = restore
+        self._tools = tools
+        self._names: dict[int, Any] = {}
+        self.closed = False
         self._buffer = b""
         self._held: dict[int, str] = {}
+        self._before: dict[int, str] = {}
         self._partial: dict[int, str] = {}
 
     def feed(self, chunk: bytes) -> bytes:
+        if self.closed:
+            return b""
         self._buffer += chunk
         events, self._buffer = parse_sse(self._buffer)
-        return b"".join(self._handle(event) for event in events)
+        parts: list[bytes] = []
+        for event in events:
+            parts.append(self._handle(event))
+            if self.closed:
+                break
+        return b"".join(parts)
 
     def finish(self) -> bytes:
+        if self.closed:
+            return b""
         parts = [self._flush_text(index) for index in sorted(self._held)]
-        parts += [self._flush_partial(index) for index in sorted(self._partial)]
+        for index in sorted(self._partial):
+            parts.append(self._flush_partial(index))
+            if self.closed:
+                return b"".join(parts)
         parts.append(self._buffer)
         self._buffer = b""
         return b"".join(parts)
@@ -80,8 +103,13 @@ class StreamRestorer:
         index = payload.get("index")
         if not isinstance(index, int):
             return event.raw
+        if name == "content_block_start":
+            block = payload.get("content_block")
+            self._names[index] = block.get("name") if isinstance(block, dict) else None
+            return event.raw
         if name == "content_block_stop":
-            return self._flush_text(index) + self._flush_partial(index) + event.raw
+            flushed = self._flush_text(index) + self._flush_partial(index)
+            return flushed if self.closed else flushed + event.raw
         if name == "content_block_delta":
             return self._delta(payload, index, event.raw)
         return event.raw
@@ -105,23 +133,35 @@ class StreamRestorer:
         if split < len(buffered):
             self._held[index] = buffered[split:]
         safe = buffered[:split]
-        return _text_event(index, self._restore(safe)) if safe else b""
+        return _text_event(index, self._restore_after(index, safe)) if safe else b""
 
     def _flush_text(self, index: int) -> bytes:
         held = self._held.pop(index, "")
-        return _text_event(index, self._restore(held)) if held else b""
+        return _text_event(index, self._restore_after(index, held)) if held else b""
+
+    def _restore_after(self, index: int, text: str) -> str:
+        """Restore `text` as if the raw text sent before it stood in front of it.
+
+        A bare token needs a non-word, non-`>` character before its quote, so the last raw
+        character of the previous piece goes in as context and comes out unchanged.
+        """
+        before = self._before.get(index, "")
+        self._before[index] = text[-1]
+        return self._restore(before + text)[len(before) :]
 
     def _flush_partial(self, index: int) -> bytes:
         accumulated = self._partial.pop(index, "")
         if not accumulated:
             return b""
-        try:
-            parsed = json.loads(accumulated)
-        except json.JSONDecodeError:
-            restored = self._restore(accumulated)
-        else:
-            restored = json.dumps(
-                _restore_json(parsed, self._restore), separators=(",", ":"), ensure_ascii=False
+        restored: str | None = accumulated
+        if self._tools is not None:
+            restored = self._tools.restore_partial(index, self._names.get(index), accumulated)
+        if restored is None:
+            self.closed = True
+            message = self._tools.message() if self._tools is not None else ""
+            return _event(
+                "error",
+                {"type": "error", "error": {"type": ERROR_TYPE, "message": message}},
             )
         return _event(
             "content_block_delta",

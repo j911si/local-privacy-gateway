@@ -239,7 +239,7 @@ Check that it is actually running through the proxy:
 tail -f ~/.local/share/privacy-gateway/audit.jsonl
 ```
 
-Every request produces one `proxy_request` line with the session key, the number of transformed
+Every request produces one `proxy_request` line with the path, the number of transformed
 fields, the token count and the leak result, never any content. The field-by-field request log
 is in `~/.local/state/privacy-gateway/audit/`, one file per UTC day. It shows which fields were
 replaced, which were forwarded unchecked and whether the final rescan of the outgoing body found
@@ -282,7 +282,8 @@ rm -rf ~/.local/share/privacy-gateway ~/.local/state/privacy-gateway ~/.config/p
 
 Use this on the machine that should run the proxy for several others, for example a home server
 or a VPS that is part of your Tailscale network. It installs the proxy as a systemd user unit that
-listens only on the host's Tailscale address, never on `0.0.0.0`. Fill in `LOGIN_TYPE` first.
+listens only on the host's Tailscale address, never on `0.0.0.0`, and creates the auth token the
+proxy requires on such an address. Fill in `LOGIN_TYPE` first.
 Background and limits: README section
 [Sharing one proxy across machines](../README.md#sharing-one-proxy-across-machines).
 
@@ -307,11 +308,16 @@ ASSUMPTIONS AND DEFAULTS (use these, do not ask):
   with a modified system prompt with HTTP 429. LOGIN_TYPE = api-key means leave it unset.
 - Config directory ~/.config/privacy-gateway, vault data ~/.local/state/privacy-gateway, request
   log ~/.local/state/privacy-gateway/audit.
+- Auth token file: ~/.config/privacy-gateway/proxy-auth-token, mode 600. The proxy refuses to
+  start on a non-loopback address without it. Clients send the token as the header x-pgw-auth.
 - If any step fails, stop, do not improvise a workaround, and report exactly what failed with the
   command output.
 
 SECURITY RULES (non-negotiable):
-- Never write an API key, token or password into any file, and never echo one.
+- Never write an API key, token or password into any file, and never echo one. The only exception
+  is the proxy auth token, which goes into its mode 600 token file and nowhere else (not into the
+  unit, not into a shell rc file, not into the report). Never print it.
+- Never set PGW_PROXY_ALLOW_UNAUTHENTICATED.
 - Never set PGW_PROXY_DEBUG_ORIGINALS. It writes untransformed prompts to disk in clear text.
 - Never read, print, copy or back up the vault key or any vault.db.
 - Never bind the proxy to 0.0.0.0 or to any address other than this host's Tailscale address.
@@ -346,7 +352,12 @@ STEPS:
    `ls -l ~/.config/privacy-gateway/vault.key` that the key file has mode -rw-------. Do not print
    its content.
 
-7. Install the service unit.
+7. Create the auth token, without printing it:
+   `(umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token)`
+   If the file already exists, keep it. Check with
+   `ls -l ~/.config/privacy-gateway/proxy-auth-token` that its mode is -rw-------.
+
+8. Install the service unit.
    - Run `mkdir -p ~/.config/systemd/user`, then copy
      docs/systemd/privacy-gateway-proxy.service.example to
      ~/.config/systemd/user/privacy-gateway-proxy.service.
@@ -357,24 +368,31 @@ STEPS:
      commented `/bin/sh -c` line, adjusted to the real path of the `pgw-proxy` console script in the
      install directory's .venv and the real path of the tailscale binary (`command -v tailscale`).
      Keep every `$$` and `%h` exactly as written: systemd expands them, the shell does not.
+   - Uncomment `Environment=PGW_PROXY_AUTH_TOKEN_FILE=%h/.config/privacy-gateway/proxy-auth-token`.
    - If LOGIN_TYPE = oauth, uncomment `Environment=PGW_PROXY_TRANSFORM_SYSTEM=0`.
    - Run `systemctl --user daemon-reload` and
      `systemctl --user enable --now privacy-gateway-proxy.service`.
 
-8. Check the service. `systemctl --user status privacy-gateway-proxy.service` must say active.
+9. Check the service. `systemctl --user status privacy-gateway-proxy.service` must say active.
    `ss -ltn | grep 8787` (`ss` comes with the iproute2 package) must show exactly one listener, on this host's Tailscale address. If it
    shows 0.0.0.0, `*` or 127.0.0.1, run `systemctl --user stop privacy-gateway-proxy.service` and
    report. If the service does not start, read `journalctl --user -u privacy-gateway-proxy -n 50`
    and report.
 
-9. Local smoke tests against the Tailscale address (no request reaches Anthropic):
+10. Local smoke tests against the Tailscale address (no request reaches Anthropic):
    a) `curl -s http://<tailscale ip>:8787/health` must print exactly {"status":"ok"}
-   b) `curl -s -o /dev/null -w '%{http_code}' -X POST http://<tailscale ip>:8787/v1/messages \
-        -H 'content-type: application/json' -d 'not json'` must print 422
-   c) `ls -l ~/.local/state/privacy-gateway/audit/` must list audit-<today, UTC>.jsonl with mode
+   b) Without the token:
+      `curl -s -o /dev/null -w '%{http_code}' -X POST http://<tailscale ip>:8787/v1/messages \
+        -H 'content-type: application/json' -d 'not json'` must print 401
+   c) With the token, read from the file through stdin so it appears in no command line:
+      `{ printf 'x-pgw-auth: '; cat ~/.config/privacy-gateway/proxy-auth-token; } | \
+        curl -s -o /dev/null -w '%{http_code}' -H @- -X POST \
+        http://<tailscale ip>:8787/v1/messages -H 'content-type: application/json' -d 'not json'`
+      must print 400 (the proxy refuses the malformed body itself and sends nothing upstream)
+   d) `ls -l ~/.local/state/privacy-gateway/audit/` must list audit-<today, UTC>.jsonl with mode
       -rw-------.
 
-10. Report, in this order:
+11. Report, in this order:
     - Version and commit (`git -C <install dir> rev-parse --short HEAD`).
     - The Tailscale address and, if `tailscale status` shows one, the MagicDNS name of this host.
     - Whether PGW_PROXY_TRANSFORM_SYSTEM=0 was set and why.
@@ -384,9 +402,11 @@ STEPS:
     - Whether lingering is on (`loginctl show-user $USER -p Linger`). If it is off, say that the
       proxy stops when the last login session ends and that `loginctl enable-linger $USER` fixes
       it. Do not run that command yourself.
-    - The warning that the proxy has no token: the only protection is that nothing outside the
-      Tailscale network can reach it, and that Tailscale access rules should limit it to the
-      user's own devices.
+    - Where the token file is and that every client needs a copy of it as
+      ~/.config/privacy-gateway/proxy-auth-token with mode 600, copied by the user, for example
+      with `scp` over the Tailscale network followed by `chmod 600`. Do not print the token.
+    - That Tailscale access rules should still limit the proxy to the user's own devices; the
+      token is one shared secret for all clients.
     - Where the request log is (~/.local/state/privacy-gateway/audit/) and how to stop and remove
       the service (`systemctl --user disable --now privacy-gateway-proxy.service`, delete the unit
       file, `systemctl --user daemon-reload`).
@@ -398,7 +418,9 @@ STEPS:
 ## Prompt C: connect a client to a shared proxy
 
 Use this on every machine whose Claude Code should go through the proxy from Prompt B. It checks
-that the proxy is reachable and adds a `claude-private` shell function. Fill in `PROXY_URL` first.
+that the proxy is reachable and adds a `claude-private` shell function that sends the proxy's auth
+token. Copy the token file from the proxy host to `~/.config/privacy-gateway/proxy-auth-token` on
+this machine (mode 600) and fill in `PROXY_URL` first.
 
 ```text
 You are connecting this machine to an existing Local Privacy Gateway proxy so that Claude Code
@@ -416,10 +438,15 @@ ASSUMPTIONS AND DEFAULTS (use these, do not ask):
   zsh, ~/.bashrc for bash). Never edit or reorder existing lines. Do not edit
   ~/.claude/settings.json.
 - Model for the shell function: sonnet[1m]. The [1m] suffix is required, never drop it.
+- Auth token: the file ~/.config/privacy-gateway/proxy-auth-token, copied from the proxy host by
+  the user. The shell function reads it at call time and sends it as the header x-pgw-auth through
+  ANTHROPIC_CUSTOM_HEADERS.
 - If any step fails, stop, do not improvise a workaround, and report exactly what failed.
 
 SECURITY RULES (non-negotiable):
-- Never write an API key, token or password into any file, and never echo one.
+- Never write an API key, token or password into any file, and never echo one. Never print,
+  copy or move the auth token, and never write its value into the shell rc file; only its path
+  goes there.
 - Send only the two requests listed in the steps to the proxy. Never send a request to
   api.anthropic.com.
 - Do not change network, VPN or firewall settings.
@@ -433,23 +460,32 @@ STEPS:
    report the output. Say whether the name resolves and whether the connection was refused or timed
    out.
 
-3. `curl -s -o /dev/null -w '%{http_code}' -X POST <PROXY_URL>/v1/messages \
-     -H 'content-type: application/json' -d 'not json'` must print 422. The proxy refuses this
-   itself and sends nothing upstream.
+3. `ls -l ~/.config/privacy-gateway/proxy-auth-token` must show the file with mode -rw-------.
+   If it is missing, stop and tell me to copy it from the proxy host. If its mode is wider, stop
+   and tell me to run `chmod 600` on it.
 
-4. Detect the shell from $SHELL (zsh -> ~/.zshrc, bash -> ~/.bashrc; if neither, report and skip).
+4. With the token, read from the file through stdin so it appears in no command line:
+   `{ printf 'x-pgw-auth: '; cat ~/.config/privacy-gateway/proxy-auth-token; } | \
+     curl -s -o /dev/null -w '%{http_code}' -H @- -X POST <PROXY_URL>/v1/messages \
+     -H 'content-type: application/json' -d 'not json'` must print 400. The proxy refuses this
+   itself and sends nothing upstream. 401 means the token does not match the proxy's: stop and
+   report.
+
+5. Detect the shell from $SHELL (zsh -> ~/.zshrc, bash -> ~/.bashrc; if neither, report and skip).
    If the marker "# >>> local-privacy-gateway-client >>>" is already present, replace the block
    between the markers instead of appending a second one. Append:
 
        # >>> local-privacy-gateway-client >>>
        claude-private() {
          ANTHROPIC_BASE_URL=<PROXY_URL> \
+         ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: $(cat ~/.config/privacy-gateway/proxy-auth-token)" \
          command claude --model "sonnet[1m]" "$@"
        }
        # <<< local-privacy-gateway-client <<<
 
-5. Report:
-   - The result of both requests with the actual output.
+6. Report:
+   - The result of both requests and the token file check with the actual output (never the
+     token).
    - How to use it: open a new shell and run `claude-private`. Plain `claude` still goes straight
      to Anthropic.
    - What happens when the private network is not connected: Claude Code shows a connection

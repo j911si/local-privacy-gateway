@@ -105,6 +105,7 @@ class DetectionReport:
     findings: list[Finding]
     entities: dict[str, Entity]
     stage_stats: dict[str, int]
+    redactions: list[Finding] = field(default_factory=list)
 
     def counts_by_class(self) -> dict[str, int]:
         counts: dict[str, int] = {}
