@@ -223,8 +223,9 @@ def entry(
                 for leak in failed_leaks
             ]
         fields.append(item)
+    counts = _counts_by_prefix(observed or [])
     for ref in unchecked:
-        fields.append(_unchecked(ref, observed or []))
+        fields.append(_unchecked(ref, counts))
     if verdict == OK and any(item["observed"] for item in fields if item["status"] == "unchecked"):
         verdict = OK_WITH_UNCHECKED_FINDINGS
     return {
@@ -369,9 +370,17 @@ def _finding(item: FieldFinding) -> dict[str, object]:
     return record
 
 
-def _unchecked(ref: UncheckedRef, observed: list[Hit]) -> dict[str, object]:
-    width = len(ref.path)
-    counts = Counter(hit.data_class for hit in observed if hit.path[:width] == ref.path)
+def _counts_by_prefix(observed: list[Hit]) -> dict[tuple, Counter[str]]:
+    """Per path prefix, how often each class was observed at or below it."""
+    counts: dict[tuple, Counter[str]] = {}
+    for hit in observed:
+        for width in range(len(hit.path) + 1):
+            counts.setdefault(hit.path[:width], Counter())[hit.data_class] += 1
+    return counts
+
+
+def _unchecked(ref: UncheckedRef, by_prefix: dict[tuple, Counter[str]]) -> dict[str, object]:
+    counts = by_prefix.get(tuple(ref.path), Counter())
     return {
         "path": format_path(ref.path),
         "status": "unchecked",
