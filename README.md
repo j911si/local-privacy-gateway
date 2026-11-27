@@ -1,5 +1,7 @@
 # Local Privacy Gateway
 
+**International by Design. Local by Policy. Privacy by Default.**
+
 A local, offline gateway that removes sensitive data from text before it reaches an external
 LLM and puts it back afterwards. Detection is deterministic and rule-based; every detected value
 is replaced by a reversible token such as `<IBAN_001>`, the mapping is stored AES-256-GCM-encrypted
@@ -18,10 +20,30 @@ request to `/v1/messages` also writes an audit entry without any values. Per fie
 and what was forwarded unchecked, and it records whether a final rescan of the outgoing body found
 anything.
 
+## Design principles
+
+These principles guide the project. The second column says how far each one is implemented
+in 0.2.0; the [roadmap](ROADMAP.md) has the planned work.
+
+| Principle | In 0.2.0 |
+|---|---|
+| International by Design | Every rule runs on every text; no detector depends on the language of the text. Global formats (IBAN, cards, e-mail, IP addresses, phone numbers with a country code, cloud keys, labelled secrets) work everywhere. Country-specific identifiers and the vocabulary for names, labels and addresses cover German and English only. Country and language packs are planned. |
+| Local by Policy | Detection, the vault and all logs stay on your machine. The core package has no network code, and a test enforces that. The proxy sends only the pseudonymized request to the upstream you configure. |
+| Privacy by Default | Fail closed when a known value survives. Sensitive findings in fields the proxy cannot change block the request. Tool calls get placeholders unless a rule allows a value. A proxy off loopback needs a token. None of this is a guarantee for data the rules do not describe. |
+| Provider Independent | The library and the CLI work on any text for any model. The proxy speaks the Anthropic Messages API only. |
+| Extensible by Design | Classes, patterns, context words and dictionaries can be added in a YAML layer without code changes. New check-digit validators still need code. |
+| Transparent by Design | A value-free log line per request shows what was replaced and what went out unchecked. The [coverage register](docs/COVERAGE.md) and the [known limits](#known-limits) say what is not found. |
+| Open Source | MIT license. Contributions for new countries and languages: [CONTRIBUTING.md](CONTRIBUTING.md#contributing-a-recognizer). |
+
+The configuration defines 141 entity classes. Many of them are only found behind a label or
+through your own dictionary, and some have no default rule at all. The
+[coverage register](docs/COVERAGE.md) sorts them by evidence.
+
 ---
 
 ## Table of contents
 
+- [Design principles](#design-principles)
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [CLI usage](#cli-usage)
@@ -1219,7 +1241,7 @@ restore:
 person:
   record_gender_from_salutation: true   # false: never put a gender into a PERSON token
 
-languages: [de, en]
+languages: [de, en]             # reserved: read, but has no effect in 0.2.0
 
 min_confidence: 0.5             # 0..1; findings below this are dropped
 ```
@@ -1395,6 +1417,16 @@ Supporting properties:
 - **Detection edges.** An IBAN glued to capital letters (`IBANDE89…`) and a card number glued to a
   word other than a card word (`id4111…`) are not found. Escaped JSON is covered up to three
   escape levels, escaped password values up to 512 characters.
+- **Countries and languages.** Identifiers of countries other than Germany and the United States
+  (French NIR, Spanish DNI, UK National Insurance number and many more) are found only behind a
+  label, and labels, salutations and address grammar exist in German and English only. Full list
+  in the [coverage register](docs/COVERAGE.md).
+- **Plain dates.** A date on its own is not replaced, with or without a year (`14.03.2025`,
+  `14.03.`, `2025-03-14`). Only a date in front of a birth marker (`geboren`, `born`,
+  `Geburtsdatum`) or a health statement counts as a birth date.
+- **Unknown names without a salutation.** Two capitalized words that are in no bundled list stay
+  as they are unless a salutation (`Herr`, `Frau`, `Mr`) stands in front. A person label such as
+  `Name:` helps only when the first name is in the bundled list.
 - **Out of scope:** ML/NER models, OCR, binary documents, multi-user vaults, key rotation.
 
 ### Further reading
