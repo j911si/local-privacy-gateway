@@ -130,6 +130,10 @@ PASS_PW_PATTERN = (
 )
 _PASS_PW_PREFIX = re.compile(r"""(?i)(?<![\w.\-])(?:pass|pw)[ \t]*:(?!=)[ \t]*+(?!["'$(<{])""")
 _NON_SPACE = re.compile(r"\S*")
+_PASS_PW_LINEAR = (
+    _PASS_PW_PREFIX.pattern
+    + r"(?=\S*\d)(?=\S*[A-Za-z])(\S{6}(?:\S*[^\s.,;:)\]])?)[.,;:)\]]*+(?=\s|$)"
+)
 
 
 def pass_pw_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
@@ -138,8 +142,12 @@ def pass_pw_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[s
     After the prefix, success depends only on the non-space run from the value start (a digit,
     a letter, six characters). Such a test passes for a run if it passes for any suffix of it,
     so once a value start fails, every later value start inside the same run fails too and is
-    skipped. Plain `finditer` rescans the run from every `pw:` in it.
+    skipped. Plain `finditer` rescans the run from every `pw:` in it. The lazy value can only
+    end where the rest of its run is trailing punctuation, which is after the last other character
+    or after six characters; `_PASS_PW_LINEAR` takes that end directly instead of trying each
+    length against the punctuation run.
     """
+    linear = re.compile(_PASS_PW_LINEAR, pattern.flags)
     position = 0
     dead_end = -1
     while (prefix := _PASS_PW_PREFIX.search(text, position)) is not None:
@@ -147,7 +155,7 @@ def pass_pw_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[s
         if value < dead_end:
             position = prefix.start() + 1
             continue
-        match = pattern.match(text, prefix.start())
+        match = linear.match(text, prefix.start())
         if match is not None:
             yield match
             position = match.end()
