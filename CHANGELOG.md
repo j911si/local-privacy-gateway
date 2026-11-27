@@ -15,7 +15,8 @@ All notable changes to this project are documented in this file. The format foll
   word or number group (`IBAN ... EUR`, `4111 ... 1111 12/27`); a full name after an
   account-holder label when the first name is an ambiguous word (`Kontoinhaber: Max Mustermann`);
   short Basic credentials (`Basic dTpwdw==`); a ticket ID shaped like a token (`OPS_471`); a
-  fullwidth IBAN; a learned number written with other grouping after another number.
+  fullwidth IBAN; an IBAN glued to a word (`...3000USD`); a value with a variation selector
+  inside; a learned number written with other grouping after another number.
 - The proxy scans numeric path segments and query values, so a card number there is no longer
   forwarded. Request audit lines and the access log no longer carry path segments that are not
   route words, and upstream errors are logged by status and error type without the body.
