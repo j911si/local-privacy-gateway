@@ -5,9 +5,9 @@ from __future__ import annotations
 import gc
 import random
 import re
+import resource
 import signal
 import statistics
-import time
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -40,9 +40,16 @@ def _hard_timeout() -> Iterator[None]:
 
 
 def _cpu(scan: Callable[[], object]) -> float:
-    started = time.process_time()
+    """User CPU time of one call.
+
+    System time is left out: a scan whose regex stack grows linearly (about 60 bytes per
+    character for some PASSWORD rules) makes the kernel map fresh pages, and in the full suite
+    only the larger run had to (18,751 page faults, 15-20 ms system time), which read as a
+    factor of 3.3 to 4 for a scan whose user time grew by 2.
+    """
+    started = resource.getrusage(resource.RUSAGE_SELF).ru_utime
     scan()
-    return time.process_time() - started
+    return resource.getrusage(resource.RUSAGE_SELF).ru_utime - started
 
 
 def paired_best(small: Callable[[], object], large: Callable[[], object]) -> tuple[float, float]:
@@ -82,13 +89,12 @@ def best_of_three(scan: Callable[[], object]) -> float:
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
-    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n.
+    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n, 16n.
 
-    The growth is checked once the large run is measurable; a scan that stays under the floor at
-    8n characters is accepted as fast. Retrying with 16n made inputs of about 2 MB that failed
-    in the full suite (factor about 4) while every pattern measured linear in a fresh process.
+    The growth is checked once the large run is measurable; a scan that stays under the floor
+    even at 32n characters is accepted as fast.
     """
-    for size in (n, 4 * n):
+    for size in (n, 4 * n, 16 * n):
         small_text, large_text = payload(size), payload(2 * size)
         large, ratio = paired_best(
             lambda small_text=small_text: scan(small_text),
