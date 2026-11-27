@@ -236,7 +236,7 @@ BIRTH_DATE_AFTER_RE = re.compile(
     r"(?:[ \t]+[^\W\d_]+){0,3}[ \t]+(?i:geboren|geb\.|born)(?!\w)"
 )
 MARKER_TAIL = (
-    r"\s*((?:[:#=]|-?\s*nr\.?|no\.?|number|nummer)?\s*[:#=]?)\s*"
+    r"\s*+((?:[:#=]|-?\s*+nr\.?|no\.?|number|nummer)?\s*+[:#=]?)\s*+"
     r"([A-Za-z0-9][A-Za-z0-9_\-./]{2,})"
 )
 MARKER_SUFFIX = r"(?:[-\s]?(?:nummer|nr\.?|number|no\.?|id))?(?!\w)"
