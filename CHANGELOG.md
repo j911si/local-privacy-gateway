@@ -7,6 +7,20 @@ All notable changes to this project are documented in this file. The format foll
 ## 0.2.0 – unreleased
 
 ### Security
+- A run of `github_pat_` followed by a non-ASCII letter made the GitHub token rule quadratic
+  (171 KiB blocked the proxy for 22 s), and long runs of combining marks made normalization
+  quadratic. Both are linear now.
+- Values that went out in clear text are now replaced: Kubernetes Secret values with a comment on
+  the `kind` or `data` line, quoted keys or CRLF line ends; an IBAN or card number followed by a
+  word or number group (`IBAN ... EUR`, `4111 ... 1111 12/27`); a full name after an
+  account-holder label when the first name is an ambiguous word (`Kontoinhaber: Max Mustermann`);
+  short Basic credentials (`Basic dTpwdw==`); a ticket ID shaped like a token (`OPS_471`); a
+  fullwidth IBAN; a learned number written with other grouping after another number.
+- The proxy scans numeric path segments and query values, so a card number there is no longer
+  forwarded. Request audit lines and the access log no longer carry path segments that are not
+  route words, and upstream errors are logged by status and error type without the body.
+- The digit and first-word indexes of learned values and the per-field audit counts no longer grow
+  with the product of input size and learned values or fields.
 - Breaking: a finding of a sensitive class in a field the proxy forwards unchanged (`tools`,
   `metadata`, a signed block, the system prompt with `PGW_PROXY_TRANSFORM_SYSTEM=0`, an unknown
   field) now blocks the request with 422 before anything is sent. Before, it went out in clear

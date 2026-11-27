@@ -29,10 +29,10 @@ cases.
 | E-mail address | global | structure |
 | IPv4, IPv6 | global | `ipaddress`; public and private addresses get separate classes |
 | MAC address | global | shape |
-| VIN | global | check digit |
+| VIN | global | check digit; European VINs without one are not found |
 | GPS coordinates | global | decimal pair |
 | Phone number with country code (`+`, `00`, `(+..)`) | country codes in a built-in table | country code and national length |
-| Steuer-ID | Germany | check digit |
+| Steuer-ID | Germany | check digit; behind a label (`Steuer-ID`, `IdNr`, `steuerliche Identifikationsnummer`) the shape alone |
 | Sozialversicherungsnummer | Germany | check digit |
 | Social Security number | United States | shape rules, no registry check |
 | Cloud and provider keys (AWS, GitHub, GitLab, Stripe, OpenAI, Anthropic, Slack, Google), JWT, PEM private keys, connection strings | global | fixed prefixes and structure |

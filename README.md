@@ -1366,6 +1366,11 @@ Supporting properties:
   `redact` class; everything else comes back with `<CLASS_REDACTED>`.
 - **`ß`/`SS` case folding** is not covered by the leak check, so a value written `Straße` in the
   input and `STRASSE` in the output would not be flagged.
+- **VIN without a check digit.** A VIN is found only when its check digit (position 9) is valid.
+  Many European VINs do not use one (`WVWZZZ1JZXW000001`) and go out unchanged.
+- **Look-alike characters.** Fullwidth letters and digits are folded to ASCII and invisible
+  format characters are dropped before the rules run. Letters of other scripts that only look
+  Latin, such as a Cyrillic `А` inside an IBAN, are not mapped, so such a value is not found.
 - **Generic markers are off by default.** Words like "reference", "number" or "name" are not
   context markers, because they produce too many false positives. Add them per class with
   `context_words` if your documents need them.
