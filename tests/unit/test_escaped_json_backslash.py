@@ -7,11 +7,11 @@ import re
 from collections.abc import Iterator
 
 import pytest
+from test_escaped_json import escaped
+from test_regex_linearity import _hard_timeout, assert_linear, finditer  # noqa: F401
 
 from privacy_gateway import Gateway
 from privacy_gateway.config import Config
-from test_escaped_json import escaped
-from test_regex_linearity import _hard_timeout, assert_linear, finditer  # noqa: F401
 
 MARKER = "<PASSWORD_REDACTED>"
 VALUES = [
@@ -19,7 +19,7 @@ VALUES = [
     "Geheim42\\\\",
     'Geh"eim42\\',
     'Geheim42"',
-    "a1\\b2\"c3\\",
+    'a1\\b2"c3\\',
     "Geheim\\n42\\",
 ]
 

@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from test_regex_linearity import _hard_timeout, assert_linear  # noqa: F401
 
 from privacy_gateway import Gateway
 from privacy_gateway.config import Config
 from privacy_gateway.detect import structured
 from privacy_gateway.detect.structured import StructuredStage
-from test_regex_linearity import _hard_timeout, assert_linear  # noqa: F401
 
 SECRET = "Zq7mWp4Lr9TxVb2N"
 HEAD = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: demo\n"

@@ -6,10 +6,10 @@ import re
 from collections.abc import Iterator
 
 import pytest
+from test_regex_linearity import _hard_timeout, assert_linear, finditer  # noqa: F401
 
 from privacy_gateway import Gateway
 from privacy_gateway.config import Config
-from test_regex_linearity import _hard_timeout, assert_linear, finditer  # noqa: F401
 
 TAX_ID = "71 358 952 543"
 WRONG_CHECK = "71 358 952 544"

@@ -7,13 +7,13 @@ import re
 from collections.abc import Iterator
 
 import pytest
+from test_regex_linearity import _hard_timeout, assert_linear  # noqa: F401
 
 from privacy_gateway import Gateway
 from privacy_gateway.config import Config
 from privacy_gateway.detect import patterns
 from privacy_gateway.detect.patterns import PatternStage
 from privacy_gateway.detect.runs import JWT_PATTERN, jwt_finditer
-from test_regex_linearity import _hard_timeout, assert_linear  # noqa: F401
 
 SAMPLES = {
     "AWS_ACCESS_KEY": "AKIAZ7Q3M5N2B8K4R6T1",
@@ -29,8 +29,15 @@ SAMPLES = {
     "JWT": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkZW1vMTIzIn0.Q7m3Np5Lr9Tx2Vb4Kd8Hf6Jw",
 }
 CHANGED = [
-    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "STRIPE_SECRET_KEY", "JWT", "AWS_ACCESS_KEY",
-    "GCP_CREDENTIAL", "GITHUB_TOKEN", "GITLAB_TOKEN", "PERSONAL_ACCESS_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "STRIPE_SECRET_KEY",
+    "JWT",
+    "AWS_ACCESS_KEY",
+    "GCP_CREDENTIAL",
+    "GITHUB_TOKEN",
+    "GITLAB_TOKEN",
+    "PERSONAL_ACCESS_TOKEN",
 ]
 SECRET_CLASSES = frozenset(CHANGED)
 
@@ -111,9 +118,20 @@ def test_jwt_finditer_equals_finditer_around_underscores() -> None:
 
 
 UNITS = [
-    "_AKIA", "_AKIAZ7Q3M5N2B8K4R6T", "_AIza", "_ghp_", "ghp_" + "a" * 40 + "ä", "_xoxb-",
-    "xoxb-" + "a" * 30 + "ä", "_sk-ant-", "_sk-", "_sk_live_", "_glpat-", "_github_pat_",
-    "x_eyJ", "_eyJaaaaaaaaaaaa.",
+    "_AKIA",
+    "_AKIAZ7Q3M5N2B8K4R6T",
+    "_AIza",
+    "_ghp_",
+    "ghp_" + "a" * 40 + "ä",
+    "_xoxb-",
+    "xoxb-" + "a" * 30 + "ä",
+    "_sk-ant-",
+    "_sk-",
+    "_sk_live_",
+    "_glpat-",
+    "_github_pat_",
+    "x_eyJ",
+    "_eyJaaaaaaaaaaaa.",
 ]
 
 
