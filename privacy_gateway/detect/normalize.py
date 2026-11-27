@@ -6,7 +6,6 @@ import unicodedata
 
 from privacy_gateway.model import Span
 
-
 # Clusters longer than this skip NFC: canonical ordering is quadratic in the cluster length, and
 # no letter of any script needs more combining marks than this.
 MAX_CLUSTER = 32

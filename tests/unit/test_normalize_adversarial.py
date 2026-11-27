@@ -28,7 +28,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway]:
         ("IBAN ＧＢ82ＷＥＳＴ12345698765432", "ＧＢ82ＷＥＳＴ12345698765432"),
         ("IBAN GB82WE͏ST12345698765432", "GB82WE͏ST12345698765432"),
         ("IBAN GB82WE️ST12345698765432", "GB82WE️ST12345698765432"),
-        ("Herr Mu​̈ller kommt", "Mu​̈ller"),
+        ("Herr Mu\u200b̈ller kommt", "Mu\u200b̈ller"),
     ],
 )
 def test_disguised_value_is_replaced(gateway: Gateway, text: str, secret: str) -> None:

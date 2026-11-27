@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import gc
+import inspect
 import os
+from collections.abc import Iterator
+from functools import cache
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from isolation_guard import Guard, GuardPlugin, protected_roots, real_homes
@@ -16,6 +21,33 @@ GUARD.install()
 
 def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(GuardPlugin(GUARD), "isolation-guard")
+
+
+@cache
+def _measures_time(module: ModuleType) -> bool:
+    try:
+        return "time.process_time()" in inspect.getsource(module)
+    except (OSError, TypeError):
+        return False
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
+    """Timing tests run with the cyclic GC paused after a collection.
+
+    GC pauses depend on the heap that earlier tests left, not on the input of the measured
+    call, so in a full run they made a linear scan look superlinear.
+    """
+    module = getattr(item, "module", None)
+    if module is None or not _measures_time(module) or not gc.isenabled():
+        yield
+        return
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
 
 
 SKIP_USER_CONFIG_ENV = {"PGW_SKIP_USER_CONFIG": "1"}
