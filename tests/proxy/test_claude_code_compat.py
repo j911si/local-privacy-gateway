@@ -218,3 +218,39 @@ async def test_an_untransformed_system_without_findings_passes_by_default(
     assert status == 200, data
     assert json.loads(sent[0])["system"] == body["system"]
     assert entries[0]["verdict"] == "ok_with_unchecked_findings"
+
+
+@pytest.mark.asyncio
+async def test_the_billing_line_reaches_the_upstream_unchanged_with_a_transformed_system(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    # A replaced billing line made the upstream answer 429 for subscription sign-ins.
+    body = claude_code_body("Working directory: /home/testuser/projekt", stream=False)
+
+    status, data, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+    forwarded = json.loads(sent[0])
+    assert forwarded["system"][0] == {"type": "text", "text": BILLING}
+    assert "testuser" not in sent[0].decode("utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "line",
+    [
+        BILLING + " erika.beispiel@firma-test.de",
+        "x-anthropic-billing-header: cc_version=2.1.332; cc_entrypoint=erika.beispiel@firma-test.de;",
+        "x-anthropic-billing-header: cc_version=2.1.332; cc_entrypoint=cli; note=Mueller;",
+    ],
+)
+async def test_anything_but_the_exact_billing_line_is_still_transformed(
+    gateway: Gateway, tmp_path: Path, line: str
+) -> None:
+    body = claude_code_body("Working directory: /home/testuser/projekt", stream=False)
+    body["system"][0]["text"] = line
+
+    status, data, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+    assert json.loads(sent[0])["system"][0]["text"] != line

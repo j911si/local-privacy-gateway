@@ -440,12 +440,35 @@ def _starts_with_notice(content: list) -> bool:
     return isinstance(first.get("text"), str) and first["text"].startswith(NOTICE_MARKER)
 
 
+BILLING_LINE_RE = re.compile(
+    r"x-anthropic-billing-header: cc_version=[0-9][A-Za-z0-9.]{0,31}; "
+    r"cc_entrypoint=[a-z0-9_-]{1,32};"
+)
+
+
+def _is_billing_block(index: int, block: dict) -> bool:
+    """The exact Claude Code billing line in `system[0]`: client version and entry point only.
+
+    The upstream answers 429 to a subscription request whose billing line was replaced.
+    """
+    return (
+        index == 0
+        and set(block) == {"type", "text"}
+        and isinstance(block["text"], str)
+        and BILLING_LINE_RE.fullmatch(block["text"]) is not None
+    )
+
+
 def _collect_system(system: Any, refs: list[TextRef]) -> None:
     if isinstance(system, str):
         _add(refs, ("system",), system)
     elif isinstance(system, list):
         for index, block in enumerate(system):
-            if isinstance(block, dict) and block.get("type") == "text":
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and not _is_billing_block(index, block)
+            ):
                 _add_if_str(refs, ("system", index, "text"), block.get("text"))
 
 

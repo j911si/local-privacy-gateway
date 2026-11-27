@@ -14,6 +14,7 @@ from typing import Any
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.session_key import is_claude_code_user_id
 from privacy_gateway_proxy.transform import (
+    BILLING_LINE_RE,
     KEY_OF,
     KEY_SUFFIX_RE,
     SCHEMA_KEYS,
@@ -52,10 +53,6 @@ UNCHECKED_BLOCKING_CLASSES = frozenset(
         "IBAN", "CREDIT_CARD", "DEBIT_CARD", "CVV", "BANK_ACCOUNT",
         "TAX_ID", "SOCIAL_SECURITY_ID", "PASSPORT_ID", "NATIONAL_ID", "DATE_OF_BIRTH",
     }
-)
-BILLING_LINE_RE = re.compile(
-    r"x-anthropic-billing-header: cc_version=[0-9][A-Za-z0-9.]{0,31}; "
-    r"cc_entrypoint=[a-z0-9_-]{1,32};"
 )
 
 
@@ -155,7 +152,7 @@ def _known_client_value(body: dict, path: Path, include_system: bool) -> bool:
     if path == ("metadata", "user_id"):
         metadata = body.get("metadata")
         return isinstance(metadata, dict) and is_claude_code_user_id(metadata.get("user_id"))
-    if path == ("system", 0, "text") and not include_system:
+    if path == ("system", 0, "text"):
         system = body.get("system")
         block = system[0] if isinstance(system, list) and system else None
         return (
