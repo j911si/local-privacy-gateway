@@ -7,12 +7,12 @@ import os
 import secrets
 import sqlite3
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import NamedTuple, Self
 from uuid import uuid4
 
 from cryptography.exceptions import InvalidTag
@@ -52,11 +52,29 @@ CREATE TABLE IF NOT EXISTS surface_forms (
     ciphertext BLOB NOT NULL,
     PRIMARY KEY (session_id, token, ordinal)
 );
+CREATE TABLE IF NOT EXISTS pending_mappings (
+    session_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    PRIMARY KEY (session_id, token)
+);
+CREATE TABLE IF NOT EXISTS session_revisions (
+    session_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL
+);
 """
 
 _EXTERNAL_KEY_INDEX = (
     "CREATE UNIQUE INDEX IF NOT EXISTS sessions_external_key ON sessions (external_key)"
 )
+
+
+class Write(NamedTuple):
+    """Outcome of a vault write: whether a mapping changed, and the session revision around it."""
+
+    changed: bool
+    before: int
+    after: int
 
 
 def _base_label(label: str) -> str:
@@ -185,17 +203,41 @@ class Vault:
             counters[label] = max(counters.get(label, 0), int(match.group("number")))
         return counters
 
-    def delete_tokens(self, session_id: str, tokens: Iterable[str]) -> None:
-        """Remove the given token mappings and their surface forms."""
-        for token in tokens:
-            self._conn.execute(
-                "DELETE FROM surface_forms WHERE session_id = ? AND token = ?",
-                (session_id, token),
-            )
-            self._conn.execute(
-                "DELETE FROM mappings WHERE session_id = ? AND token = ?", (session_id, token)
-            )
-        self._conn.commit()
+    def revision(self, session_id: str) -> int:
+        """A number that grows whenever a mapping of the session is written or removed."""
+        row = self._conn.execute(
+            "SELECT revision FROM session_revisions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return 0 if row is None else row[0]
+
+    def delete_tokens(
+        self, session_id: str, tokens: Iterable[str], owner: str | None = None
+    ) -> Write:
+        """Remove the given token mappings and their surface forms.
+
+        With `owner` only mappings this owner inserted and nobody confirmed yet go, so a rollback
+        never removes a mapping that another call already handed out.
+        """
+        tokens = list(tokens)
+        if not tokens:
+            revision = self.revision(session_id)
+            return Write(False, revision, revision)
+        with self._write_transaction():
+            before = self.revision(session_id)
+            changed = False
+            for token in tokens:
+                if owner is not None and not self._release(session_id, token, owner):
+                    continue
+                self._conn.execute(
+                    "DELETE FROM surface_forms WHERE session_id = ? AND token = ?",
+                    (session_id, token),
+                )
+                deleted = self._conn.execute(
+                    "DELETE FROM mappings WHERE session_id = ? AND token = ?", (session_id, token)
+                ).rowcount
+                changed = changed or bool(deleted)
+            after = self._bump(session_id, before) if changed else before
+        return Write(changed, before, after)
 
     def append_surface_forms(self, session_id: str, token: str, forms: list[str]) -> None:
         """Append further surface forms to an existing token mapping."""
@@ -222,44 +264,112 @@ class Vault:
         value: str,
         surface_forms: list[str],
         attributes: dict[str, str],
-    ) -> None:
-        """Encrypt and store one token mapping; a token already taken by another value fails."""
-        nonce, ciphertext = self._encrypt(value, f"{session_id}|{token}")
-        row = (data_class, nonce, ciphertext, json.dumps(attributes), session_id, token)
+        owner: str | None = None,
+    ) -> Write:
+        """Encrypt and store one token mapping; a token already taken by another value fails.
+
+        `changed` says whether the mapping is new. With `owner` a new mapping stays pending until
+        `confirm_tokens`, and only `delete_tokens` with the same owner removes it again.
+        """
         try:
             with self._write_transaction():
                 if not self._session_exists(session_id):
                     raise VaultError(f"unknown session: {session_id}")
                 if self._conflicts(session_id, token, value):
                     raise VaultError(f"token already assigned: {token}")
-                updated = self._conn.execute(
-                    "UPDATE mappings SET data_class = ?, nonce = ?, ciphertext = ?, "
-                    "attributes_json = ? WHERE session_id = ? AND token = ?",
-                    row,
-                ).rowcount
-                if not updated:
-                    self._conn.execute(
-                        "INSERT INTO mappings "
-                        "(data_class, nonce, ciphertext, attributes_json, session_id, token) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        row,
-                    )
-                self._conn.execute(
-                    "DELETE FROM surface_forms WHERE session_id = ? AND token = ?",
-                    (session_id, token),
+                before = self.revision(session_id)
+                inserted = self._insert(
+                    session_id, token, data_class, value, surface_forms, attributes
                 )
-                for ordinal, form in enumerate(surface_forms):
-                    form_nonce, form_ciphertext = self._encrypt(
-                        form, f"{session_id}|{token}|{ordinal}"
-                    )
+                if inserted and owner is not None:
                     self._conn.execute(
-                        "INSERT INTO surface_forms (session_id, token, ordinal, nonce, ciphertext) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (session_id, token, ordinal, form_nonce, form_ciphertext),
+                        "INSERT OR REPLACE INTO pending_mappings (session_id, token, owner) "
+                        "VALUES (?, ?, ?)",
+                        (session_id, token, owner),
                     )
+                after = self._bump(session_id, before)
         except sqlite3.Error as exc:
             raise VaultError(f"vault write failed: {type(exc).__name__}") from exc
         _restrict(self._db_path)
+        return Write(inserted, before, after)
+
+    def confirm_tokens(self, session_id: str, entries: Mapping[str, VaultEntry]) -> Write:
+        """Make the mappings a call hands out permanent, storing any that went missing meanwhile.
+
+        A confirmed mapping is no longer pending, so no rollback removes it. A token that now
+        holds a different value fails.
+        """
+        try:
+            with self._write_transaction():
+                if not self._session_exists(session_id):
+                    raise VaultError(f"unknown session: {session_id}")
+                before = self.revision(session_id)
+                changed = False
+                for token, entry in entries.items():
+                    self._conn.execute(
+                        "DELETE FROM pending_mappings WHERE session_id = ? AND token = ?",
+                        (session_id, token),
+                    )
+                    if self._conflicts(session_id, token, entry.value):
+                        raise VaultError(f"token already assigned: {token}")
+                    changed |= self._insert(
+                        session_id,
+                        token,
+                        entry.data_class,
+                        entry.value,
+                        [entry.value],
+                        entry.attributes,
+                        keep=True,
+                    )
+                after = self._bump(session_id, before) if changed else before
+        except sqlite3.Error as exc:
+            raise VaultError(f"vault write failed: {type(exc).__name__}") from exc
+        _restrict(self._db_path)
+        return Write(changed, before, after)
+
+    def _insert(
+        self,
+        session_id: str,
+        token: str,
+        data_class: str,
+        value: str,
+        surface_forms: list[str],
+        attributes: dict[str, str],
+        *,
+        keep: bool = False,
+    ) -> bool:
+        """Write one mapping inside the caller's transaction; true when it was new.
+
+        With `keep` an existing mapping stays as it is.
+        """
+        if keep and self._exists(session_id, token):
+            return False
+        nonce, ciphertext = self._encrypt(value, f"{session_id}|{token}")
+        row = (data_class, nonce, ciphertext, json.dumps(attributes), session_id, token)
+        updated = self._conn.execute(
+            "UPDATE mappings SET data_class = ?, nonce = ?, ciphertext = ?, "
+            "attributes_json = ? WHERE session_id = ? AND token = ?",
+            row,
+        ).rowcount
+        if not updated:
+            self._conn.execute(
+                "INSERT INTO mappings "
+                "(data_class, nonce, ciphertext, attributes_json, session_id, token) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                row,
+            )
+        self._conn.execute(
+            "DELETE FROM surface_forms WHERE session_id = ? AND token = ?",
+            (session_id, token),
+        )
+        for ordinal, form in enumerate(surface_forms):
+            form_nonce, form_ciphertext = self._encrypt(form, f"{session_id}|{token}|{ordinal}")
+            self._conn.execute(
+                "INSERT INTO surface_forms (session_id, token, ordinal, nonce, ciphertext) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, token, ordinal, form_nonce, form_ciphertext),
+            )
+        return not updated
 
     def load(self, session_id: str) -> dict[str, VaultEntry]:
         """Return all decrypted mappings of a session."""
@@ -293,6 +403,8 @@ class Vault:
         """Remove a session with all its mappings and surface forms."""
         self._conn.execute("DELETE FROM surface_forms WHERE session_id = ?", (session_id,))
         self._conn.execute("DELETE FROM mappings WHERE session_id = ?", (session_id,))
+        self._conn.execute("DELETE FROM pending_mappings WHERE session_id = ?", (session_id,))
+        self._conn.execute("DELETE FROM session_revisions WHERE session_id = ?", (session_id,))
         self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         self._conn.commit()
         self._reclaim()
@@ -349,6 +461,27 @@ class Vault:
         if row is None:
             return False
         return self._decrypt(row[0], row[1], f"{session_id}|{token}") != value
+
+    def _exists(self, session_id: str, token: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM mappings WHERE session_id = ? AND token = ?", (session_id, token)
+        ).fetchone()
+        return row is not None
+
+    def _release(self, session_id: str, token: str, owner: str) -> bool:
+        """Drop the pending mark of `owner` on a token; false when it holds none."""
+        deleted = self._conn.execute(
+            "DELETE FROM pending_mappings WHERE session_id = ? AND token = ? AND owner = ?",
+            (session_id, token, owner),
+        ).rowcount
+        return bool(deleted)
+
+    def _bump(self, session_id: str, before: int) -> int:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO session_revisions (session_id, revision) VALUES (?, ?)",
+            (session_id, before + 1),
+        )
+        return before + 1
 
     def _session_exists(self, session_id: str) -> bool:
         row = self._conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()

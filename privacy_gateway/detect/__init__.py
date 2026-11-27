@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from privacy_gateway.classes import Policy
 from privacy_gateway.detect.base import Stage
 from privacy_gateway.detect.context import ContextStage
 from privacy_gateway.detect.correlation import correlate
@@ -65,7 +67,17 @@ class Pipeline:
             findings.extend(produced)
         correlated, entities = correlate(text, findings, self._config)
         confident = [f for f in correlated if f.confidence >= self._config.min_confidence]
-        resolved = resolve_overlaps(confident, self._config.registry)
+        registry = self._config.registry
+        redactions = [
+            replace(finding, children=[])
+            for finding in confident
+            if finding.data_class in registry
+            and registry.get(finding.data_class).policy is Policy.REDACT
+        ]
+        resolved = resolve_overlaps(confident, registry)
         if mapping is not None:
             _remap(mapping, resolved, entities)
-        return DetectionReport(findings=resolved, entities=entities, stage_stats=stage_stats)
+            _remap(mapping, redactions, {})
+        return DetectionReport(
+            findings=resolved, entities=entities, stage_stats=stage_stats, redactions=redactions
+        )

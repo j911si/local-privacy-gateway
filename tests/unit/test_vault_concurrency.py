@@ -106,9 +106,11 @@ def test_session_reloads_the_vault_after_a_token_conflict(gateway_env: None) -> 
         session_a = first.session(KEY)
         session_b = second.session(KEY)
         out_a = session_a.pseudonymize(letter_a)
+        session_b._refresh = lambda: None  # A wrote after B looked at the vault revision
 
         with pytest.raises(VaultError) as excinfo:
             session_b.pseudonymize(letter_b)
+        del session_b._refresh
         assert "Schneider" not in str(excinfo.value)
         assert "Müller" not in str(excinfo.value)
 
@@ -137,3 +139,75 @@ def test_connections_wait_for_a_busy_database(tmp_path: Path) -> None:
 
     with Vault(tmp_path / "vault.db", tmp_path / "vault.key") as vault:
         assert vault._conn.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
+
+
+def test_rollback_of_a_second_session_keeps_the_mapping_the_first_one_issued(
+    gateway_env: None,
+) -> None:
+    letter_a = "Sehr geehrte Frau Müller, IBAN DE89370400440532013000, danke."
+    letter_b = "Sehr geehrte Frau Müller, IBAN DE02120300000000202051, danke."
+    letter_c = "Sehr geehrte Frau Schneider, danke."
+    with Gateway() as gateway:
+        session_a = gateway.session(KEY)
+        session_b = gateway.session(KEY)
+        out_a = session_a.pseudonymize(letter_a)
+        session_b._refresh = lambda: None  # A wrote after B looked at the vault revision
+        with pytest.raises(VaultError):
+            session_b.pseudonymize(letter_b)
+        del session_b._refresh
+        out_c = session_b.pseudonymize(letter_c)
+    with Gateway() as fresh:
+        assert fresh.restore(out_a, session_a.session_id, mode="lenient").text == letter_a
+        assert fresh.restore(out_c, session_a.session_id).text == letter_c
+
+
+def test_a_rollback_only_removes_mappings_its_own_call_inserted(tmp_path: Path) -> None:
+    db, key = tmp_path / "vault.db", tmp_path / "vault.key"
+    with Vault(db, key) as a, Vault(db, key) as b:
+        session = a.get_or_create_session(KEY, "cfg")
+        a.store(session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="a")
+        assert not b.store(
+            session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="b"
+        ).changed
+        assert not b.delete_tokens(session, [TOKEN], owner="b").changed
+        assert a.load(session)[TOKEN].value == "Anna Beispiel"
+
+
+def test_a_confirmed_mapping_survives_the_rollback_of_the_call_that_inserted_it(
+    tmp_path: Path,
+) -> None:
+    db, key = tmp_path / "vault.db", tmp_path / "vault.key"
+    with Vault(db, key) as a, Vault(db, key) as b:
+        session = a.get_or_create_session(KEY, "cfg")
+        b.store(session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="b")
+        a.confirm_tokens(session, a.load(session))
+        assert not b.delete_tokens(session, [TOKEN], owner="b").changed
+        assert a.load(session)[TOKEN].value == "Anna Beispiel"
+
+
+def test_confirm_stores_a_mapping_again_that_a_rollback_removed_meanwhile(
+    tmp_path: Path,
+) -> None:
+    db, key = tmp_path / "vault.db", tmp_path / "vault.key"
+    with Vault(db, key) as a, Vault(db, key) as b:
+        session = a.get_or_create_session(KEY, "cfg")
+        b.store(session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="b")
+        relied_on = a.load(session)
+        assert b.delete_tokens(session, [TOKEN], owner="b").changed
+        assert a.confirm_tokens(session, relied_on).changed
+        assert b.load(session)[TOKEN].value == "Anna Beispiel"
+        b.store(session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="b")
+        assert not b.delete_tokens(session, [TOKEN], owner="b").changed
+
+
+def test_confirm_fails_when_the_token_now_holds_another_value(tmp_path: Path) -> None:
+    db, key = tmp_path / "vault.db", tmp_path / "vault.key"
+    with Vault(db, key) as a, Vault(db, key) as b:
+        session = a.get_or_create_session(KEY, "cfg")
+        b.store(session, TOKEN, "PERSON", "Anna Beispiel", ["Anna Beispiel"], {}, owner="b")
+        relied_on = a.load(session)
+        b.delete_tokens(session, [TOKEN], owner="b")
+        b.store(session, TOKEN, "PERSON", "Berta Muster", ["Berta Muster"], {}, owner="c")
+        with pytest.raises(VaultError) as excinfo:
+            a.confirm_tokens(session, relied_on)
+        assert "Anna" not in str(excinfo.value) and "Berta" not in str(excinfo.value)

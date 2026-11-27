@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 import re
@@ -18,6 +19,7 @@ from privacy_gateway.audit import AuditLog
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
+from privacy_gateway.detect.dictionaries import TrieMatcher
 from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, SpanIndex
 from privacy_gateway.leakage import (
@@ -42,9 +44,9 @@ from privacy_gateway.model import (
     VaultEntry,
     VaultError,
 )
-from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
+from privacy_gateway.pseudonymize import PseudonymizedText, TokenAssignment, pseudonymize_text
 from privacy_gateway.restore import restore_text
-from privacy_gateway.vault import Vault
+from privacy_gateway.vault import Vault, Write
 
 PSEUDONYMIZE_STAGE = "pseudonymize"
 SESSION_STAGE = "session_pseudonymize"
@@ -53,6 +55,7 @@ RESCAN_CACHE_SIZE = 1024
 AUDIT_ID_BYTES = 6
 AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
+STALE_REVISION = -1
 REDACTED_TRIM = " \t\r\n\"'`,;"
 
 
@@ -174,12 +177,14 @@ class GatewaySession:
     A cached result was leak-checked when it was first produced, so a repeat of the same
     text is returned unchanged without re-running the pipeline or the leak check. The cache is
     dropped whenever the set of known values changes, because an earlier result may then
-    still carry a value that is only known now.
+    still carry a value that is only known now. Before each call the session compares the vault
+    revision of its mappings and reloads them when another instance changed them.
     """
 
     def __init__(self, gateway: Gateway, session_id: str) -> None:
         self.session_id = session_id
         self._gateway = gateway
+        self._revision = gateway.vault.revision(session_id)
         self._entries: dict[str, VaultEntry] = gateway.vault.load(session_id)
         self._counters: dict[str, int] = gateway.vault.max_counters(session_id)
         self._results: OrderedDict[str, tuple[str, list[FieldFinding]]] = OrderedDict()
@@ -187,7 +192,10 @@ class GatewaySession:
         self._known_cache: dict[str, tuple[str, str]] | None = None
         self._values: dict[tuple[str, str], str] | None = None
         self._redacted: dict[str, str] = {}
+        self._masked: dict[str, tuple[str, str]] = {}
         self._generation = 0
+        self._owner = ""
+        self._confirmed: set[str] = set()
 
     def entries(self) -> Mapping[str, VaultEntry]:
         """Every token mapping this session knows."""
@@ -200,6 +208,7 @@ class GatewaySession:
     def pseudonymize_report(self, text: str) -> tuple[str, list[FieldFinding]]:
         """Pseudonymized text plus its value-free findings, offsets in the original text."""
         started = time.perf_counter()
+        self._refresh()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._results.get(digest)
         if cached is not None:
@@ -240,6 +249,7 @@ class GatewaySession:
         pipeline = self._gateway._pipeline
         registry = self._gateway.config.registry
         literal_tokens = numbered_tokens(text)
+        self._owner = secrets.token_hex(8)
         try:
             for attempt in range(MAX_PASSES):
                 generation = self._generation
@@ -250,8 +260,8 @@ class GatewaySession:
                 pseudonymized = pseudonymize_text(
                     text, report, self._gateway.config, counters=self._counters
                 )
-                self._write(text, pseudonymized, written, reused)
                 self._learn_redacted(text, report, redacted)
+                self._write(text, report, pseudonymized, written, reused, redacted)
                 try:
                     check_leakage(
                         pseudonymized.text,
@@ -271,6 +281,7 @@ class GatewaySession:
                         continue
                     raise
                 break
+            self._confirm([*written, *reused])
         except Exception:
             self._rollback(written, counters, redacted)
             raise
@@ -278,6 +289,7 @@ class GatewaySession:
 
     def rescan(self, text: str) -> list[Leak]:
         """Findings in text about to be sent that are not a token this session issued."""
+        self._refresh()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._rescans.get(digest)
         if cached is not None:
@@ -348,6 +360,8 @@ class GatewaySession:
                     known.setdefault(form, (entry.data_class, token))
         for value, data_class in self._redacted.items():
             known.setdefault(value, (data_class, redacted_token(data_class)))
+        for original, (data_class, token) in self._masked.items():
+            known.setdefault(original, (data_class, token))
         self._known_cache = known
         return known
 
@@ -356,6 +370,8 @@ class GatewaySession:
             self._values = {}
             for token, entry in self._entries.items():
                 self._values.setdefault((entry.data_class, entry.value), token)
+            for original, (data_class, token) in self._masked.items():
+                self._values.setdefault((data_class, original), token)
         return self._values
 
     def _bind_tokens(self, text: str, report: DetectionReport) -> DetectionReport:
@@ -378,9 +394,11 @@ class GatewaySession:
     def _write(
         self,
         text: str,
+        report: DetectionReport,
         pseudonymized: PseudonymizedText,
         written: list[str],
         reused: list[str],
+        redacted: list[str],
     ) -> None:
         if pseudonymized.assignments:
             known = self._known()
@@ -393,19 +411,24 @@ class GatewaySession:
             self._known_cache = None
             self._values = None
             self._rescans.clear()
+        fresh = [a for a in pseudonymized.assignments if a.token not in self._entries]
+        masks = self._redacted_spans(text, report, fresh, redacted)
         for assignment in pseudonymized.assignments:
             first = assignment.spans[0]
             value = text[first.start : first.end]
             if assignment.token in self._entries:
                 reused.append(assignment.token)
                 continue
-            self._gateway.vault.store(
+            original = value
+            value = _masked(text, first, masks.get(assignment.token, []))
+            stored = self._gateway.vault.store(
                 self.session_id,
                 assignment.token,
                 assignment.data_class,
                 value,
                 [value],
                 assignment.attributes,
+                owner=self._owner,
             )
             self._entries[assignment.token] = VaultEntry(
                 value=value,
@@ -413,7 +436,83 @@ class GatewaySession:
                 surface_forms=[value],
                 attributes=dict(assignment.attributes),
             )
-            written.append(assignment.token)
+            self._track(stored)
+            (written if stored.changed else reused).append(assignment.token)
+            if value != original:
+                self._masked[original] = (assignment.data_class, assignment.token)
+
+    def _redacted_spans(
+        self,
+        text: str,
+        report: DetectionReport,
+        fresh: list[TokenAssignment],
+        learned: list[str],
+    ) -> dict[str, list[tuple[Span, str]]]:
+        """Spans of redacted values inside each value about to be stored, keyed by token.
+
+        A tokenized finding can enclose a value of a redacted class (`?pin=4711` in a URL); the
+        overlap resolution keeps only the larger finding, so the vault would get the secret.
+        The spans come from the redacted findings the detection had before that resolution
+        (which covers every value redacted in earlier calls) and from one whole-word trie over
+        the values this call learned, so the cost grows with the text, not with the session.
+        """
+        if not fresh:
+            return {}
+        registry = self._gateway.config.registry
+        redactions = sorted(report.redactions, key=lambda finding: finding.span.start)
+        starts = [finding.span.start for finding in redactions]
+        reach = max((len(finding.span) for finding in redactions), default=0)
+        masks: dict[str, list[tuple[Span, str]]] = {}
+        count = len(learned)
+        for assignment in fresh:
+            first = assignment.spans[0]
+            low = bisect.bisect_left(starts, first.start - reach)
+            high = bisect.bisect_left(starts, first.end)
+            for finding in redactions[low:high]:
+                span = Span(max(finding.span.start, first.start), min(finding.span.end, first.end))
+                if span.start >= span.end:
+                    continue
+                masks.setdefault(assignment.token, []).append((span, finding.data_class))
+                secret = text[finding.span.start : finding.span.end].strip(REDACTED_TRIM)
+                if secret and secret not in self._redacted:
+                    self._redacted[secret] = registry.get(finding.data_class).name
+                    learned.append(secret)
+        if len(learned) > count:
+            self._known_cache = None
+            self._known_changed()
+        if learned:
+            matcher = TrieMatcher(
+                [(value, self._redacted[value]) for value in learned if value in self._redacted],
+                case_insensitive=False,
+            )
+            for assignment in fresh:
+                first = assignment.spans[0]
+                for hit, data_class in matcher.find(text[first.start : first.end]):
+                    span = Span(first.start + hit.start, first.start + hit.end)
+                    masks.setdefault(assignment.token, []).append((span, data_class))
+        return masks
+
+    def _confirm(self, tokens: list[str]) -> None:
+        """Make every mapping the output hands out permanent before the output leaves."""
+        pending = {
+            token: self._entries[token]
+            for token in tokens
+            if token not in self._confirmed and token in self._entries
+        }
+        if not pending:
+            return
+        self._track(self._gateway.vault.confirm_tokens(self.session_id, pending))
+        self._confirmed.update(pending)
+
+    def _track(self, write: Write) -> None:
+        """Follow the vault revision through this session's own writes, never past another's."""
+        if write.before == self._revision:
+            self._revision = write.after
+
+    def _refresh(self) -> None:
+        """Reload when another instance changed this session's mappings since the last look."""
+        if self._gateway.vault.revision(self.session_id) != self._revision:
+            self._reload()
 
     def _learn_redacted(self, text: str, report: DetectionReport, learned: list[str]) -> None:
         """Keep redacted values in memory only, so every later copy is redacted too."""
@@ -466,8 +565,8 @@ class GatewaySession:
         generation = self._generation
         residue = replace(report, findings=kept)
         learned = pseudonymize_text(output, residue, self._gateway.config, counters=self._counters)
-        self._write(output, learned, written, reused)
         self._learn_redacted(output, residue, redacted)
+        self._write(output, residue, learned, written, reused, redacted)
         return self._generation != generation
 
     def _rollback(
@@ -481,11 +580,18 @@ class GatewaySession:
         self._rescans.clear()
         if written:
             self._known_changed()
-        self._gateway.vault.delete_tokens(self.session_id, written)
+            self._revision = STALE_REVISION
+        self._gateway.vault.delete_tokens(self.session_id, written, owner=self._owner)
         for token in written:
             self._entries.pop(token, None)
         for value in redacted:
             self._redacted.pop(value, None)
+        dropped = set(written)
+        self._masked = {
+            original: binding
+            for original, binding in self._masked.items()
+            if binding[1] not in dropped
+        }
         if redacted:
             self._known_changed()
         self._counters = counters
@@ -493,7 +599,16 @@ class GatewaySession:
     def _reload(self) -> None:
         """Take the mappings and counters another process may have written from the vault."""
         vault = self._gateway.vault
+        self._revision = vault.revision(self.session_id)
         self._entries = vault.load(self.session_id)
+        self._masked = {
+            original: binding
+            for original, binding in self._masked.items()
+            if binding[1] in self._entries
+        }
+        self._known_cache = None
+        self._values = None
+        self._rescans.clear()
         stored = vault.max_counters(self.session_id)
         self._counters = {
             label: max(self._counters.get(label, 0), stored.get(label, 0))
@@ -536,6 +651,23 @@ def _with_glued_short(
         return report
     findings = sorted([*report.findings, *added], key=lambda finding: finding.span.start)
     return replace(report, findings=findings)
+
+
+def _masked(text: str, value_span: Span, spans: list[tuple[Span, str]]) -> str:
+    """The value at `value_span` with each span (inside it) replaced by its redaction marker."""
+    if not spans:
+        return text[value_span.start : value_span.end]
+    parts: list[str] = []
+    position = value_span.start
+    for span, data_class in sorted(spans, key=lambda item: (item[0].start, -item[0].end)):
+        if span.end <= position:
+            continue
+        if span.start >= position:
+            parts.append(text[position : span.start])
+            parts.append(redacted_token(data_class))
+        position = span.end
+    parts.append(text[position : value_span.end])
+    return "".join(parts)
 
 
 def _ignored(registry: ClassRegistry, data_class: str) -> bool:
