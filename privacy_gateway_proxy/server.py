@@ -13,7 +13,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote
 
 import httpx
 from starlette.applications import Starlette
@@ -65,7 +65,10 @@ SESSION_CACHE_SIZE = 64
 DEBUG_FILE_MODE = 0o600
 DEBUG_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 LOGGED_SEGMENTS = 2
-ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|\d+")
+ID_SEGMENT_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+ROUTE_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+NUMBER_RE = re.compile(r"\d+")
+ERROR_TYPE_RE = re.compile(r"[a-z_]{1,64}")
 
 _transform: Any
 _stream_restorer_factory: Any
@@ -124,11 +127,15 @@ class _QueryRedactingFilter(logging.Filter):
 
 
 def short_path(path: str) -> str:
-    """The first two segments of a path plus `/…` when more follow; known paths unchanged."""
-    segments = path.split("/")
-    if len(segments) <= LOGGED_SEGMENTS + 1 or path in TRANSFORMED_PATHS:
+    """The first two segments plus `/…` when more follow; a segment that is no route word as `…`."""
+    if path in TRANSFORMED_PATHS:
         return path
-    return "/".join(segments[: LOGGED_SEGMENTS + 1]) + "/…"
+    segments = path.split("/")
+    kept = [
+        segment if not segment or ROUTE_WORD_RE.fullmatch(segment) else "…"
+        for segment in segments[: LOGGED_SEGMENTS + 1]
+    ]
+    return "/".join(kept) + ("/…" if len(segments) > LOGGED_SEGMENTS + 1 else "")
 
 
 def _redact_access_log() -> None:
@@ -212,11 +219,19 @@ def _path_findings(
     request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str | None
 ) -> str:
     """Classes found in the decoded path segments by the read-only scan, comma-joined."""
+    segments = unquote(request.url.path).split("/")
     leaves = [
         TextRef(("path", index), segment)
-        for index, segment in enumerate(unquote(request.url.path).split("/"))
-        if segment and ID_SEGMENT_RE.fullmatch(segment) is None
+        for index, segment in enumerate(segments)
+        if segment
+        and ID_SEGMENT_RE.fullmatch(segment) is None
+        and not (NUMBER_RE.fullmatch(segment) and segments[index - 1] == "versions")
     ]
+    leaves.extend(
+        TextRef(("query", index), value)
+        for index, (_, value) in enumerate(parse_qsl(request.url.query, keep_blank_values=True))
+        if value
+    )
     session, release = _request_session(gateway, sessions, key)
     try:
         hits = audit_trail.scan(session, leaves) or []
@@ -388,8 +403,8 @@ async def _forward(
         logging.getLogger("privacy_gateway_proxy").warning(
             "upstream %s on %s: %s %s",
             response.status_code,
-            path,
-            raw_body[:400].decode("utf-8", "replace"),
+            short_path(path),
+            _error_type(raw_body),
             limits,
         )
         return Response(raw_body, status_code=response.status_code, headers=headers)
@@ -685,6 +700,7 @@ def _rejected(
     status: int = 422,
 ) -> Response:
     """Refuse a request the proxy must not forward, without an upstream call."""
+    path = short_path(path)
     started = time.perf_counter()
     _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
     _record(trail, "-", path, False, started, "error", "ok", [], None)
@@ -695,6 +711,7 @@ def _malformed(
     gateway: Any, settings: ProxySettings, trail: RequestAuditLog, path: str, message: str
 ) -> Response:
     """Refuse a request of unexpected form with an Anthropic-style 400 and a `blocked` audit line."""
+    path = short_path(path)
     started = time.perf_counter()
     _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
     _record(trail, "-", path, False, started, "blocked", "ok", [], None)
@@ -705,10 +722,21 @@ def _session_refused(
     gateway: Any, settings: ProxySettings, trail: RequestAuditLog, path: str
 ) -> Response:
     """Refuse a request whose session key is unusable; the key itself is never logged."""
+    path = short_path(path)
     started = time.perf_counter()
     _audit(gateway, "-", path, 0, None, "rejected", False, started, settings.transform_system)
     _record(trail, "-", path, False, started, "error", "ok", [], None)
     return _error("privacy_gateway_session", "session key has an unusable form", 400)
+
+
+def _error_type(raw_body: bytes) -> str:
+    """The `error.type` of an upstream error body when it is a plain identifier, else `-`."""
+    try:
+        error = json.loads(raw_body).get("error")
+    except (ValueError, AttributeError):
+        return "-"
+    kind = error.get("type") if isinstance(error, dict) else None
+    return kind if isinstance(kind, str) and ERROR_TYPE_RE.fullmatch(kind) else "-"
 
 
 def _leak_response(exc: LeakageError) -> Response:

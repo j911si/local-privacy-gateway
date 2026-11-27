@@ -186,7 +186,8 @@ async def test_content_methods_outside_the_allowlist_get_422(
     assert proxy.seen == []
     (entry,) = proxy.entries()
     assert entry["event"] == "proxy_request"
-    assert entry["path"] == path
+    # Rejected requests log the shortened path: a segment may carry a value (Codex RC3 5#6).
+    assert entry["path"] == server.short_path(path)
 
 
 @pytest.mark.asyncio

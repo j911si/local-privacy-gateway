@@ -596,7 +596,8 @@ async def test_unparsable_message_posts_are_rejected_without_upstream(
     assert called == []
     event = gateway.audit.events[0]
     assert event["leakage"] == "rejected"
-    assert event["path"] == path
+    # Rejected requests log the shortened path: a segment may carry a value (Codex RC3 5#6).
+    assert event["path"] == server.short_path(path)
     assert event["fields"] == 0
 
 
