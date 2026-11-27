@@ -81,7 +81,7 @@ CASES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
         "system[0]",
     ),
     "thinking_block": (_with_thinking(f"IBAN {IBAN}"), {}, "messages[1].content[0]"),
-    "unknown_field": ({**BASE, "x_extra": {"note": f"IBAN {IBAN}"}}, {}, "x_extra"),
+    "unknown_field": ({**BASE, "x_extra": {"note": f"IBAN {IBAN}"}}, {}, "<key>"),
 }
 
 
@@ -364,7 +364,7 @@ async def test_another_metadata_field_with_a_mail_blocks(gateway: Gateway, tmp_p
     assert run.status == 422
     assert run.sent == []
     paths = [item["path"] for item in run.entries[0]["outgoing"]["rescan"]["findings"]]
-    assert "metadata.contact" in paths
+    assert "metadata.<key>" in paths
 
 
 def _system(*blocks: dict[str, Any]) -> dict[str, Any]:

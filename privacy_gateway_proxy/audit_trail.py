@@ -14,7 +14,9 @@ from typing import Any
 from privacy_gateway.model import FieldFinding, Leak, LeakageError
 from privacy_gateway_proxy.session_key import is_claude_code_user_id
 from privacy_gateway_proxy.transform import (
+    KEY_OF,
     KEY_SUFFIX_RE,
+    SCHEMA_KEYS,
     KeyAt,
     Path,
     TextRef,
@@ -274,11 +276,13 @@ def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
     Only the base64 `source` of an `image` or `document` block in a message (or in a
     `tool_result` of one) with an allowed `media_type` and well-formed base64 is skipped;
     any other `data` is scanned. The input of a `tool_use` block is scanned with its keys,
-    addressed by position.
+    addressed by position; elsewhere every key outside `SCHEMA_KEYS` is scanned as well.
     """
     if isinstance(value, dict):
         leaves: list[TextRef] = []
         for key, item in value.items():
+            if key and key not in SCHEMA_KEYS:
+                leaves.append(TextRef((*path, key, KEY_OF), key))
             if key == "source" and _attachment_source(value, path):
                 data_path = (*path, key, "data")
                 leaves.extend(
