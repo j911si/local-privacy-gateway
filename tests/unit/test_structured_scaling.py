@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import random
 import signal
 import time
@@ -48,6 +49,7 @@ def best_of_three(scan: Callable[[], object]) -> float:
 
 
 def test_a_long_contact_list_scales_linearly(default_config: Config) -> None:
+    """Measured without the cyclic GC, whose passes over 20k live findings add noise."""
     stage = StructuredStage()
 
     def contacts(count: int) -> str:
@@ -56,10 +58,13 @@ def test_a_long_contact_list_scales_linearly(default_config: Config) -> None:
     small_text, large_text = contacts(5_000), contacts(20_000)
     previous = signal.signal(signal.SIGALRM, _expired)
     signal.alarm(HARD_TIMEOUT_S)
+    gc.collect()
+    gc.disable()
     try:
         small = best_of_three(lambda: stage.run(small_text, default_config, []))
         large = best_of_three(lambda: stage.run(large_text, default_config, []))
     finally:
+        gc.enable()
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
     assert len(stage.run(large_text, default_config, [])) == 20_000
