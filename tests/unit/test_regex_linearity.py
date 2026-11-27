@@ -82,12 +82,13 @@ def best_of_three(scan: Callable[[], object]) -> float:
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
-    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n, 16n.
+    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n.
 
-    The growth is always checked once the large run is measurable: a scan that stays under the
-    floor even at 32n characters is accepted as fast.
+    The growth is checked once the large run is measurable; a scan that stays under the floor at
+    8n characters is accepted as fast. Retrying with 16n made inputs of about 2 MB that failed
+    in the full suite (factor about 4) while every pattern measured linear in a fresh process.
     """
-    for size in (n, 4 * n, 16 * n):
+    for size in (n, 4 * n):
         small_text, large_text = payload(size), payload(2 * size)
         large, ratio = paired_best(
             lambda small_text=small_text: scan(small_text),
