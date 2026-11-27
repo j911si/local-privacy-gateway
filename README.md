@@ -1368,6 +1368,9 @@ Supporting properties:
   pseudonymization itself (the rescan stops after 10 s with 503), memory grows by about 220 MiB
   per MiB of input, and a request whose client has disconnected is still sent upstream.
   Resource limits and parallel requests are the focus of 0.2.1 ([roadmap](ROADMAP.md)).
+- **Numbers in forwarded JSON.** Detection reads strings. A JSON number, for example an ID stored
+  as a number inside a tool input or in the `classifier_context` of Claude Code's `safeguards`,
+  is neither replaced nor rescanned and goes out as it is.
 - **VIN without a check digit.** A VIN is found only when its check digit (position 9) is valid.
   Many European VINs do not use one (`WVWZZZ1JZXW000001`) and go out unchanged.
 - **Look-alike characters.** Fullwidth letters and digits are folded to ASCII and invisible
