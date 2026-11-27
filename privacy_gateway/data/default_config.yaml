@@ -596,7 +596,7 @@ classes:
     policy: redact
     patterns:
       - '(?<![^\W_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}(?![^\W_])'
-      - '(?<![^\W_])github_pat_[A-Za-z0-9_]{80,}\b'
+      - '(?<![^\W_])github_pat_[A-Za-z0-9_]{80,}'
   GITLAB_TOKEN:
     category: SECRET
     policy: redact

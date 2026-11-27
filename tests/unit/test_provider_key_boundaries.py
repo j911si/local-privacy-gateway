@@ -144,3 +144,17 @@ def test_changed_rules_scan_in_linear_time(default_config: Config, name: str, un
             lambda text, pattern=pattern: list(patterns.finditer(pattern, text)),
             lambda n: unit * (n // len(unit)),
         )
+
+
+@pytest.mark.parametrize("tail", ["é", "ä", "_é"])
+@pytest.mark.parametrize("unit", ["github_pat_", "_github_pat_", "x_github_pat_"])
+def test_github_pat_with_word_tail_scans_in_linear_time(
+    default_config: Config, unit: str, tail: str
+) -> None:
+    # ponytail: a Unicode letter after a long run made every `_` a start that scanned to the end.
+    for source in default_config.registry.get("GITHUB_TOKEN").patterns:
+        pattern = re.compile(source, re.MULTILINE)
+        assert_linear(
+            lambda text, pattern=pattern: list(patterns.finditer(pattern, text)),
+            lambda n, unit=unit, tail=tail: unit * (n // len(unit) // 4) + tail,
+        )
