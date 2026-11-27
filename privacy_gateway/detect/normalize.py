@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from privacy_gateway.model import Span
@@ -14,6 +15,7 @@ MAX_CLUSTER = 32
 IGNORABLE = frozenset({"\u034f", *(chr(code) for code in range(0xFE00, 0xFE10))})
 # Fullwidth ASCII (U+FF01..U+FF5E) folds one to one onto ASCII, so the offset map stays exact.
 FULLWIDTH_OFFSET = 0xFF01 - 0x21
+ASCII_RUN_RE = re.compile(r"[\x00-\x7f]+")
 
 
 def _ignorable(char: str) -> bool:
@@ -34,6 +36,14 @@ class OffsetMap:
         self.ends: list[int] = []
         index = 0
         while index < len(text):
+            run = ASCII_RUN_RE.match(text, index)
+            if run is not None and run.end() - index > 1:
+                # ponytail: ASCII maps to itself; the last character may take combining marks.
+                stop = run.end() - 1
+                chars.extend(text[index:stop])
+                self.starts.extend(range(index, stop))
+                self.ends.extend(range(index + 1, stop + 1))
+                index = stop
             char = text[index]
             if _ignorable(char):
                 # ponytail: "Cf" already covers U+00AD and every zero-width character.
