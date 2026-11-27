@@ -47,12 +47,16 @@ INLINE_BASIC_RE = re.compile(
     r"([A-Za-z0-9+/]{8,}={0,2})(?![\w+/=-])"
 )
 DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
-K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
-K8S_DATA_RE = re.compile(r"^([ \t]*)(?:data|stringData):[ \t]*$", re.MULTILINE)
+K8S_SECRET_RE = re.compile(
+    r"^[\"']?kind[\"']?:[ \t]*[\"']?Secret[\"']?[ \t]*(?:#.*)?\r?$", re.MULTILINE
+)
+K8S_DATA_RE = re.compile(
+    r"^([ \t]*)[\"']?(?:data|stringData)[\"']?:[ \t]*(?:#.*)?\r?$", re.MULTILINE
+)
 K8S_ENTRY_RE = re.compile(
-    r"^([ \t]+)[\w.\-]+:[ \t]*"
+    r"^([ \t]+)(?:[\w.\-]+|\"[^\"\r\n]*\"|'[^'\r\n]*'):[ \t]*"
     r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>](?:[-+]?\d?|\d[-+]))(?:[ \t]+#.*)?"
-    r"|(\S(?:.*\S)?))?[ \t]*$"
+    r"|(\S(?:.*\S)?))?[ \t]*\r?$"
 )
 
 INTERNAL_SUFFIXES = (".local", ".internal", ".corp", ".lan")
