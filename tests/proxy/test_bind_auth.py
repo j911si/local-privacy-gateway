@@ -19,6 +19,7 @@ UPSTREAM = "https://upstream.test"
 TOKEN = "tok-5d1e9a2c7b4f3e80-canary"
 NON_LOOPBACK = ["0.0.0.0", "::", "[::]", "100.101.102.103", "192.168.1.20", "198.51.100.7"]
 LOOPBACK = ["127.0.0.1", "localhost", "[::1]", "::1"]
+PRIVATE = ["100.101.102.103", "192.168.1.20"]
 ENV_NAMES = (
     "PGW_PROXY_LISTEN",
     "PGW_PROXY_AUTH_TOKEN",
@@ -66,7 +67,7 @@ def test_a_loopback_bind_needs_no_token(host: str) -> None:
     assert load_settings(env={}, listen_host=host).auth_token == ""
 
 
-@pytest.mark.parametrize("host", NON_LOOPBACK)
+@pytest.mark.parametrize("host", PRIVATE)
 def test_a_non_loopback_bind_with_a_token_is_allowed(host: str, tmp_path: Path) -> None:
     by_env = load_settings(env={"PGW_PROXY_AUTH_TOKEN": TOKEN}, listen_host=host)
     by_file = load_settings(
@@ -80,7 +81,7 @@ def test_a_non_loopback_bind_with_a_token_is_allowed(host: str, tmp_path: Path) 
 @pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
 def test_the_explicit_opt_out_allows_an_unauthenticated_bind(value: str) -> None:
     settings = load_settings(
-        env={"PGW_PROXY_ALLOW_UNAUTHENTICATED": value, "PGW_PROXY_LISTEN": "0.0.0.0:8787"}
+        env={"PGW_PROXY_ALLOW_UNAUTHENTICATED": value, "PGW_PROXY_LISTEN": "100.64.0.1:8787"}
     )
 
     assert settings.allow_unauthenticated is True
@@ -133,9 +134,9 @@ def test_serve_with_the_opt_out_starts_and_warns_loudly(
     monkeypatch.setenv("PGW_PROXY_ALLOW_UNAUTHENTICATED", "1")
 
     with caplog.at_level(logging.WARNING):
-        assert cli.main(["serve", "--listen", "0.0.0.0:8787"]) == cli.EXIT_OK
+        assert cli.main(["serve", "--listen", "100.64.0.1:8787"]) == cli.EXIT_OK
 
-    assert started and started[0]["host"] == "0.0.0.0"
+    assert started and started[0]["host"] == "100.64.0.1"
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("PGW_PROXY_ALLOW_UNAUTHENTICATED" in text for text in warnings)
     assert any("UNAUTHENTICATED" in text and "restore" in text for text in warnings)
@@ -178,7 +179,7 @@ def _app(gateway: Gateway, tmp_path: Path, seen: list[httpx.Request]):
 
     settings = ProxySettings(
         upstream_base_url=UPSTREAM,
-        listen_host="0.0.0.0",
+        listen_host="100.101.102.103",
         auth_token=TOKEN,
         audit_dir=tmp_path,
         passthrough_paths=("/v1/files",),

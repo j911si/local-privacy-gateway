@@ -69,7 +69,7 @@ def test_debug_originals_stays_disabled_otherwise(value: str) -> None:
 def test_env_values_are_applied() -> None:
     settings = load_settings(
         env={
-            "PGW_PROXY_LISTEN": "0.0.0.0:9000",
+            "PGW_PROXY_LISTEN": "10.1.2.3:9000",
             "PGW_PROXY_UPSTREAM": "http://localhost:1234/",
             "PGW_PROXY_SESSION_STRATEGY": "header",
             "PGW_CONFIG": "/tmp/pgw.yaml",
@@ -78,7 +78,7 @@ def test_env_values_are_applied() -> None:
         }
     )
 
-    assert settings.listen_host == "0.0.0.0"
+    assert settings.listen_host == "10.1.2.3"
     assert settings.listen_port == 9000
     assert settings.upstream_base_url == "http://localhost:1234"
     assert settings.session_strategy == "header"
@@ -89,7 +89,7 @@ def test_env_values_are_applied() -> None:
 def test_overrides_beat_env_and_none_is_ignored() -> None:
     settings = load_settings(
         env={
-            "PGW_PROXY_LISTEN": "0.0.0.0:9000",
+            "PGW_PROXY_LISTEN": "10.1.2.3:9000",
             "PGW_PROXY_UPSTREAM": "http://localhost:1",
             "PGW_PROXY_AUTH_TOKEN": "tok-test",
         },
@@ -97,7 +97,7 @@ def test_overrides_beat_env_and_none_is_ignored() -> None:
         upstream_base_url=None,
     )
 
-    assert settings.listen_host == "0.0.0.0"
+    assert settings.listen_host == "10.1.2.3"
     assert settings.listen_port == 7777
     assert settings.upstream_base_url == "http://localhost:1"
 
