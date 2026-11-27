@@ -290,6 +290,9 @@ def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
             if key == "input" and value.get("type") == "tool_use":
                 leaves.extend(collect_keyed(item, (*path, key)))
                 continue
+            if key == "classifier_context" and len(path) == 2 and path[0] == "safeguards":
+                leaves.extend(collect_keyed(item, (*path, key)))
+                continue
             leaves.extend(scannable_strings(item, (*path, key)))
         return leaves
     if isinstance(value, list):

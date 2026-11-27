@@ -445,9 +445,15 @@ def _starts_with_notice(content: list) -> bool:
     return isinstance(first.get("text"), str) and first["text"].startswith(NOTICE_MARKER)
 
 
+# Entry points from Claude Code's own list (2.1.332); the version is release plus build hash.
+BILLING_ENTRYPOINTS = (
+    "cli", "sdk-cli", "sdk-ts", "sdk-py", "claude-vscode", "claude-desktop",
+    "claude-desktop-3p", "local-agent", "local_agent", "ssh-remote", "remote",
+    "remote_cowork", "desktop_app", "claude-in-teams", "claude-code-github-action", "bench",
+)
 BILLING_LINE_RE = re.compile(
-    r"x-anthropic-billing-header: cc_version=[0-9][A-Za-z0-9.]{0,31}; "
-    r"cc_entrypoint=[a-z0-9_-]{1,32};"
+    r"x-anthropic-billing-header: cc_version=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}(?:\.[0-9a-f]{1,8})?; "
+    r"cc_entrypoint=(?:" + "|".join(re.escape(name) for name in BILLING_ENTRYPOINTS) + r");"
 )
 
 

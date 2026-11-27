@@ -306,3 +306,57 @@ async def test_a_real_address_in_tool_text_still_blocks(gateway: Gateway, tmp_pa
 
     assert status == 422
     assert sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x-anthropic-billing-header: cc_version=2.1.332.cb7; cc_entrypoint=erika-muster;",
+        "x-anthropic-billing-header: cc_version=2erika; cc_entrypoint=cli;",
+        "x-anthropic-billing-header: cc_version=2.1.332.cb7; cc_entrypoint=cli; cc_project=x;",
+    ],
+)
+async def test_billing_line_outside_the_known_format_is_transformed(
+    gateway: Gateway, tmp_path: Path, line: str
+) -> None:
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["system"][0]["text"] = line
+
+    status, data, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+    assert json.loads(sent[0])["system"][0]["text"] != line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["cli", "sdk-cli", "claude-vscode"])
+async def test_known_billing_lines_pass_unchanged(
+    gateway: Gateway, tmp_path: Path, entrypoint: str
+) -> None:
+    line = f"x-anthropic-billing-header: cc_version=2.1.332.cb7; cc_entrypoint={entrypoint};"
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["system"][0]["text"] = line
+
+    status, data, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+    assert json.loads(sent[0])["system"][0]["text"] == line
+
+
+def test_rescan_addresses_classifier_context_like_the_transform() -> None:
+    from privacy_gateway_proxy import audit_trail, transform
+
+    body = {
+        "messages": [],
+        "safeguards": [
+            {"type": "synthetic", "classifier_context": {"ticket": "PRJ-12345", "n": [{"k": "v"}]}}
+        ],
+    }
+    checked = {ref.path for ref in transform.collect_request_texts(body)}
+    scanned = {
+        leaf.path for leaf in audit_trail.scannable_strings(body) if leaf.path[0] == "safeguards"
+    }
+    context = {path for path in scanned if "classifier_context" in path}
+    assert context
+    assert context <= checked

@@ -415,12 +415,16 @@ async def _forward(
         return _leak_response(LeakageError(audit_trail.as_leaks(header_hits)))
 
     _debug_dump(settings, key, new_body)
-    upstream_request = client.build_request(
-        "POST",
-        _upstream_url(request, settings),
-        content=payload,
-        headers=forwarded,
-    )
+    try:
+        upstream_request = client.build_request(
+            "POST",
+            _upstream_url(request, settings),
+            content=payload,
+            headers=forwarded,
+        )
+    except UnicodeEncodeError:
+        record("error", "ok", **outcome)
+        return _unencodable_header()
     try:
         response = await client.send(upstream_request, stream=True)
     except httpx.HTTPError as exc:
@@ -501,12 +505,15 @@ class _LenientSession:
 async def _passthrough(
     request: Request, raw: bytes, settings: ProxySettings, client: httpx.AsyncClient
 ) -> Response:
-    upstream_request = client.build_request(
-        request.method,
-        _upstream_url(request, settings),
-        content=raw or None,
-        headers=_request_headers(request.headers, len(raw) if raw else None, settings),
-    )
+    try:
+        upstream_request = client.build_request(
+            request.method,
+            _upstream_url(request, settings),
+            content=raw or None,
+            headers=_request_headers(request.headers, len(raw) if raw else None, settings),
+        )
+    except UnicodeEncodeError:
+        return _unencodable_header()
     try:
         response = await client.send(upstream_request, stream=True)
     except httpx.HTTPError as exc:
@@ -738,6 +745,11 @@ def _host_allowed(value: str) -> bool:
     else:
         host = host.partition(":")[0]
     return is_loopback(host)
+
+
+def _unencodable_header() -> Response:
+    """400 without the exception text, which would quote a character of the header value."""
+    return _error("privacy_gateway_request", "a request header cannot be encoded", 400)
 
 
 def _error(kind: str, message: str, status: int) -> Response:

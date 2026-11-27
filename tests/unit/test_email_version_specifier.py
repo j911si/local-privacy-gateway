@@ -30,3 +30,10 @@ def test_version_specifier_is_not_an_email(text: str, default_config: Config) ->
 )
 def test_addresses_are_still_found(address: str, default_config: Config) -> None:
     assert emails(f"Kontakt {address} bitte", default_config) == [address]
+
+
+@pytest.mark.parametrize("address", ["ERIKA@10.0.1", "erika@١٠.٠.١", "Erika.M@1.2"])
+def test_address_shapes_outside_a_package_spec_are_found(
+    address: str, default_config: Config
+) -> None:
+    assert emails(f"Kontakt {address} bitte", default_config) == [address]

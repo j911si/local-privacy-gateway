@@ -206,3 +206,31 @@ def test_usage_log_keeps_only_numeric_counters(caplog: pytest.LogCaptureFixture)
     assert MAIL not in caplog.text
     assert "1203456789" not in caplog.text
     assert "'input_tokens': 2" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "url"), [("POST", "/v1/messages"), ("GET", "/v1/models")])
+async def test_an_unencodable_header_gets_a_value_free_400(
+    gateway: Gateway, tmp_path: Path, caplog: pytest.LogCaptureFixture, method: str, url: str
+) -> None:
+    sent: list[httpx.Request] = []
+    settings = ProxySettings(upstream_base_url="https://upstream.test", audit_dir=tmp_path / "a")
+    def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = server.create_app(settings, gateway, client=client)
+    body = b'{"model":"x","max_tokens":1,"messages":[]}' if method == "POST" else None
+    with caplog.at_level(logging.DEBUG):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://127.0.0.1:8787",
+        ) as proxy:
+            response = await proxy.request(
+                method, url, content=body, headers={"x-label": b"Caf\xe9-Mueller"}
+            )
+    assert response.status_code == 400
+    assert not sent
+    assert "Mueller" not in response.text and "Mueller" not in caplog.text
+    assert "\\xe9" not in caplog.text
