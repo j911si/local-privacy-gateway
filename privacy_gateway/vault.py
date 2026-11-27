@@ -186,7 +186,7 @@ class Vault:
                 return session_id
         if row[1] != config_hash:
             print(
-                f"privacy-gateway: session {row[0]} was created with a different configuration",
+                "privacy-gateway: a session was created with a different configuration",
                 file=sys.stderr,
             )
         return row[0]
