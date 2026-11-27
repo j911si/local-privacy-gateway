@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import re
 import sys
 from collections.abc import Mapping
@@ -97,30 +98,72 @@ def _digit_re() -> re.Pattern[str]:
 
 
 class _Digits:
-    """The digits of a text in order, and where each wanted digit string occurs among them."""
+    """The digits of a text in order, and where each wanted digit string occurs among them.
 
-    def __init__(self, text: str, wanted: set[str]) -> None:
+    `tight` digit strings stand in one piece in every value that uses them, `compact` ones are
+    numbers whose grouping may differ: a start counts only where the text has the digits in one
+    piece, or with no letter between them. Both checks are O(1) through prefix counts, so a text
+    like `1x1x1x…` stores nothing for them.
+    """
+
+    def __init__(
+        self,
+        text: str,
+        wanted: set[str],
+        tight: frozenset[str] = frozenset(),
+        compact: frozenset[str] = frozenset(),
+    ) -> None:
         self.offsets = [match.start() for match in _digit_re().finditer(text)]
         self.projection = "".join(text[index] for index in self.offsets)
+        self._tight = tight
+        self._compact = compact
+        self._letters = [0]
+        for left, right in itertools.pairwise(self.offsets):
+            gap = text[left + 1 : right]
+            self._letters.append(self._letters[-1] + _has_letter(gap))
         self._found: dict[str, list[int]] | None = None
         if len(wanted) >= INDEX_FROM_SEARCHES:
             self._found = {digits: [] for digits in wanted}
             for size in {len(digits) for digits in wanted}:
                 for start in range(len(self.projection) - size + 1):
-                    found = self._found.get(self.projection[start : start + size])
-                    if found is not None:
+                    digits = self.projection[start : start + size]
+                    found = self._found.get(digits)
+                    if found is not None and self._counts(digits, start):
                         found.append(start)
 
+    def _counts(self, digits: str, start: int) -> bool:
+        last = start + len(digits) - 1
+        if digits in self._tight:
+            return self.offsets[last] - self.offsets[start] == last - start
+        if digits in self._compact:
+            return self._letters[last] == self._letters[start]
+        return True
+
+    def compact(self, digits: str) -> bool:
+        """True when `occurrences(digits)` already holds only starts without a letter between."""
+        return digits in self._compact
+
     def occurrences(self, digits: str) -> list[int]:
-        """Every start of `digits` in the projection, overlapping ones included, ascending."""
+        """Every start of `digits` in the projection that may match, overlapping ones included."""
         if self._found is not None:
             return self._found[digits]
         found = []
         start = self.projection.find(digits)
         while start != -1:
-            found.append(start)
+            if self._counts(digits, start):
+                found.append(start)
             start = self.projection.find(digits, start + 1)
         return found
+
+
+def _split_digits(word: str) -> bool:
+    """True when a non-digit stands between two digits (`str.isdigit`, as the projection)."""
+    places = [index for index, char in enumerate(word) if char.isdigit()]
+    return any(right - left > 1 for left, right in itertools.pairwise(places))
+
+
+def _has_letter(gap: str) -> bool:
+    return any(char.isalpha() for char in gap)
 
 
 def _anchored_matches(
@@ -283,7 +326,8 @@ class KnownMatcher:
                 candidates.append((span.start, span.end, self._values[folded]))
         wanted = {*self._by_digits, *(rule.digits for rule in self._substrings)}
         wanted.update(digits for *_, digits in self._spaced if digits)
-        index = _Digits(work, wanted) if wanted else None
+        tight, compact = self._digit_checks()
+        index = _Digits(work, wanted, tight, compact) if wanted else None
         spaces: dict[int, int] = {}
         plain = iter(
             _spaced_matches(work, [(rule[0], rule[2]) for rule in self._spaced if not rule[3]])
@@ -314,15 +358,34 @@ class KnownMatcher:
             return digit_after or (start > 0 and text[start - 1].isdigit())
         return rule.mostly_digits and digit_after
 
+    def _digit_checks(self) -> tuple[frozenset[str], frozenset[str]]:
+        """(tight, compact): digits in one piece in every word rule; numbers without letters.
+
+        A digit string that some word rule splits with letters (`a1b2`) gets neither check.
+        """
+        split: set[str] = set()
+        whole: set[str] = set()
+        rules = [(rule.words, rule.digits) for rule in self._substrings]
+        rules.extend((words, digits) for _, _, words, digits in self._spaced if digits)
+        for words, digits in rules:
+            (split if _split_digits(" ".join(words)) else whole).add(digits)
+        numbers = set(self._by_digits)
+        return frozenset(whole - numbers - split), frozenset(numbers - split)
+
     def _digit_hits(self, text: str, index: _Digits) -> list[Hit]:
         """Known numbers that differ from the text only in grouping."""
         offsets = index.offsets
         result: list[Hit] = []
         for digits, value in self._by_digits.items():
-            for occurrence in _non_overlapping(index.occurrences(digits), len(digits)):
+            starts = index.occurrences(digits)
+            if not index.compact(digits):
+                starts = [
+                    start
+                    for start in starts
+                    if compact_digit_run(text, offsets[start], offsets[start + len(digits) - 1] + 1)
+                ]
+            for occurrence in _non_overlapping(starts, len(digits)):
                 first, last = offsets[occurrence], offsets[occurrence + len(digits) - 1] + 1
-                if not compact_digit_run(text, first, last):
-                    continue
                 lead = first
                 while lead and text[lead - 1].isdigit():
                     lead -= 1
