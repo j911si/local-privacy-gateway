@@ -21,6 +21,11 @@ All notable changes to this project are documented in this file. The format foll
   route words, and upstream errors are logged by status and error type without the body.
 - The digit and first-word indexes of learned values and the per-field audit counts no longer grow
   with the product of input size and learned values or fields.
+- The vault runs SQLite in WAL mode with `synchronous=NORMAL` instead of an fsync on every
+  commit (256 KiB with about 6,700 new values: 25 s before, 4.6 s now). A power loss or an
+  operating system crash can drop the mappings of the last moments, so a placeholder issued just
+  before may not be restored afterwards; nothing goes out in clear text because of it. A purge
+  still commits with a full fsync.
 - Breaking: a finding of a sensitive class in a field the proxy forwards unchanged (`tools`,
   `metadata`, a signed block, the system prompt with `PGW_PROXY_TRANSFORM_SYSTEM=0`, an unknown
   field) now blocks the request with 422 before anything is sent. Before, it went out in clear
