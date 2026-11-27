@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from functools import cache
 from importlib.resources import files
 from typing import TYPE_CHECKING
@@ -195,6 +196,7 @@ HEALTH_MARKERS = (
 )
 HEALTH_MARKER_WINDOW = 60
 SENTENCE_BOUNDARIES = ".\n"
+SENTENCE_BOUNDARY_RE = re.compile(r"[.\n]")
 
 MIN_SALUTATION_NAME_LENGTH = 3
 SALUTATION_RE = re.compile(
@@ -340,14 +342,37 @@ def _is_boundary(text: str, index: int) -> bool:
     return not (inside_number and text[index - 1].isdigit() and text[index + 1].isdigit())
 
 
-def _sentence_fragment(text: str, start: int, end: int) -> Span:
-    left = start
-    while left > 0 and not _is_boundary(text, left - 1):
-        left -= 1
-    right = end
-    while right < len(text) and not _is_boundary(text, right):
-        right += 1
-    return _trimmed_span(text, left, right)
+class _Sentences:
+    """The sentence boundaries of one text, found once."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._bounds = [
+            match.start()
+            for match in SENTENCE_BOUNDARY_RE.finditer(text)
+            if _is_boundary(text, match.start())
+        ]
+
+    def fragment(self, start: int, end: int) -> Span:
+        """The trimmed text between the boundary before `start` and the one from `end` on."""
+        before = bisect_left(self._bounds, start)
+        after = bisect_left(self._bounds, end)
+        left = self._bounds[before - 1] + 1 if before else 0
+        right = self._bounds[after] if after < len(self._bounds) else len(self._text)
+        return _trimmed_span(self._text, left, right)
+
+
+def _last_date_end(dates: list[tuple[int, int]], span: Span, limit: int) -> int | None:
+    """The largest end of a (end, start) date inside `span` that ends by `limit`."""
+    index = bisect_right(dates, limit, key=lambda date: date[0])
+    while index > 0:
+        index -= 1
+        end, start = dates[index]
+        if end < span.start:
+            return None
+        if start >= span.start:
+            return end
+    return None
 
 
 class ContextStage:
@@ -555,6 +580,10 @@ class ContextStage:
     def _health(
         self, text: str, config: Config, findings: list[Finding], out: list[Finding]
     ) -> None:
+        sentences: _Sentences | None = None
+        dates = sorted(
+            (f.span.end, f.span.start) for f in (*findings, *out) if f.data_class == "DATE_OF_BIRTH"
+        )
         for finding in findings:
             if finding.data_class != "MEDICAL_INFORMATION":
                 continue
@@ -563,16 +592,12 @@ class ContextStage:
             window = text[max(0, finding.span.start - HEALTH_MARKER_WINDOW) : finding.span.start]
             if not any(marker in window.lower() for marker in HEALTH_MARKERS):
                 continue
-            span = _sentence_fragment(text, finding.span.start, finding.span.end)
-            dates = [
-                f.span.end
-                for f in (*findings, *out)
-                if f.data_class == "DATE_OF_BIRTH"
-                and span.contains(f.span)
-                and f.span.end <= finding.span.start
-            ]
-            if dates:
-                span = _trimmed_span(text, max(dates), span.end)
+            if sentences is None:
+                sentences = _Sentences(text)
+            span = sentences.fragment(finding.span.start, finding.span.end)
+            last = _last_date_end(dates, span, min(span.end, finding.span.start))
+            if last is not None:
+                span = _trimmed_span(text, last, span.end)
             self._emit(config, out, span, "HEALTH_INFORMATION", 0.95)
 
     def _initials(self, text: str, config: Config, out: list[Finding]) -> None:
