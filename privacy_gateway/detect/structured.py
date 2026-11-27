@@ -44,7 +44,7 @@ HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILIN
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
 INLINE_BASIC_RE = re.compile(
     r"(?i)(?<![\w-])(?:proxy-)?authorization:[ \t]*basic[ \t]+"
-    r"([A-Za-z0-9+/]{8,}={0,2})(?![\w+/=-])"
+    r"([A-Za-z0-9+/]{4,}={0,2})(?![\w+/=-])"
 )
 DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
 K8S_SECRET_RE = re.compile(
