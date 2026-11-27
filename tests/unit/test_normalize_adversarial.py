@@ -50,6 +50,10 @@ def test_long_cluster_is_kept_without_nfc() -> None:
     assert normalized(cluster) == cluster
 
 
+def test_alternating_combining_marks_normalize_in_linear_time() -> None:
+    assert_linear(normalized, lambda n: "X" + "\u0315\u0300" * (n // 2), n=40_000)
+
+
 def test_alternating_combining_marks_scan_in_linear_time(gateway: Gateway) -> None:
     assert_linear(gateway.scan, lambda n: "X" + "̀̕" * (n // 2), n=40_000)
 

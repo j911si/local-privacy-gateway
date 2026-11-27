@@ -56,8 +56,9 @@ def test_crlf_document_separator_ends_the_secret(gateway: Gateway) -> None:
 
 def test_nested_data_lines_scan_in_linear_time() -> None:
     def manifest(n: int) -> str:
-        lines = ['"kind": "Secret"'] + [" " * depth + '"data":' for depth in range(n // 40)]
-        return "\n".join([*lines, " " * (n // 40) + "  key: demo"]) + "\n"
+        # ponytail: nesting in a saw-tooth of 30 levels keeps the text length linear in n.
+        lines = ['"kind": "Secret"'] + [" " * (depth % 30) + '"data":' for depth in range(n // 24)]
+        return "\n".join([*lines, " " * 31 + "key: demo"]) + "\n"
 
     assert_linear(lambda text: structured._parse_kubernetes_secrets(text, None), manifest, n=8000)
 

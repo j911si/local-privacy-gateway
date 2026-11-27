@@ -6,6 +6,7 @@ import gc
 import random
 import re
 import signal
+import statistics
 import time
 from collections.abc import Callable, Iterator
 
@@ -45,24 +46,26 @@ def _cpu(scan: Callable[[], object]) -> float:
 
 
 def paired_best(small: Callable[[], object], large: Callable[[], object]) -> tuple[float, float]:
-    """Best CPU time of five interleaved runs each, with the cyclic GC paused.
+    """(best large CPU time, median of the large/small ratios) over five interleaved pairs.
 
     CPU time of this process instead of wall time, so load from other processes and scheduling
-    delays do not count. The small and the large run alternate, so a phase of lower clock speed
-    or a shared core hits both and not only one side of the ratio. The GC is paused because its
-    pauses depend on the heap left by earlier tests, not on the input.
+    delays do not count. Small and large alternate, so a phase of lower clock speed hits both
+    runs of a pair, and the median of the per-pair ratios ignores a single outlier pair. The
+    GC is paused because its pauses depend on the heap left by earlier tests.
     """
-    smalls, larges = [], []
+    larges, ratios = [], []
     enabled = gc.isenabled()
     gc.disable()
     try:
         for _ in range(5):
-            smalls.append(_cpu(small))
-            larges.append(_cpu(large))
+            small_time = _cpu(small)
+            large_time = _cpu(large)
+            larges.append(large_time)
+            ratios.append(large_time / max(small_time, 1e-9))
     finally:
         if enabled:
             gc.enable()
-    return min(smalls), min(larges)
+    return min(larges), statistics.median(ratios)
 
 
 def best_of_three(scan: Callable[[], object]) -> float:
@@ -79,10 +82,21 @@ def best_of_three(scan: Callable[[], object]) -> float:
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
-    small_text, large_text = payload(n), payload(2 * n)
-    small, large = paired_best(lambda: scan(small_text), lambda: scan(large_text))
-    assert large < MAX_SECONDS, f"{large:.3f}s for {2 * n} characters"
-    assert large < NOISE_FLOOR_S or large / small < MAX_FACTOR, f"factor {large / small:.2f}"
+    """2n costs under MAX_FACTOR times n; a run under the noise floor is retried with 4n, 16n.
+
+    The growth is always checked once the large run is measurable: a scan that stays under the
+    floor even at 32n characters is accepted as fast.
+    """
+    for size in (n, 4 * n, 16 * n):
+        small_text, large_text = payload(size), payload(2 * size)
+        large, ratio = paired_best(
+            lambda small_text=small_text: scan(small_text),
+            lambda large_text=large_text: scan(large_text),
+        )
+        assert large < MAX_SECONDS, f"{large:.3f}s for {2 * size} characters"
+        if large >= NOISE_FLOOR_S:
+            break
+    assert large < NOISE_FLOOR_S or ratio < MAX_FACTOR, f"factor {ratio:.2f}"
 
 
 def finditer(pattern: re.Pattern[str]) -> Callable[[str], object]:
