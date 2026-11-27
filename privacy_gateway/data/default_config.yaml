@@ -175,7 +175,7 @@ classes:
     patterns:
       - '(?<![^\W_])\d{2}[ ]?\d{3}[ ]?\d{3}[ ]?\d{3}(?![^\W_])'
       - '\b[A-Z]{2}[0-9A-Z]{8,12}\b'
-      - '(?i)(?<![A-Za-z0-9])(?P<label>steuer-?id(?:nr)?|steueridentifikationsnummer|(?:steuerliche[ ]+)?identifikationsnummer|steuernummer|idnr|tin|tax[ -]?id)\.?[ \t]*+[:=]?+[ \t]*+(?P<value>\d{2}(?: ?\d{3}){3})\b'
+      - '(?i)(?<![A-Za-z0-9])(?P<label>steuer-?id(?:nr)?|steueridentifikationsnummer|steuerliche[ ]+identifikationsnummer|steuernummer|idnr|tin|tax[ -]?id)\.?[ \t]*+[:=]?+[ \t]*+(?P<value>\d{2}(?: ?\d{3}){3})\b'
     validator: tax_id
     context_words: ['steuer', 'tax', 'ust', 'vat', 'identifikationsnummer', 'steuerbescheid',
       'steueridentifikationsnummer']

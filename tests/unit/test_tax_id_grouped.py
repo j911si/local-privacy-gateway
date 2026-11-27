@@ -50,10 +50,23 @@ def test_grouped_tax_id_is_tokenized(gateway: Gateway, text: str) -> None:
         "Bestellnummer 71358952543 versandt.",
         "Bestellung 71358952543 versandt.",
         f"Telefon {TAX_ID}",
+        f"Identifikationsnummer {WRONG_CHECK}",
+        "Geräte-Identifikationsnummer 12 345 678 901",
     ],
 )
 def test_lookalikes_stay(gateway: Gateway, text: str) -> None:
     assert "<TAX_ID_" not in gateway.session().pseudonymize(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [f"steuerliche Identifikationsnummer {WRONG_CHECK}", f"Steuer-ID: {WRONG_CHECK}"],
+)
+def test_labelled_value_is_tokenized_without_check_digit(gateway: Gateway, text: str) -> None:
+    """Deliberate: a labelled Steuer-ID skips the validator, as for `Steuer-ID:`."""
+    out = gateway.session().pseudonymize(text)
+    assert WRONG_CHECK not in out
+    assert "<TAX_ID_" in out
 
 
 @pytest.mark.parametrize("word", ["Identifikationsnummer", "steuerliche", "steuerliche  "])
