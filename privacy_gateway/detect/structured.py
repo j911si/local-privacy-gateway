@@ -24,6 +24,8 @@ URL_RE = re.compile(r"(?:https?|wss?|ftp)://[^\s>\"')]+")
 URL_TRAILING_PUNCTUATION = ".,;:!?"
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 EMAIL_RUN_RE = re.compile(r"[\w.+-]+")
+# `react@18.2.0`: two or three number groups after `@` are a package version, not a domain.
+VERSION_DOMAIN_RE = re.compile(r"\d+(?:\.\d+){1,2}")
 JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_.\-])"
 )
@@ -224,6 +226,8 @@ def _parse_emails(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in run_finditer(EMAIL_RE, text, EMAIL_RUN_RE):
         local, _, domain = match.group(0).partition("@")
+        if VERSION_DOMAIN_RE.fullmatch(domain):
+            continue
         domain_start = match.start() + len(local) + 1
         children = [
             _finding(match.start(), match.start() + len(local), "PERSON_USERNAME"),

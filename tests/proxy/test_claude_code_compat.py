@@ -283,3 +283,26 @@ async def test_safeguards_context_is_pseudonymized_not_blocked(
     forwarded = json.loads(sent[0])["safeguards"]
     assert forwarded[0]["type"] == "synthetic_classifier"
     assert set(forwarded[0]) == {"type", "classifier_context"}
+
+
+@pytest.mark.asyncio
+async def test_a_package_version_in_tool_text_does_not_block(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["tools"][0]["description"] += " Import libraries like `react@18.2.0` from a CDN."
+
+    status, data, _, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+
+
+@pytest.mark.asyncio
+async def test_a_real_address_in_tool_text_still_blocks(gateway: Gateway, tmp_path: Path) -> None:
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["tools"][0]["description"] += f" Contact {MAIL} for help."
+
+    status, _, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 422
+    assert sent == []
