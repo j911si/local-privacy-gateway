@@ -36,7 +36,6 @@ LITERAL_ESCAPE_LETTERS = "ntr"
 PATTERN_CACHE_SIZE = 4096
 INDEX_FROM_SEARCHES = 32
 SPACE_RUN_RE = re.compile(r"\s+")
-_IKS_TO_UNKNOWN = str.maketrans("iks", "???")
 
 Known = tuple[str, str]
 Hit = tuple[Span, Known]
@@ -209,13 +208,47 @@ def _first_matches(pattern: re.Pattern[str], text: str, starts: list[int]) -> li
     return found
 
 
+def _extra_cases() -> frozenset[int]:
+    """Code points `re.IGNORECASE` pairs beyond equal lowercase, plus `i`, `k`, `s`."""
+    try:
+        from re._casefix import _EXTRA_CASES
+    except ImportError:
+        return frozenset()
+    points = {ord("i"), ord("k"), ord("s")}
+    for lower, others in _EXTRA_CASES.items():
+        points.add(lower)
+        points.update(others)
+    return frozenset(points)
+
+
+_EXTRA = _extra_cases()
+
+
+class _FoldTable(dict[int, int]):
+    """`str.translate` table: a character's lowercase, or `?` where `re` may pair it otherwise."""
+
+    def __missing__(self, code: int) -> int:
+        lower = chr(code).lower()
+        if _EXTRA:
+            unsafe = len(lower) != 1 or code in _EXTRA or ord(lower) in _EXTRA
+        else:
+            unsafe = code > 0x7F or lower in "iks"
+        folded = ord("?") if unsafe else ord(lower)
+        self[code] = folded
+        return folded
+
+
+_FOLD = _FoldTable()
+
+
 def _coarse_fold(text: str) -> str:
     """A fold of the same length under which characters `re.IGNORECASE` pairs are equal.
 
-    Every non-ASCII character becomes `?`, and so do `i`, `k` and `s`, the only ASCII letters
-    that match a non-ASCII character (`ı`, `İ`, the Kelvin sign, `ſ`).
+    A character becomes its lowercase, or `?` when `re` may pair it with a character of
+    another lowercase (the `re._casefix` table, `i`, `k`, `s`) or its lowercase has more than
+    one character. Without that table every non-ASCII character becomes `?`, as before.
     """
-    return text.encode("ascii", "replace").decode("ascii").lower().translate(_IKS_TO_UNKNOWN)
+    return text.translate(_FOLD)
 
 
 class _FirstWords:
