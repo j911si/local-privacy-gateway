@@ -133,6 +133,8 @@ class Vault:
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # ponytail: WAL with NORMAL fsyncs at checkpoints, not per commit; purge checkpoints.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA secure_delete=ON")
         self._conn.executescript(_SCHEMA)
