@@ -36,6 +36,10 @@ IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
 PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
+# Grouped values whose pattern can take a trailing word or number group (`IBAN ... EUR`, a card
+# number followed by its CVC): a failed check retries the prefixes that end before a separator.
+GROUPED_CLASSES = frozenset({"IBAN", "CREDIT_CARD", "DEBIT_CARD"})
+GROUP_SEPARATORS = " -"
 DIFF_HEADER_RE = re.compile(
     r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
 )
@@ -187,7 +191,11 @@ class PatternStage:
             return []
         labelled = "label" in match.re.groupindex and match.group("label") is not None
         if validator is not None and not labelled and not validator(value):
-            return []
+            prefix = _valid_prefix(value, validator) if data_class.name in GROUPED_CLASSES else ""
+            if not prefix:
+                return []
+            span = Span(span.start, span.start + len(prefix))
+            value = prefix
         if (
             data_class.name == PHONE_INTERNATIONAL_CLASS
             and _at_line_start(text, span.start)
@@ -226,3 +234,15 @@ class PatternStage:
                 attributes={"scope": scope},
             )
         ]
+
+
+def _valid_prefix(value: str, validator: Callable[[str], bool]) -> str:
+    """The longest prefix that ends before a group separator and passes the check, or ""."""
+    cut = len(value)
+    while True:
+        cut = max((value.rfind(separator, 0, cut) for separator in GROUP_SEPARATORS), default=-1)
+        if cut <= 0:
+            return ""
+        prefix = value[:cut].rstrip(GROUP_SEPARATORS)
+        if prefix and validator(prefix):
+            return prefix
