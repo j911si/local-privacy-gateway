@@ -91,17 +91,18 @@ def best_of_three(scan: Callable[[], object]) -> float:
 def assert_linear(
     scan: Callable[[str], object], payload: Callable[[int], str], n: int = N
 ) -> None:
-    """4n costs under MAX_FACTOR times n, for the first two measurable pairs of n, 4n, 16n.
+    """4m costs under MAX_FACTOR times m, for the first two measurable pairs m = n/2, 2n, 8n.
 
-    A pair whose larger run stays under the noise floor is retried with the next size; a scan
-    under the floor even at 64n characters is accepted as fast. After the first measurable pair
+    The first pair ends at 2n characters, the input size the absolute MAX_SECONDS limit was
+    set for. A pair whose larger run stays under the noise floor is retried with the next size;
+    a scan under the floor even at 32n characters is accepted as fast. After the first measurable pair
     the next larger pair is measured too, so a quadratic part that dominates only at larger
     input cannot hide behind a favourable first pair; it is skipped only when it would exceed
     MAX_SECONDS even for a linear scan.
     """
     ratios: list[float] = []
     last_large = 0.0
-    for size in (n, 4 * n, 16 * n):
+    for size in (n // 2, 2 * n, 8 * n):
         if ratios and last_large * GROWTH >= MAX_SECONDS:
             break
         small_text, large_text = payload(size), payload(GROWTH * size)
