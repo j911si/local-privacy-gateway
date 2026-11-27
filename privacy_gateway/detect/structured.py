@@ -51,7 +51,7 @@ K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
 K8S_DATA_RE = re.compile(r"^([ \t]*)(?:data|stringData):[ \t]*$", re.MULTILINE)
 K8S_ENTRY_RE = re.compile(
     r"^([ \t]+)[\w.\-]+:[ \t]*"
-    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>][-+]?\d?)(?:[ \t]+#.*)?"
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>](?:[-+]?\d?|\d[-+]))(?:[ \t]+#.*)?"
     r"|(\S(?:.*\S)?))?[ \t]*$"
 )
 

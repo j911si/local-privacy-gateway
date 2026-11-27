@@ -31,7 +31,21 @@ def secrets(text: str, config: Config) -> list[str]:
     ]
 
 
-HEADERS = ["| # mehrzeilig", "|- # comment", ">- # c", "|+\t# c", ">2 # x", "| #", "|"]
+HEADERS = [
+    "| # mehrzeilig",
+    "|- # comment",
+    ">- # c",
+    "|+\t# c",
+    ">2 # x",
+    "| #",
+    "|",
+    "|2-",
+    ">2+",
+    "|4+ # c",
+    ">3- # c",
+    "|2",
+    ">-2",
+]
 
 
 @pytest.mark.parametrize("header", HEADERS)
@@ -76,4 +90,20 @@ def test_block_scalar_comments_scan_in_linear_time(default_config: Config, comme
     assert_linear(
         scan,
         lambda n: HEAD + "stringData:\n" + "  k: | # c\n    v1x\n" * (n // 20),
+    )
+
+
+@pytest.mark.parametrize("header", ["|2- ", ">9+ #", "|2-2-"])
+def test_reordered_headers_scan_in_linear_time(default_config: Config, header: str) -> None:
+    def scan(text: str) -> object:
+        return structured._parse_kubernetes_secrets(text, default_config)
+
+    assert_linear(
+        scan,
+        lambda n: HEAD + "stringData:\n  k: " + header + "#" * n + "\n    v\n",
+        n=1_000_000,
+    )
+    assert_linear(
+        scan,
+        lambda n: HEAD + "stringData:\n" + f"  k: {header}\n    v1x\n" * (n // 20),
     )
