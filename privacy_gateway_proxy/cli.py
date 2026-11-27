@@ -16,6 +16,7 @@ from privacy_gateway_proxy.settings import (
     UNCHECKED_ALLOW,
     ProxySettings,
     is_loopback,
+    is_private_address,
     load_settings,
     parse_listen,
 )
@@ -94,6 +95,13 @@ def log_startup(settings: ProxySettings) -> None:
         )
         if not settings.auth_token:
             log.warning("listening on a non-loopback address with no auth token")
+        if not is_private_address(settings.listen_host):
+            log.warning(
+                "listening on %s, which is not a private address, because "
+                "PGW_PROXY_ALLOW_PUBLIC_BIND is set: the proxy has no TLS, so the auth token, "
+                "requests and restored answers cross the network in clear",
+                settings.listen_host,
+            )
         if not settings.auth_token and settings.allow_unauthenticated:
             log.warning(
                 "UNAUTHENTICATED proxy on %s because PGW_PROXY_ALLOW_UNAUTHENTICATED is set: "

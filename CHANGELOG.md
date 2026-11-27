@@ -51,6 +51,20 @@ All notable changes to this project are documented in this file. The format foll
   audit ids that are kept in memory only.
 - An unusable session key (invalid header, too long, control characters) is refused with 400
   before the path scan. Before, the path scan was skipped and the request was forwarded.
+- Breaking: besides loopback the proxy binds only to explicit private addresses (RFC 1918,
+  `100.64.0.0/10`, `fc00::/7`), even with an auth token. `0.0.0.0`, `[::]`, public and link-local
+  addresses and host names need `PGW_PROXY_ALLOW_PUBLIC_BIND=1`. The listener has no TLS.
+- Requests without a session header or a usable `metadata.user_id` shared one session per
+  process, so a placeholder from one client was restored in another client's answer. Each such
+  request now gets a session of its own that is purged when it ends.
+- Request headers went upstream unscanned. `Cookie`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and
+  `Via` are no longer forwarded, and the values of the other headers are scanned with the blocking
+  classes of unchecked fields (not `x-api-key`, `Authorization` and UUID id headers).
+- The rescan skipped every `data` field next to `type: base64`. It now skips only the base64
+  source of an `image` or `document` block with an allowed media type.
+- JSON keys outside `tool_use.input` were not rescanned and appeared in clear in request log
+  paths. They are now rescanned, and a key outside the Messages API and JSON Schema field names is
+  logged as `<key>`.
 - certifi 2026.11.20 (PYSEC-2026-4320, GHSA-6q48-6c7w-9gw2: compromised emSign intermediate
   CAs in the bundled CA store).
 

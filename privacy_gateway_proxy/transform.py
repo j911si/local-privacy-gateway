@@ -23,7 +23,40 @@ class KeyAt:
     index: int
 
 
-Path = tuple[str | int | Slot | KeyAt, ...]
+@dataclass(frozen=True)
+class KeyOf:
+    """The key of the value at the preceding path."""
+
+
+KEY_OF = KeyOf()
+Path = tuple[str | int | Slot | KeyAt | KeyOf, ...]
+UNKNOWN_KEY = "<key>"
+SCHEMA_KEYS = frozenset(
+    {
+        # Messages API request, message, content block, tool and tool_choice fields
+        "model", "max_tokens", "messages", "system", "metadata", "user_id", "stop_sequences",
+        "stream", "temperature", "top_p", "top_k", "tools", "tool_choice", "thinking",
+        "service_tier", "container", "mcp_servers", "context_management", "output_config",
+        "output_format", "budget_tokens", "display", "effort", "format", "edits", "trigger",
+        "keep", "clear_at_least", "clear_tool_inputs", "exclude_tools", "value", "role",
+        "content", "type", "text", "source", "media_type", "data", "url", "file_id", "id",
+        "name", "input", "tool_use_id", "is_error", "cache_control", "ttl", "signature",
+        "citations", "cited_text", "document_index", "document_title", "start_char_index",
+        "end_char_index", "start_page_number", "end_page_number", "start_block_index",
+        "end_block_index", "encrypted_content", "encrypted_index", "context", "enabled",
+        "description", "input_schema", "defer_loading", "strict", "max_uses",
+        "allowed_domains", "blocked_domains", "user_location", "disable_parallel_tool_use",
+        "authorization_token", "tool_configuration", "allowed_tools",
+        # JSON Schema keywords inside `input_schema`
+        "$schema", "$ref", "$defs", "$id", "definitions", "properties", "required", "items",
+        "enum", "const", "default", "title", "pattern", "minimum", "maximum",
+        "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems",
+        "maxItems", "uniqueItems", "additionalProperties", "anyOf", "oneOf", "allOf", "not",
+        "examples", "nullable", "propertyNames", "patternProperties",
+        # the proxy's own label for request headers in audit paths
+        "headers",
+    }
+)
 
 NOTICE_MARKER = "<privacy-gateway>"
 NOTICE_TEXT = (
@@ -190,17 +223,23 @@ def collect_keyed(value: Any, path: Path = ()) -> list[TextRef]:
 
 
 def format_path(path: Path) -> str:
-    """Render a path as `messages[0].content[1].text`; object keys as `{position}`."""
+    """Render a path as `messages[0].content[1].text`; object keys as `{position}`.
+
+    A key outside `SCHEMA_KEYS` may carry a value, so it is rendered as `<key>`.
+    """
     rendered = ""
     for part in path:
         if isinstance(part, Slot):
             rendered += f"{{{part.index}}}"
         elif isinstance(part, KeyAt):
             rendered += f"{{{part.index}}}#key"
+        elif isinstance(part, KeyOf):
+            rendered += "#key"
         elif isinstance(part, int):
             rendered += f"[{part}]"
         else:
-            rendered += f".{part}" if rendered else str(part)
+            name = part if part in SCHEMA_KEYS else UNKNOWN_KEY
+            rendered += f".{name}" if rendered else name
     return rendered
 
 
@@ -353,8 +392,26 @@ def _text_source(source: Any) -> bool:
 
 
 def _add_unchecked(refs: list[UncheckedRef], path: Path, reason: str, value: Any) -> None:
-    if collect_strings(value):
+    if collect_strings(value) or _unknown_key(path[-1] if path else None) or _has_key(value):
         refs.append(UncheckedRef(path, reason, value))
+
+
+def _unknown_key(part: Any) -> bool:
+    return isinstance(part, str) and part not in SCHEMA_KEYS
+
+
+def _has_key(value: Any) -> bool:
+    """True when an object below `value` has a key outside `SCHEMA_KEYS`."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if any(_unknown_key(key) for key in item):
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
 
 
 def _insert_notice(body: dict) -> bool:

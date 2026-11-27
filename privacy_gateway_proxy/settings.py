@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import os
 import secrets
@@ -22,6 +23,11 @@ PROCESS_SESSION_KEY = secrets.token_hex(8)
 AUDIT_DIR_ENV = "PGW_AUDIT_LOG_DIR"
 DEFAULT_AUDIT_DIR = Path("~/.local/state/privacy-gateway/audit")
 ALLOW_UNAUTHENTICATED_ENV = "PGW_PROXY_ALLOW_UNAUTHENTICATED"
+ALLOW_PUBLIC_BIND_ENV = "PGW_PROXY_ALLOW_PUBLIC_BIND"
+PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7")
+)
 UNCHECKED_FIELDS_ENV = "PGW_PROXY_UNCHECKED_FIELDS"
 UNCHECKED_BLOCK = "block"
 UNCHECKED_ALLOW = "allow"
@@ -50,6 +56,7 @@ class ProxySettings:
     tool_restore_rules: tuple[ToolRule, ...] = ()
     tool_restore_on_deny: str = KEEP_TOKEN
     allow_unauthenticated: bool = False
+    allow_public_bind: bool = False
     unchecked_fields: str = UNCHECKED_BLOCK
 
 
@@ -66,16 +73,38 @@ def is_loopback(host: str) -> bool:
     return host.strip().lower() in LOOPBACK_HOSTS
 
 
+def is_private_address(host: str) -> bool:
+    """True for an explicit IP address in RFC 1918, 100.64.0.0/10 (Tailscale) or fc00::/7."""
+    text = host.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return any(address in network for network in PRIVATE_NETWORKS)
+
+
 def check_bind(settings: ProxySettings) -> None:
-    """Refuse a non-loopback bind without an auth token unless the opt-out is set."""
-    if is_loopback(settings.listen_host) or settings.auth_token or settings.allow_unauthenticated:
+    """Refuse a non-loopback bind without an auth token, and any bind that is neither
+    loopback nor an explicit private address, unless the matching opt-out is set."""
+    if is_loopback(settings.listen_host):
         return
-    raise ConfigError(
-        f"refusing to listen on the non-loopback address {settings.listen_host} without an "
-        "auth token: anyone who reaches the port could restore pseudonymized values. Put a "
-        "token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE (clients send it as x-pgw-auth), "
-        f"or set {ALLOW_UNAUTHENTICATED_ENV}=1 to accept the risk"
-    )
+    if not settings.auth_token and not settings.allow_unauthenticated:
+        raise ConfigError(
+            f"refusing to listen on the non-loopback address {settings.listen_host} without an "
+            "auth token: anyone who reaches the port could restore pseudonymized values. Put a "
+            "token in a 0600 file and set PGW_PROXY_AUTH_TOKEN_FILE (clients send it as "
+            f"x-pgw-auth), or set {ALLOW_UNAUTHENTICATED_ENV}=1 to accept the risk"
+        )
+    if not is_private_address(settings.listen_host) and not settings.allow_public_bind:
+        raise ConfigError(
+            f"refusing to listen on {settings.listen_host}: only loopback and explicit private "
+            "addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7) are "
+            "allowed, because the proxy speaks plain HTTP without TLS and token, requests and "
+            f"restored answers would cross the network in clear. Set {ALLOW_PUBLIC_BIND_ENV}=1 "
+            "to accept the risk"
+        )
 
 
 def _upstream_allowed(url: str) -> bool:
@@ -178,6 +207,9 @@ def load_settings(env: Mapping[str, str] | None = None, **overrides: object) -> 
     allow_unauthenticated = environment.get(ALLOW_UNAUTHENTICATED_ENV)
     if allow_unauthenticated is not None:
         values["allow_unauthenticated"] = allow_unauthenticated.strip().lower() in TRUTHY_VALUES
+    allow_public_bind = environment.get(ALLOW_PUBLIC_BIND_ENV)
+    if allow_public_bind is not None:
+        values["allow_public_bind"] = allow_public_bind.strip().lower() in TRUTHY_VALUES
     unchecked_fields = environment.get(UNCHECKED_FIELDS_ENV)
     if unchecked_fields is not None:
         values["unchecked_fields"] = unchecked_fields

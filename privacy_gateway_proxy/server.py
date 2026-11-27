@@ -7,9 +7,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote
@@ -49,7 +50,15 @@ REQUEST_DROP_HEADERS = {
     "accept-encoding",
     "x-pgw-session",
     AUTH_HEADER,
+    "cookie",
+    "forwarded",
+    "x-real-ip",
+    "via",
 }
+REQUEST_DROP_PREFIXES = ("x-forwarded-",)
+UNSCANNED_HEADERS = frozenset({"x-api-key", "authorization"})
+UUID_HEADERS = frozenset({"x-claude-code-session-id", "x-client-request-id"})
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 RESPONSE_DROP_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 UPSTREAM_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 SESSION_CACHE_SIZE = 64
@@ -153,7 +162,7 @@ async def _dispatch(
         return _malformed(gateway, settings, trail, path, "query string is not allowed")
     if not (request.method == "POST" and path in TRANSFORMED_PATHS):
         key = session_key_for(request.headers, None, settings)
-        if not is_valid_key(key):
+        if key is not None and not is_valid_key(key):
             return _session_refused(gateway, settings, trail, short_path(path))
         blocked = _path_findings(request, gateway, sessions, key)
         if blocked:
@@ -161,6 +170,14 @@ async def _dispatch(
                 gateway, settings, trail, short_path(path),
                 f"request path contains sensitive data ({blocked})",
             )
+        headers = _request_headers(request.headers, None, settings)
+        session, release = _request_session(gateway, sessions, key)
+        try:
+            header_hits = _header_hits(headers, session, settings)
+        finally:
+            release()
+        if header_hits:
+            return _headers_blocked(gateway, settings, trail, short_path(path), header_hits)
     if request.method in CONTENT_METHODS:
         if request.method == "POST" and path in TRANSFORMED_PATHS:
             if request.headers.get("content-encoding"):
@@ -192,7 +209,7 @@ async def _dispatch(
 
 
 def _path_findings(
-    request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str
+    request: Request, gateway: Any, sessions: OrderedDict[str, Any], key: str | None
 ) -> str:
     """Classes found in the decoded path segments by the read-only scan, comma-joined."""
     leaves = [
@@ -200,7 +217,11 @@ def _path_findings(
         for index, segment in enumerate(unquote(request.url.path).split("/"))
         if segment and ID_SEGMENT_RE.fullmatch(segment) is None
     ]
-    hits = audit_trail.scan(_session_for(gateway, sessions, key), leaves) or []
+    session, release = _request_session(gateway, sessions, key)
+    try:
+        hits = audit_trail.scan(session, leaves) or []
+    finally:
+        release()
     return ", ".join(sorted({hit.data_class for hit in hits}))
 
 
@@ -248,9 +269,38 @@ async def _transformed(
     started = time.perf_counter()
     path = request.url.path
     key = session_key_for(request.headers, body, settings)
-    if not is_valid_key(key):
+    if key is not None and not is_valid_key(key):
         return _session_refused(gateway, settings, trail, path)
-    session = _session_for(gateway, sessions, key)
+    session, release = _request_session(gateway, sessions, key)
+    label = key if key is not None else f"request-{secrets.token_hex(8)}"
+    try:
+        response = await _forward(
+            request, body, settings, gateway, client, session, label, trail, tool_trail,
+            started, release,
+        )
+    except BaseException:
+        release()
+        raise
+    if not isinstance(response, StreamingResponse):
+        release()
+    return response
+
+
+async def _forward(
+    request: Request,
+    body: dict,
+    settings: ProxySettings,
+    gateway: Any,
+    client: httpx.AsyncClient,
+    session: Any,
+    key: str,
+    trail: RequestAuditLog,
+    tool_trail: RequestAuditLog,
+    started: float,
+    release: Callable[[], None],
+) -> Response:
+    """Pseudonymize, rescan, forward and restore one request; `release` ends a stream."""
+    path = request.url.path
     streaming = body.get("stream") is True
     include_system = settings.transform_system
     notice = settings.placeholder_notice
@@ -297,12 +347,20 @@ async def _transformed(
         record("blocked", "ok", **outcome)
         return _leak_response(LeakageError(audit_trail.as_leaks(blocking)))
 
+    forwarded = _request_headers(request.headers, len(payload), settings)
+    header_hits = _header_hits(forwarded, session, settings)
+    if header_hits:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        hits = [*rescan.hits, *header_hits]
+        record("blocked", "ok", **{**outcome, "rescan": audit_trail.Rescan("findings", hits)})
+        return _leak_response(LeakageError(audit_trail.as_leaks(header_hits)))
+
     _debug_dump(settings, key, new_body)
     upstream_request = client.build_request(
         "POST",
         _upstream_url(request, settings),
         content=payload,
-        headers=_request_headers(request.headers, len(payload), settings),
+        headers=forwarded,
     )
     try:
         response = await client.send(upstream_request, stream=True)
@@ -347,10 +405,16 @@ async def _transformed(
         if guard.entries:
             tool_trail.write(tool_policy.AUDIT_EVENT, guard.audit_fields(request_id))
 
+    def close_stream() -> None:
+        try:
+            audit_tools()
+        finally:
+            release()
+
     if streaming:
         restorer = _stream_restorer_factory(lenient.restore_text, guard)
         return StreamingResponse(
-            _restored_stream(response, restorer, audit_tools),
+            _restored_stream(response, restorer, close_stream),
             status_code=response.status_code,
             headers=headers,
         )
@@ -450,6 +514,35 @@ async def _raw_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _request_session(
+    gateway: Any, sessions: OrderedDict[str, Any], key: str | None
+) -> tuple[Any, Callable[[], None]]:
+    """The cached session of a key, or, without a key, a new session only for this request.
+
+    The second item purges that request session from the vault; it does nothing for a key.
+    """
+    if key is not None:
+        return _session_for(gateway, sessions, key), _keep
+    session = gateway.session()
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        purge = getattr(getattr(gateway, "vault", None), "purge", None)
+        session_id = getattr(session, "session_id", None)
+        if purge is not None and session_id:
+            purge(session_id)
+
+    return session, release
+
+
+def _keep() -> None:
+    """Release of a keyed session: it stays for the next request of that conversation."""
+
+
 def _session_for(gateway: Any, sessions: OrderedDict[str, Any], key: str) -> Any:
     session = sessions.pop(key, None)
     if session is None:
@@ -509,11 +602,54 @@ def _request_headers(
     headers: Mapping[str, str], content_length: int | None, settings: ProxySettings
 ) -> dict[str, str]:
     dropped = REQUEST_DROP_HEADERS | {settings.header_name.lower()}
-    forwarded = {name: value for name, value in headers.items() if name.lower() not in dropped}
+    forwarded = {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in dropped and not name.lower().startswith(REQUEST_DROP_PREFIXES)
+    }
     forwarded["accept-encoding"] = "identity"
     if content_length is not None:
         forwarded["content-length"] = str(content_length)
     return forwarded
+
+
+def _header_hits(
+    forwarded: Mapping[str, str], session: Any, settings: ProxySettings
+) -> list[audit_trail.Hit]:
+    """Findings of a blocking class in the values of the forwarded headers.
+
+    The upstream credentials (`x-api-key`, `authorization`) are not scanned, nor the client's
+    session and request id headers when they hold a plain UUID; with `PGW_PROXY_UNCHECKED_FIELDS=allow`
+    nothing is scanned. Headers are addressed by position, never by name.
+    """
+    if settings.unchecked_fields != UNCHECKED_BLOCK:
+        return []
+    leaves = [
+        TextRef(("headers", index), value)
+        for index, (name, value) in enumerate(forwarded.items())
+        if name.lower() not in UNSCANNED_HEADERS and not _known_header(name, value)
+    ]
+    hits = audit_trail.scan(session, leaves) or []
+    return [hit for hit in hits if hit.data_class in audit_trail.UNCHECKED_BLOCKING_CLASSES]
+
+
+def _known_header(name: str, value: str) -> bool:
+    return name.lower() in UUID_HEADERS and UUID_RE.fullmatch(value) is not None
+
+
+def _headers_blocked(
+    gateway: Any,
+    settings: ProxySettings,
+    trail: RequestAuditLog,
+    path: str,
+    hits: list[audit_trail.Hit],
+) -> Response:
+    """Refuse a forwarded request whose headers carry sensitive data, without an upstream call."""
+    started = time.perf_counter()
+    _audit(gateway, "-", path, 0, None, "failed", False, started, settings.transform_system)
+    rescan = audit_trail.Rescan("findings", hits, hits)
+    _record(trail, "-", path, False, started, "blocked", "ok", [], None, rescan=rescan)
+    return _leak_response(LeakageError(audit_trail.as_leaks(hits)))
 
 
 def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:

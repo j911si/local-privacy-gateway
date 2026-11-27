@@ -646,7 +646,10 @@ async def test_no_host_check_when_bound_to_a_public_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = ProxySettings(
-        upstream_base_url=UPSTREAM, listen_host="0.0.0.0", auth_token="tok-test"
+        upstream_base_url=UPSTREAM,
+        listen_host="0.0.0.0",
+        auth_token="tok-test",
+        allow_public_bind=True,
     )
     client, _, _ = build(monkeypatch, _recording_handler([]), settings=settings)
     async with client:
