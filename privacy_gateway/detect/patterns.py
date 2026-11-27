@@ -40,6 +40,8 @@ PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
 # number followed by its CVC): a failed check retries the prefixes that end before a separator.
 GROUPED_CLASSES = frozenset({"IBAN", "CREDIT_CARD", "DEBIT_CARD"})
 GROUP_SEPARATORS = " -"
+# Printed card formats a prefix must have: 4-4-4-4 (plus a short group), Amex 4-6-5, ungrouped.
+CARD_FORMAT_RE = re.compile(r"\d{4}(?:[ -]\d{4}){2}[ -]\d{1,4}|\d{4}[ -]\d{6}[ -]\d{5}|\d{13,19}")
 DIFF_HEADER_RE = re.compile(
     r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
 )
@@ -191,7 +193,11 @@ class PatternStage:
             return []
         labelled = "label" in match.re.groupindex and match.group("label") is not None
         if validator is not None and not labelled and not validator(value):
-            prefix = _valid_prefix(value, validator) if data_class.name in GROUPED_CLASSES else ""
+            prefix = (
+                _valid_prefix(value, validator, data_class.name)
+                if data_class.name in GROUPED_CLASSES
+                else ""
+            )
             if not prefix:
                 return []
             span = Span(span.start, span.start + len(prefix))
@@ -236,7 +242,7 @@ class PatternStage:
         ]
 
 
-def _valid_prefix(value: str, validator: Callable[[str], bool]) -> str:
+def _valid_prefix(value: str, validator: Callable[[str], bool], class_name: str) -> str:
     """The longest prefix that ends before a group separator and passes the check, or ""."""
     cut = len(value)
     while True:
@@ -244,5 +250,6 @@ def _valid_prefix(value: str, validator: Callable[[str], bool]) -> str:
         if cut <= 0:
             return ""
         prefix = value[:cut].rstrip(GROUP_SEPARATORS)
-        if prefix and validator(prefix):
+        card_shaped = class_name == "IBAN" or CARD_FORMAT_RE.fullmatch(prefix) is not None
+        if prefix and card_shaped and validator(prefix):
             return prefix
