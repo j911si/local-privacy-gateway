@@ -27,6 +27,11 @@ from privacy_gateway_proxy.transform import (
 AUDIT_ID_BYTES = 6
 AUDIT_ID_CACHE_SIZE = 4096
 BASE64_TYPE = "base64"
+BASE64_RE = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+ATTACHMENT_MEDIA_TYPES = {
+    "image": frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"}),
+    "document": frozenset({"application/pdf"}),
+}
 TIMEOUT = "timeout"
 OK = "ok"
 OK_WITH_UNCHECKED_FINDINGS = "ok_with_unchecked_findings"
@@ -264,14 +269,21 @@ def unchecked_leaves(unchecked: list[UncheckedRef]) -> list[TextRef]:
 
 
 def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
-    """String leaves except the `data` of a base64 source, which detection cannot scan fast.
+    """String leaves except the `data` of an attachment source, which detection cannot scan fast.
 
-    The input of a `tool_use` block is scanned with its keys, addressed by position.
+    Only the base64 `source` of an `image` or `document` block in a message (or in a
+    `tool_result` of one) with an allowed `media_type` and well-formed base64 is skipped;
+    any other `data` is scanned. The input of a `tool_use` block is scanned with its keys,
+    addressed by position.
     """
     if isinstance(value, dict):
         leaves: list[TextRef] = []
         for key, item in value.items():
-            if key == "data" and value.get("type") == BASE64_TYPE:
+            if key == "source" and _attachment_source(value, path):
+                data_path = (*path, key, "data")
+                leaves.extend(
+                    leaf for leaf in scannable_strings(item, (*path, key)) if leaf.path != data_path
+                )
                 continue
             if key == "input" and value.get("type") == "tool_use":
                 leaves.extend(collect_keyed(item, (*path, key)))
@@ -285,6 +297,35 @@ def scannable_strings(value: Any, path: Path = ()) -> list[TextRef]:
             for leaf in scannable_strings(item, (*path, index))
         ]
     return collect_strings(value, path)
+
+
+def _attachment_source(block: dict, path: Path) -> bool:
+    """True for a message block of an attachment type whose source is valid base64."""
+    block_type = block.get("type")
+    media_types = ATTACHMENT_MEDIA_TYPES.get(block_type) if isinstance(block_type, str) else None
+    source = block.get("source")
+    if media_types is None or not _block_position(path) or not isinstance(source, dict):
+        return False
+    media_type, data = source.get("media_type"), source.get("data")
+    return (
+        source.get("type") == BASE64_TYPE
+        and isinstance(media_type, str)
+        and media_type in media_types
+        and isinstance(data, str)
+        and len(data) % 4 == 0
+        and BASE64_RE.fullmatch(data) is not None
+    )
+
+
+def _block_position(path: Path) -> bool:
+    """True for `messages[i].content[j]` and `messages[i].content[j].content[k]`."""
+    if len(path) not in (4, 6) or path[0] != "messages" or not isinstance(path[1], int):
+        return False
+    rest = path[2:]
+    return all(
+        part == "content" if index % 2 == 0 else isinstance(part, int)
+        for index, part in enumerate(rest)
+    )
 
 
 def scan(
