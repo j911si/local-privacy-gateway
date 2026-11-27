@@ -88,7 +88,8 @@ def test_a_symlink_into_a_protected_root_is_resolved(root: str, tmp_path: Path) 
 
 
 def test_a_subprocess_env_without_the_test_home_is_a_violation(tmp_path: Path) -> None:
-    real = ("/home/someone",)
+    # The guard compares resolved paths; on macOS /home resolves to /System/Volumes/Data/home.
+    real = (os.path.realpath("/home/someone"),)
     assert violation("subprocess.Popen", ("x", [], None, {"PATH": "/bin"}), (), real)
     assert violation("subprocess.Popen", ("x", [], None, {"HOME": real[0]}), (), real)
     assert violation("subprocess.Popen", ("x", [], None, {"HOME": str(tmp_path)}), (), real) is None
