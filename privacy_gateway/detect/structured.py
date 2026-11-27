@@ -489,6 +489,28 @@ PARSERS = (
 )
 
 
+def uncontained(candidates: list[Finding]) -> list[Finding]:
+    """Candidates in order, without those inside the span of an earlier kept one."""
+    starts = sorted({candidate.span.start for candidate in candidates})
+    tree = [-1] * (len(starts) + 1)
+    kept: list[Finding] = []
+    for candidate in candidates:
+        span = candidate.span
+        index = bisect.bisect_right(starts, span.start)
+        widest = -1
+        while index > 0:
+            widest = max(widest, tree[index])
+            index -= index & -index
+        if widest >= span.end:
+            continue
+        kept.append(candidate)
+        index = bisect.bisect_left(starts, span.start) + 1
+        while index < len(tree):
+            tree[index] = max(tree[index], span.end)
+            index += index & -index
+    return kept
+
+
 class StructuredStage:
     """Parses structured formats and classifies their components."""
 
@@ -496,10 +518,7 @@ class StructuredStage:
 
     def run(self, text: str, config: Config, findings: list[Finding]) -> list[Finding]:
         """Return new parent findings whose components are attached as children."""
-        new: list[Finding] = []
-        for parser in PARSERS:
-            for candidate in parser(text, config):
-                if not any(kept.span.contains(candidate.span) for kept in new):
-                    new.append(candidate)
+        candidates = [candidate for parser in PARSERS for candidate in parser(text, config)]
+        new = uncontained(candidates)
         new.sort(key=lambda finding: (finding.span.start, -len(finding.span)))
         return new

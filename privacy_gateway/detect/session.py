@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import ClassRegistry
@@ -32,6 +33,9 @@ MIN_DIGITS_FOR_SWEEP = 6
 MIN_LENGTH_FOR_GLUED = 3
 LITERAL_ESCAPE_LETTERS = "ntr"
 PATTERN_CACHE_SIZE = 4096
+INDEX_FROM_SEARCHES = 32
+SPACE_RUN_RE = re.compile(r"\s+")
+_IKS_TO_UNKNOWN = str.maketrans("iks", "???")
 
 Known = tuple[str, str]
 Hit = tuple[Span, Known]
@@ -81,6 +85,127 @@ class _Substring:
     value: Known
     short_number: bool
     mostly_digits: bool
+    words: tuple[str, ...]
+    digits: str
+
+
+@cache
+def _digit_re() -> re.Pattern[str]:
+    """Every character for which `str.isdigit` is true."""
+    chars = (chr(code) for code in range(sys.maxunicode + 1))
+    return re.compile("[" + "".join(re.escape(char) for char in chars if char.isdigit()) + "]")
+
+
+class _Digits:
+    """The digits of a text in order, and where each wanted digit string occurs among them."""
+
+    def __init__(self, text: str, wanted: set[str]) -> None:
+        self.offsets = [match.start() for match in _digit_re().finditer(text)]
+        self.projection = "".join(text[index] for index in self.offsets)
+        self._found: dict[str, list[int]] | None = None
+        if len(wanted) >= INDEX_FROM_SEARCHES:
+            self._found = {digits: [] for digits in wanted}
+            for size in {len(digits) for digits in wanted}:
+                for start in range(len(self.projection) - size + 1):
+                    found = self._found.get(self.projection[start : start + size])
+                    if found is not None:
+                        found.append(start)
+
+    def occurrences(self, digits: str) -> list[int]:
+        """Every start of `digits` in the projection, overlapping ones included, ascending."""
+        if self._found is not None:
+            return self._found[digits]
+        found = []
+        start = self.projection.find(digits)
+        while start != -1:
+            found.append(start)
+            start = self.projection.find(digits, start + 1)
+        return found
+
+
+def _anchored_matches(
+    text: str,
+    pattern: re.Pattern[str],
+    words: tuple[str, ...],
+    digits: str,
+    index: _Digits,
+    spaces: dict[int, int],
+) -> list[re.Match[str]]:
+    """Exactly `pattern.finditer(text)` for words joined by `\\s+`, tried where `digits` occur.
+
+    Digits match only themselves and the words match fixed lengths, so the digits of a match
+    are `digits` in a row in the projection, and its start follows from where its first digit
+    sits: back over the word, then over each whitespace run and word before it.
+    """
+    word = next(index for index, part in enumerate(words) if any(c.isdigit() for c in part))
+    offset = next(index for index, char in enumerate(words[word]) if char.isdigit())
+    starts: list[int] = []
+    for occurrence in index.occurrences(digits):
+        start = index.offsets[occurrence] - offset
+        for before in reversed(words[:word]):
+            if start <= 0 or not text[start - 1].isspace():
+                start = -1
+                break
+            start = _space_start(text, start, spaces) - len(before)
+        if start >= 0:
+            starts.append(start)
+    return _first_matches(pattern, text, starts)
+
+
+def _first_matches(pattern: re.Pattern[str], text: str, starts: list[int]) -> list[re.Match[str]]:
+    """What `finditer` yields when every start of a match is among `starts`."""
+    found: list[re.Match[str]] = []
+    end = 0
+    for start in sorted(set(starts)):
+        if start < end:
+            continue
+        match = pattern.match(text, start)
+        if match is not None:
+            found.append(match)
+            end = match.end()
+    return found
+
+
+def _coarse_fold(text: str) -> str:
+    """A fold of the same length under which characters `re.IGNORECASE` pairs are equal.
+
+    Every non-ASCII character becomes `?`, and so do `i`, `k` and `s`, the only ASCII letters
+    that match a non-ASCII character (`ı`, `İ`, the Kelvin sign, `ſ`).
+    """
+    return text.encode("ascii", "replace").decode("ascii").lower().translate(_IKS_TO_UNKNOWN)
+
+
+class _FirstWords:
+    """Where a value of words joined by `\\s+` can start: its first word before a space run.
+
+    `\\s+` takes the whole run, as the next word starts with a non-space character, so the
+    first word ends where a whitespace run starts.
+    """
+
+    def __init__(self, text: str, values: list[tuple[str, ...]]) -> None:
+        folded = _coarse_fold(text)
+        runs = [match.start() for match in SPACE_RUN_RE.finditer(text)]
+        wanted = {(len(words[0]), _coarse_fold(words[0])) for words in values}
+        self._starts: dict[tuple[int, str], list[int]] = {}
+        for size in {size for size, _ in wanted}:
+            for run in runs:
+                key = (size, folded[run - size : run])
+                if run >= size and key in wanted:
+                    self._starts.setdefault(key, []).append(run - size)
+
+    def starts(self, words: tuple[str, ...]) -> list[int]:
+        """Every position where the first word of `words` may start a match."""
+        return self._starts.get((len(words[0]), _coarse_fold(words[0])), [])
+
+
+def _spaced_matches(
+    text: str, rules: list[tuple[re.Pattern[str], tuple[str, ...]]]
+) -> list[list[re.Match[str]]]:
+    """`pattern.finditer(text)` per rule of words joined by `\\s+`, through one index if many."""
+    if len(rules) < INDEX_FROM_SEARCHES:
+        return [list(pattern.finditer(text)) for pattern, _ in rules]
+    index = _FirstWords(text, [words for _, words in rules])
+    return [_first_matches(pattern, text, index.starts(words)) for pattern, words in rules]
 
 
 class KnownMatcher:
@@ -90,7 +215,7 @@ class KnownMatcher:
         self._values: dict[str, Known] = {}
         terms: list[tuple[str, str]] = []
         genitive: list[str] = []
-        self._spaced: list[tuple[re.Pattern[str], Known]] = []
+        self._spaced: list[tuple[re.Pattern[str], Known, tuple[str, ...], str]] = []
         self._substrings: list[_Substring] = []
         self._by_digits: dict[str, Known] = {}
         self._signed_digits: set[str] = set()
@@ -109,7 +234,10 @@ class KnownMatcher:
                 if allows:
                     genitive.append(folded)
             else:
-                self._spaced.append((_word_pattern(tuple(words), allows), value))
+                digits = "".join(char for char in key if char.isdigit())
+                self._spaced.append(
+                    (_word_pattern(tuple(words), allows), value, tuple(words), digits)
+                )
             self._add_digit_rules(key, tuple(words), value)
         self._trie = TrieMatcher(terms, case_insensitive=True, genitive=genitive) if terms else None
 
@@ -130,6 +258,8 @@ class KnownMatcher:
                     value,
                     key.isdigit() and len(key) < MIN_DIGITS_FOR_DIGIT_SEARCH,
                     mostly_digits(key),
+                    words,
+                    digits,
                 )
             )
 
@@ -151,13 +281,27 @@ class KnownMatcher:
         if self._trie is not None:
             for span, folded in self._trie.find(work):
                 candidates.append((span.start, span.end, self._values[folded]))
-        for pattern, value in self._spaced:
-            candidates.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
-        candidates.extend((s.start, s.end, v) for s, v in self._digit_hits(work))
-        for substring in self._substrings:
-            for match in substring.pattern.finditer(work):
-                if not self._inside_longer_number(work, match.start(), match.end(), substring):
-                    candidates.append((match.start(), match.end(), substring.value))
+        wanted = {*self._by_digits, *(rule.digits for rule in self._substrings)}
+        wanted.update(digits for *_, digits in self._spaced if digits)
+        index = _Digits(work, wanted) if wanted else None
+        spaces: dict[int, int] = {}
+        plain = iter(
+            _spaced_matches(work, [(rule[0], rule[2]) for rule in self._spaced if not rule[3]])
+        )
+        for pattern, value, words, digits in self._spaced:
+            if digits and index is not None:
+                matches = _anchored_matches(work, pattern, words, digits, index, spaces)
+            else:
+                matches = next(plain)
+            candidates.extend((m.start(), m.end(), value) for m in matches)
+        if index is not None:
+            candidates.extend((s.start, s.end, v) for s, v in self._digit_hits(work, index))
+            for rule in self._substrings:
+                for m in _anchored_matches(
+                    work, rule.pattern, rule.words, rule.digits, index, spaces
+                ):
+                    if not self._inside_longer_number(work, m.start(), m.end(), rule):
+                        candidates.append((m.start(), m.end(), rule.value))
         candidates.sort(key=lambda candidate: candidate[0] - candidate[1])
         for start, end, value in candidates:
             add(start, end, value)
@@ -170,16 +314,13 @@ class KnownMatcher:
             return digit_after or (start > 0 and text[start - 1].isdigit())
         return rule.mostly_digits and digit_after
 
-    def _digit_hits(self, text: str) -> list[Hit]:
+    def _digit_hits(self, text: str, index: _Digits) -> list[Hit]:
         """Known numbers that differ from the text only in grouping."""
-        if not self._by_digits:
-            return []
-        offsets = [index for index, char in enumerate(text) if char.isdigit()]
-        projection = "".join(text[index] for index in offsets)
+        offsets = index.offsets
         result: list[Hit] = []
         for digits, value in self._by_digits.items():
-            for match in re.finditer(re.escape(digits), projection):
-                first, last = offsets[match.start()], offsets[match.end() - 1] + 1
+            for occurrence in _non_overlapping(index.occurrences(digits), len(digits)):
+                first, last = offsets[occurrence], offsets[occurrence + len(digits) - 1] + 1
                 if not compact_digit_run(text, first, last):
                     continue
                 lead = first
@@ -197,6 +338,28 @@ class KnownMatcher:
                     span = Span(span.start - 1, span.end)
                 result.append((span, value))
         return result
+
+
+def _non_overlapping(starts: list[int], length: int) -> list[int]:
+    """The starts `re.finditer` keeps for a literal of `length`: leftmost, then after it."""
+    kept: list[int] = []
+    end = 0
+    for start in starts:
+        if start >= end:
+            kept.append(start)
+            end = start + length
+    return kept
+
+
+def _space_start(text: str, end: int, memo: dict[int, int]) -> int:
+    """Start of the whitespace run that ends at `end`."""
+    start = memo.get(end)
+    if start is None:
+        start = end
+        while start > 0 and text[start - 1].isspace():
+            start -= 1
+        memo[end] = start
+    return start
 
 
 def _lower(text: str) -> str:
@@ -242,7 +405,7 @@ class SubstringSweep:
 
     def __init__(self, known: Mapping[str, Known]) -> None:
         self._values: dict[str, Known] = {}
-        self._spaced: list[tuple[re.Pattern[str], Known]] = []
+        self._spaced: list[tuple[re.Pattern[str], Known, tuple[str, ...]]] = []
         self._short_mixed: set[str] = set()
         self._glued_only: set[str] = set()
         for form, value in known.items():
@@ -256,7 +419,7 @@ class SubstringSweep:
             if len(key) < MIN_LENGTH_FOR_SWEEP:
                 self._glued_only.add(key)
             if len(words) > 1:
-                self._spaced.append((_substring_pattern(tuple(words)), value))
+                self._spaced.append((_substring_pattern(tuple(words)), value, tuple(words)))
 
     @staticmethod
     def _long_enough(key: str) -> bool:
@@ -286,8 +449,9 @@ class SubstringSweep:
             while start != -1:
                 raw.append((start, start + len(key), value))
                 start = lowered.find(key, start + 1)
-        for pattern, value in self._spaced:
-            raw.extend((m.start(), m.end(), value) for m in pattern.finditer(work))
+        spaced = _spaced_matches(work, [(pattern, words) for pattern, _, words in self._spaced])
+        for (_, value, _), matches in zip(self._spaced, spaced, strict=True):
+            raw.extend((m.start(), m.end(), value) for m in matches)
         raw = [hit for hit in raw if not tokens.overlaps(Span(hit[0], hit[1]))]
         raw.sort(key=lambda hit: (hit[0] - hit[1], hit[0]))
         chosen: list[tuple[int, int, Known]] = []
