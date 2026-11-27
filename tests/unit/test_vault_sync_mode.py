@@ -32,3 +32,28 @@ def test_config_warning_names_no_session(
         assert session not in err
     finally:
         vault.close()
+
+
+def test_purge_commits_with_full_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = Vault(tmp_path / "vault.db", tmp_path / "vault.key")
+    try:
+        session = vault.create_session("", "cfg")
+        seen: list[int] = []
+        commit = vault._conn.commit
+
+        class Spy:
+            def __getattr__(self, name: str) -> object:
+                return getattr(conn, name)
+
+            def commit(self) -> None:
+                seen.append(conn.execute("PRAGMA synchronous").fetchone()[0])
+                commit()
+
+        conn = vault._conn
+        monkeypatch.setattr(vault, "_conn", Spy())
+        vault.purge(session)
+        assert seen[0] == 2
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        monkeypatch.undo()
+        vault.close()

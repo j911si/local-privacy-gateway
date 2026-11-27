@@ -403,12 +403,22 @@ class Vault:
 
     def purge(self, session_id: str) -> None:
         """Remove a session with all its mappings and surface forms."""
-        self._conn.execute("DELETE FROM surface_forms WHERE session_id = ?", (session_id,))
-        self._conn.execute("DELETE FROM mappings WHERE session_id = ?", (session_id,))
-        self._conn.execute("DELETE FROM pending_mappings WHERE session_id = ?", (session_id,))
-        self._conn.execute("DELETE FROM session_revisions WHERE session_id = ?", (session_id,))
-        self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        self._conn.commit()
+        # ponytail: the deletion gets its own fsync; NORMAL would leave it to a checkpoint that
+        # a reader on another connection can block.
+        self._conn.execute("PRAGMA synchronous=FULL")
+        try:
+            self._conn.execute("DELETE FROM surface_forms WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM mappings WHERE session_id = ?", (session_id,))
+            self._conn.execute(
+                "DELETE FROM pending_mappings WHERE session_id = ?", (session_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM session_revisions WHERE session_id = ?", (session_id,)
+            )
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self._conn.commit()
+        finally:
+            self._conn.execute("PRAGMA synchronous=NORMAL")
         self._reclaim()
 
     def purge_older_than(self, days: int) -> int:

@@ -223,9 +223,9 @@ def entry(
                 for leak in failed_leaks
             ]
         fields.append(item)
-    counts = _counts_by_prefix(observed or [])
-    for ref in unchecked:
-        fields.append(_unchecked(ref, counts))
+    counts = _counts_per_ref(unchecked, observed or [])
+    for ref, ref_counts in zip(unchecked, counts, strict=True):
+        fields.append(_unchecked(ref, ref_counts))
     if verdict == OK and any(item["observed"] for item in fields if item["status"] == "unchecked"):
         verdict = OK_WITH_UNCHECKED_FINDINGS
     return {
@@ -370,17 +370,34 @@ def _finding(item: FieldFinding) -> dict[str, object]:
     return record
 
 
-def _counts_by_prefix(observed: list[Hit]) -> dict[tuple, Counter[str]]:
-    """Per path prefix, how often each class was observed at or below it."""
-    counts: dict[tuple, Counter[str]] = {}
+def _counts_per_ref(unchecked: list[UncheckedRef], observed: list[Hit]) -> list[Counter[str]]:
+    """Per unchecked ref, how often each class was observed at or below its path.
+
+    The ref paths form a trie; each hit walks down its own path once, so the cost is linear
+    in the summed path lengths, whatever the nesting depth.
+    """
+    end = object()
+    root: dict = {}
+    counts = [Counter[str]() for _ in unchecked]
+    for position, ref in enumerate(unchecked):
+        node = root
+        for part in ref.path:
+            node = node.setdefault(part, {})
+        node.setdefault(end, []).append(position)
     for hit in observed:
-        for width in range(len(hit.path) + 1):
-            counts.setdefault(hit.path[:width], Counter())[hit.data_class] += 1
+        node = root
+        for position in node.get(end, []):
+            counts[position][hit.data_class] += 1
+        for part in hit.path:
+            node = node.get(part)
+            if node is None:
+                break
+            for position in node.get(end, []):
+                counts[position][hit.data_class] += 1
     return counts
 
 
-def _unchecked(ref: UncheckedRef, by_prefix: dict[tuple, Counter[str]]) -> dict[str, object]:
-    counts = by_prefix.get(tuple(ref.path), Counter())
+def _unchecked(ref: UncheckedRef, counts: Counter[str]) -> dict[str, object]:
     return {
         "path": format_path(ref.path),
         "status": "unchecked",
