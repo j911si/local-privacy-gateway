@@ -283,3 +283,32 @@ async def test_safeguards_context_is_pseudonymized_not_blocked(
     forwarded = json.loads(sent[0])["safeguards"]
     assert forwarded[0]["type"] == "synthetic_classifier"
     assert set(forwarded[0]) == {"type", "classifier_context"}
+
+
+@pytest.mark.asyncio
+async def test_public_addresses_in_claude_code_tool_text_do_not_block(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["tools"][0]["description"] += (
+        " End commits with Co-Authored-By: Claude <noreply@anthropic.com>."
+        " Remotes look like git@github.com:org/repo.git."
+    )
+
+    status, data, _, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 200, data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", [MAIL, "jane.doe@anthropic.com", "noreply@anthropic.com.evil.test"])
+async def test_other_addresses_in_tool_text_still_block(
+    gateway: Gateway, tmp_path: Path, address: str
+) -> None:
+    body = claude_code_body("Working directory: /srv/projekt", stream=False)
+    body["tools"][0]["description"] += f" Contact {address} for help."
+
+    status, _, sent, _ = await _send(gateway, tmp_path, body)
+
+    assert status == 422
+    assert sent == []
