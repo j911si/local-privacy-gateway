@@ -53,6 +53,8 @@ SCHEMA_KEYS = frozenset(
         "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems",
         "maxItems", "uniqueItems", "additionalProperties", "anyOf", "oneOf", "allOf", "not",
         "examples", "nullable", "propertyNames", "patternProperties",
+        # the proxy's own label for request headers in audit paths
+        "headers",
     }
 )
 

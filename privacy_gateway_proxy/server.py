@@ -50,7 +50,15 @@ REQUEST_DROP_HEADERS = {
     "accept-encoding",
     "x-pgw-session",
     AUTH_HEADER,
+    "cookie",
+    "forwarded",
+    "x-real-ip",
+    "via",
 }
+REQUEST_DROP_PREFIXES = ("x-forwarded-",)
+UNSCANNED_HEADERS = frozenset({"x-api-key", "authorization"})
+UUID_HEADERS = frozenset({"x-claude-code-session-id", "x-client-request-id"})
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 RESPONSE_DROP_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 UPSTREAM_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 SESSION_CACHE_SIZE = 64
@@ -162,6 +170,14 @@ async def _dispatch(
                 gateway, settings, trail, short_path(path),
                 f"request path contains sensitive data ({blocked})",
             )
+        headers = _request_headers(request.headers, None, settings)
+        session, release = _request_session(gateway, sessions, key)
+        try:
+            header_hits = _header_hits(headers, session, settings)
+        finally:
+            release()
+        if header_hits:
+            return _headers_blocked(gateway, settings, trail, short_path(path), header_hits)
     if request.method in CONTENT_METHODS:
         if request.method == "POST" and path in TRANSFORMED_PATHS:
             if request.headers.get("content-encoding"):
@@ -331,12 +347,20 @@ async def _forward(
         record("blocked", "ok", **outcome)
         return _leak_response(LeakageError(audit_trail.as_leaks(blocking)))
 
+    forwarded = _request_headers(request.headers, len(payload), settings)
+    header_hits = _header_hits(forwarded, session, settings)
+    if header_hits:
+        _audit(gateway, key, path, fields, session, "failed", streaming, started, include_system)
+        hits = [*rescan.hits, *header_hits]
+        record("blocked", "ok", **{**outcome, "rescan": audit_trail.Rescan("findings", hits)})
+        return _leak_response(LeakageError(audit_trail.as_leaks(header_hits)))
+
     _debug_dump(settings, key, new_body)
     upstream_request = client.build_request(
         "POST",
         _upstream_url(request, settings),
         content=payload,
-        headers=_request_headers(request.headers, len(payload), settings),
+        headers=forwarded,
     )
     try:
         response = await client.send(upstream_request, stream=True)
@@ -578,11 +602,54 @@ def _request_headers(
     headers: Mapping[str, str], content_length: int | None, settings: ProxySettings
 ) -> dict[str, str]:
     dropped = REQUEST_DROP_HEADERS | {settings.header_name.lower()}
-    forwarded = {name: value for name, value in headers.items() if name.lower() not in dropped}
+    forwarded = {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in dropped and not name.lower().startswith(REQUEST_DROP_PREFIXES)
+    }
     forwarded["accept-encoding"] = "identity"
     if content_length is not None:
         forwarded["content-length"] = str(content_length)
     return forwarded
+
+
+def _header_hits(
+    forwarded: Mapping[str, str], session: Any, settings: ProxySettings
+) -> list[audit_trail.Hit]:
+    """Findings of a blocking class in the values of the forwarded headers.
+
+    The upstream credentials (`x-api-key`, `authorization`) are not scanned, nor the client's
+    session and request id headers when they hold a plain UUID; with `PGW_PROXY_UNCHECKED_FIELDS=allow`
+    nothing is scanned. Headers are addressed by position, never by name.
+    """
+    if settings.unchecked_fields != UNCHECKED_BLOCK:
+        return []
+    leaves = [
+        TextRef(("headers", index), value)
+        for index, (name, value) in enumerate(forwarded.items())
+        if name.lower() not in UNSCANNED_HEADERS and not _known_header(name, value)
+    ]
+    hits = audit_trail.scan(session, leaves) or []
+    return [hit for hit in hits if hit.data_class in audit_trail.UNCHECKED_BLOCKING_CLASSES]
+
+
+def _known_header(name: str, value: str) -> bool:
+    return name.lower() in UUID_HEADERS and UUID_RE.fullmatch(value) is not None
+
+
+def _headers_blocked(
+    gateway: Any,
+    settings: ProxySettings,
+    trail: RequestAuditLog,
+    path: str,
+    hits: list[audit_trail.Hit],
+) -> Response:
+    """Refuse a forwarded request whose headers carry sensitive data, without an upstream call."""
+    started = time.perf_counter()
+    _audit(gateway, "-", path, 0, None, "failed", False, started, settings.transform_system)
+    rescan = audit_trail.Rescan("findings", hits, hits)
+    _record(trail, "-", path, False, started, "blocked", "ok", [], None, rescan=rescan)
+    return _leak_response(LeakageError(audit_trail.as_leaks(hits)))
 
 
 def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
