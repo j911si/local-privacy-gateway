@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 import re
@@ -18,8 +19,7 @@ from privacy_gateway.audit import AuditLog
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config, load_config
 from privacy_gateway.detect import Pipeline
-from privacy_gateway.detect.normalize import offset_map
-from privacy_gateway.detect.patterns import PatternStage
+from privacy_gateway.detect.dictionaries import TrieMatcher
 from privacy_gateway.detect.public import is_public_reference
 from privacy_gateway.detect.spans import TOKEN_ATTRIBUTE, SpanIndex
 from privacy_gateway.leakage import (
@@ -44,7 +44,7 @@ from privacy_gateway.model import (
     VaultEntry,
     VaultError,
 )
-from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
+from privacy_gateway.pseudonymize import PseudonymizedText, TokenAssignment, pseudonymize_text
 from privacy_gateway.restore import restore_text
 from privacy_gateway.vault import Vault, Write
 
@@ -57,7 +57,6 @@ AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
 STALE_REVISION = -1
 REDACTED_TRIM = " \t\r\n\"'`,;"
-REDACTED_RUN = re.compile(r"[^\W_]+")
 
 
 class Gateway:
@@ -67,7 +66,6 @@ class Gateway:
         self.config = config if isinstance(config, Config) else load_config(config, env=os.environ)
         self.audit = AuditLog(self.config.audit.path)
         self._pipeline = Pipeline(self.config)
-        self._patterns = PatternStage()
         self._vault: Vault | None = None
         self._audit_ids: OrderedDict[str, str] = OrderedDict()
 
@@ -263,7 +261,7 @@ class GatewaySession:
                     text, report, self._gateway.config, counters=self._counters
                 )
                 self._learn_redacted(text, report, redacted)
-                self._write(text, pseudonymized, written, reused, redacted)
+                self._write(text, report, pseudonymized, written, reused, redacted)
                 try:
                     check_leakage(
                         pseudonymized.text,
@@ -396,6 +394,7 @@ class GatewaySession:
     def _write(
         self,
         text: str,
+        report: DetectionReport,
         pseudonymized: PseudonymizedText,
         written: list[str],
         reused: list[str],
@@ -412,6 +411,8 @@ class GatewaySession:
             self._known_cache = None
             self._values = None
             self._rescans.clear()
+        fresh = [a for a in pseudonymized.assignments if a.token not in self._entries]
+        masks = self._redacted_spans(text, report, fresh, redacted)
         for assignment in pseudonymized.assignments:
             first = assignment.spans[0]
             value = text[first.start : first.end]
@@ -419,7 +420,7 @@ class GatewaySession:
                 reused.append(assignment.token)
                 continue
             original = value
-            value = self._without_redacted(value, redacted)
+            value = _masked(text, first, masks.get(assignment.token, []))
             stored = self._gateway.vault.store(
                 self.session_id,
                 assignment.token,
@@ -440,54 +441,56 @@ class GatewaySession:
             if value != original:
                 self._masked[original] = (assignment.data_class, assignment.token)
 
-    def _without_redacted(self, value: str, learned: list[str]) -> str:
-        """`value` with every redacted value inside it replaced by its marker.
+    def _redacted_spans(
+        self,
+        text: str,
+        report: DetectionReport,
+        fresh: list[TokenAssignment],
+        learned: list[str],
+    ) -> dict[str, list[tuple[Span, str]]]:
+        """Spans of redacted values inside each value about to be stored, keyed by token.
 
         A tokenized finding can enclose a value of a redacted class (`?pin=4711` in a URL); the
         overlap resolution keeps only the larger finding, so the vault would get the secret.
+        The spans come from the redacted findings the detection had before that resolution
+        (which covers every value redacted in earlier calls) and from one whole-word trie over
+        the values this call learned, so the cost grows with the text, not with the session.
         """
+        if not fresh:
+            return {}
         registry = self._gateway.config.registry
-        mapping = offset_map(value)
-        work = value if mapping is None else mapping.text
-        spans: list[tuple[Span, str]] = []
-        for finding in self._gateway._patterns.run(work, self._gateway.config, []):
-            data_class = registry.get(finding.data_class)
-            if data_class.policy is not Policy.REDACT:
-                continue
-            span = finding.span if mapping is None else mapping.original(finding.span)
-            secret = value[span.start : span.end].strip(REDACTED_TRIM)
-            if not secret:
-                continue
-            spans.append((span, data_class.name))
-            if secret not in self._redacted:
-                self._redacted[secret] = data_class.name
-                learned.append(secret)
-                self._known_cache = None
-                self._known_changed()
-        for match in REDACTED_RUN.finditer(value):
-            data_class_name = self._redacted.get(match.group(0))
-            if data_class_name is not None:
-                spans.append((Span(match.start(), match.end()), data_class_name))
-        for secret, data_class_name in self._redacted.items():
-            if REDACTED_RUN.fullmatch(secret) or secret not in value:
-                continue
-            start = value.find(secret)
-            while start != -1:
-                spans.append((Span(start, start + len(secret)), data_class_name))
-                start = value.find(secret, start + 1)
-        if not spans:
-            return value
-        parts: list[str] = []
-        position = 0
-        for span, data_class_name in sorted(spans, key=lambda item: (item[0].start, -item[0].end)):
-            if span.end <= position:
-                continue
-            parts.append(value[position : max(position, span.start)])
-            if span.start >= position:
-                parts.append(redacted_token(data_class_name))
-            position = span.end
-        parts.append(value[position:])
-        return "".join(parts)
+        redactions = sorted(report.redactions, key=lambda finding: finding.span.start)
+        starts = [finding.span.start for finding in redactions]
+        reach = max((len(finding.span) for finding in redactions), default=0)
+        masks: dict[str, list[tuple[Span, str]]] = {}
+        count = len(learned)
+        for assignment in fresh:
+            first = assignment.spans[0]
+            low = bisect.bisect_left(starts, first.start - reach)
+            high = bisect.bisect_left(starts, first.end)
+            for finding in redactions[low:high]:
+                span = Span(max(finding.span.start, first.start), min(finding.span.end, first.end))
+                if span.start >= span.end:
+                    continue
+                masks.setdefault(assignment.token, []).append((span, finding.data_class))
+                secret = text[finding.span.start : finding.span.end].strip(REDACTED_TRIM)
+                if secret and secret not in self._redacted:
+                    self._redacted[secret] = registry.get(finding.data_class).name
+                    learned.append(secret)
+        if len(learned) > count:
+            self._known_cache = None
+            self._known_changed()
+        if learned:
+            matcher = TrieMatcher(
+                [(value, self._redacted[value]) for value in learned if value in self._redacted],
+                case_insensitive=False,
+            )
+            for assignment in fresh:
+                first = assignment.spans[0]
+                for hit, data_class in matcher.find(text[first.start : first.end]):
+                    span = Span(first.start + hit.start, first.start + hit.end)
+                    masks.setdefault(assignment.token, []).append((span, data_class))
+        return masks
 
     def _confirm(self, tokens: list[str]) -> None:
         """Make every mapping the output hands out permanent before the output leaves."""
@@ -563,7 +566,7 @@ class GatewaySession:
         residue = replace(report, findings=kept)
         learned = pseudonymize_text(output, residue, self._gateway.config, counters=self._counters)
         self._learn_redacted(output, residue, redacted)
-        self._write(output, learned, written, reused, redacted)
+        self._write(output, residue, learned, written, reused, redacted)
         return self._generation != generation
 
     def _rollback(
@@ -648,6 +651,23 @@ def _with_glued_short(
         return report
     findings = sorted([*report.findings, *added], key=lambda finding: finding.span.start)
     return replace(report, findings=findings)
+
+
+def _masked(text: str, value_span: Span, spans: list[tuple[Span, str]]) -> str:
+    """The value at `value_span` with each span (inside it) replaced by its redaction marker."""
+    if not spans:
+        return text[value_span.start : value_span.end]
+    parts: list[str] = []
+    position = value_span.start
+    for span, data_class in sorted(spans, key=lambda item: (item[0].start, -item[0].end)):
+        if span.end <= position:
+            continue
+        if span.start >= position:
+            parts.append(text[position : span.start])
+            parts.append(redacted_token(data_class))
+        position = span.end
+    parts.append(text[position : value_span.end])
+    return "".join(parts)
 
 
 def _ignored(registry: ClassRegistry, data_class: str) -> bool:

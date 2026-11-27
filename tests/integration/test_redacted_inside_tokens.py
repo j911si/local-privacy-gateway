@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import signal
 import time
 from collections.abc import Iterator
@@ -10,6 +11,7 @@ from types import FrameType
 import pytest
 
 from privacy_gateway import Gateway
+from privacy_gateway.pseudonymize import pseudonymize_text
 
 PIN = "482913"
 PATH_TEXT = f"PIN: {PIN}. Link: https://bank.example/pin/{PIN}/confirm"
@@ -106,3 +108,43 @@ def test_masking_scales_linearly(gateway: Gateway, time_limit: None) -> None:
     large = min(_seconds(gateway, f"scale-large-{run}", _many_pins(400)) for run in range(2))
     print(f"masking: n=100 {small:.3f}s, n=400 {large:.3f}s, factor {large / small:.2f}")
     assert large / small < SCALE_FACTOR
+
+
+def _masking_seconds(gateway: Gateway, key: str, values: int, lines: int) -> float:
+    """Time of the masking step alone: `values` learned passwords, `lines` URLs to store."""
+    session = gateway.session(key)
+    learned = [f"Pw{index:06d}!x" for index in range(values)]
+    for value in learned:
+        session._redacted[value] = "PASSWORD"
+    text = "\n".join(
+        f"Link: https://bank.example/u/{learned[index % values]}/r{index}?pin={1000 + index % 9000}"
+        for index in range(lines)
+    )
+    report = gateway._pipeline.run(text)
+    fresh = pseudonymize_text(text, report, gateway.config, counters={}).assignments
+    gc.collect()
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        masks = session._redacted_spans(text, report, fresh, list(learned))
+        elapsed = time.perf_counter() - started
+    finally:
+        gc.enable()
+    assert len(masks) == len(fresh) == lines
+    return elapsed
+
+
+def test_masking_cost_does_not_grow_with_the_number_of_redacted_values(
+    gateway: Gateway, time_limit: None
+) -> None:
+    few = min(_masking_seconds(gateway, f"k-small-{run}", 2_000, 2_000) for run in range(3))
+    many = min(_masking_seconds(gateway, f"k-large-{run}", 8_000, 2_000) for run in range(3))
+    print(f"masking by values: k=2000 {few:.3f}s, k=8000 {many:.3f}s, factor {many / few:.2f}")
+    assert many / few < SCALE_FACTOR
+
+
+def test_masking_cost_grows_linearly_with_the_text(gateway: Gateway, time_limit: None) -> None:
+    short = min(_masking_seconds(gateway, f"l-small-{run}", 500, 2_000) for run in range(3))
+    long = min(_masking_seconds(gateway, f"l-large-{run}", 500, 8_000) for run in range(3))
+    print(f"masking by text: n=2000 {short:.3f}s, n=8000 {long:.3f}s, factor {long / short:.2f}")
+    assert long / short < SCALE_FACTOR
