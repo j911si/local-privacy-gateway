@@ -134,6 +134,7 @@ from privacy_gateway import Gateway
 ready, go = Path(sys.argv[1]), Path(sys.argv[2])
 with Gateway() as gateway:
     session = gateway.session(sys.argv[3])
+    session._refresh = lambda: None  # the other process writes after this one looked
     ready.touch()
     while not go.exists():
         time.sleep(0.001)
@@ -142,6 +143,7 @@ with Gateway() as gateway:
         results["b"] = session.pseudonymize(sys.argv[4])
     except Exception as exc:
         results["b_error"] = type(exc).__name__
+    del session._refresh
     results["c"] = session.pseudonymize(sys.argv[5])
 print(json.dumps(results))
 """

@@ -106,9 +106,11 @@ def test_session_reloads_the_vault_after_a_token_conflict(gateway_env: None) -> 
         session_a = first.session(KEY)
         session_b = second.session(KEY)
         out_a = session_a.pseudonymize(letter_a)
+        session_b._refresh = lambda: None  # A wrote after B looked at the vault revision
 
         with pytest.raises(VaultError) as excinfo:
             session_b.pseudonymize(letter_b)
+        del session_b._refresh
         assert "Schneider" not in str(excinfo.value)
         assert "Müller" not in str(excinfo.value)
 
@@ -149,8 +151,10 @@ def test_rollback_of_a_second_session_keeps_the_mapping_the_first_one_issued(
         session_a = gateway.session(KEY)
         session_b = gateway.session(KEY)
         out_a = session_a.pseudonymize(letter_a)
+        session_b._refresh = lambda: None  # A wrote after B looked at the vault revision
         with pytest.raises(VaultError):
             session_b.pseudonymize(letter_b)
+        del session_b._refresh
         out_c = session_b.pseudonymize(letter_c)
     with Gateway() as fresh:
         assert fresh.restore(out_a, session_a.session_id, mode="lenient").text == letter_a

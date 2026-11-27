@@ -44,7 +44,7 @@ from privacy_gateway.model import (
 )
 from privacy_gateway.pseudonymize import PseudonymizedText, pseudonymize_text
 from privacy_gateway.restore import restore_text
-from privacy_gateway.vault import Vault
+from privacy_gateway.vault import Vault, Write
 
 PSEUDONYMIZE_STAGE = "pseudonymize"
 SESSION_STAGE = "session_pseudonymize"
@@ -53,6 +53,7 @@ RESCAN_CACHE_SIZE = 1024
 AUDIT_ID_BYTES = 6
 AUDIT_ID_CACHE_SIZE = 4096
 MAX_PASSES = 4
+STALE_REVISION = -1
 REDACTED_TRIM = " \t\r\n\"'`,;"
 
 
@@ -174,12 +175,14 @@ class GatewaySession:
     A cached result was leak-checked when it was first produced, so a repeat of the same
     text is returned unchanged without re-running the pipeline or the leak check. The cache is
     dropped whenever the set of known values changes, because an earlier result may then
-    still carry a value that is only known now.
+    still carry a value that is only known now. Before each call the session compares the vault
+    revision of its mappings and reloads them when another instance changed them.
     """
 
     def __init__(self, gateway: Gateway, session_id: str) -> None:
         self.session_id = session_id
         self._gateway = gateway
+        self._revision = gateway.vault.revision(session_id)
         self._entries: dict[str, VaultEntry] = gateway.vault.load(session_id)
         self._counters: dict[str, int] = gateway.vault.max_counters(session_id)
         self._results: OrderedDict[str, tuple[str, list[FieldFinding]]] = OrderedDict()
@@ -202,6 +205,7 @@ class GatewaySession:
     def pseudonymize_report(self, text: str) -> tuple[str, list[FieldFinding]]:
         """Pseudonymized text plus its value-free findings, offsets in the original text."""
         started = time.perf_counter()
+        self._refresh()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._results.get(digest)
         if cached is not None:
@@ -282,6 +286,7 @@ class GatewaySession:
 
     def rescan(self, text: str) -> list[Leak]:
         """Findings in text about to be sent that are not a token this session issued."""
+        self._refresh()
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._rescans.get(digest)
         if cached is not None:
@@ -418,6 +423,7 @@ class GatewaySession:
                 surface_forms=[value],
                 attributes=dict(assignment.attributes),
             )
+            self._track(stored)
             (written if stored.changed else reused).append(assignment.token)
 
     def _confirm(self, tokens: list[str]) -> None:
@@ -429,8 +435,18 @@ class GatewaySession:
         }
         if not pending:
             return
-        self._gateway.vault.confirm_tokens(self.session_id, pending)
+        self._track(self._gateway.vault.confirm_tokens(self.session_id, pending))
         self._confirmed.update(pending)
+
+    def _track(self, write: Write) -> None:
+        """Follow the vault revision through this session's own writes, never past another's."""
+        if write.before == self._revision:
+            self._revision = write.after
+
+    def _refresh(self) -> None:
+        """Reload when another instance changed this session's mappings since the last look."""
+        if self._gateway.vault.revision(self.session_id) != self._revision:
+            self._reload()
 
     def _learn_redacted(self, text: str, report: DetectionReport, learned: list[str]) -> None:
         """Keep redacted values in memory only, so every later copy is redacted too."""
@@ -498,6 +514,7 @@ class GatewaySession:
         self._rescans.clear()
         if written:
             self._known_changed()
+            self._revision = STALE_REVISION
         self._gateway.vault.delete_tokens(self.session_id, written, owner=self._owner)
         for token in written:
             self._entries.pop(token, None)
@@ -510,7 +527,11 @@ class GatewaySession:
     def _reload(self) -> None:
         """Take the mappings and counters another process may have written from the vault."""
         vault = self._gateway.vault
+        self._revision = vault.revision(self.session_id)
         self._entries = vault.load(self.session_id)
+        self._known_cache = None
+        self._values = None
+        self._rescans.clear()
         stored = vault.max_counters(self.session_id)
         self._counters = {
             label: max(self._counters.get(label, 0), stored.get(label, 0))
