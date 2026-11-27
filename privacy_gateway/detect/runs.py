@@ -38,9 +38,9 @@ def run_finditer(
             position = match.end()
 
 
-JWT_PATTERN = r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+JWT_PATTERN = r"(?<![^\W_])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
 _JWT_RUN = re.compile(r"[A-Za-z0-9_-]+")
-_JWT_START = re.compile(r"\beyJ")
+_JWT_START = re.compile(r"(?<![^\W_])eyJ")
 
 
 def jwt_finditer(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
