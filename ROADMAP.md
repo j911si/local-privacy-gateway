@@ -4,6 +4,28 @@ Everything on this page is planned and not implemented, unless a line says other
 no dates. What exists today is described in the [README](README.md) and in the
 [coverage register](docs/COVERAGE.md).
 
+## Release plan
+
+Positioning: international by design, local by policy, privacy by default.
+
+The version numbers after 0.2.0 are planning targets, not commitments.
+
+| Version | Focus |
+|---|---|
+| 0.2.0 | Public alpha: GitHub release, PyPI package |
+| 0.2.1 | Stability, resource limits and parallel requests (see below) |
+| 0.3.0 | International detection and country packs |
+| 0.9.0 | Release candidate |
+| 1.0.0 | Stable, production-ready gateway |
+
+### 0.2.1: stability and resource limits
+
+Committed for 0.2.1, without changing the proxy's architecture: a size limit for the text that
+is scanned, an admission limit that answers at once while a large scan runs, the upstream
+connect timeout measured only after detection, a check for a disconnected client before the
+request goes upstream, and a memory limit in the example service unit. Moving detection off the
+event loop follows after that.
+
 ## Strategic focus: international detection
 
 Detection today covers global formats (IBAN, payment cards, e-mail, IP addresses, phone numbers
@@ -102,7 +124,7 @@ A row appears only when tests back it.
 - Windows support in CI.
 - TLS between clients and a proxy on a private network, and per-client session separation.
 - Detection inside the proxy off the event loop, so one large request does not hold other
-  sessions.
+  sessions (after the 0.2.1 limits).
 
 ## Vision
 

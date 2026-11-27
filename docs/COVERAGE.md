@@ -94,5 +94,14 @@ Probed on 2026-11-27 with published example values; none of these was replaced:
 - addresses that do not follow German or English street grammar;
 - anything in images, PDFs or other binary content.
 
+Known gaps inside the covered formats, accepted for the 0.2.0 alpha:
+
+- letters of other scripts that only look Latin: a Cyrillic `Е` in an IBAN country code hides the
+  IBAN (behind an `IBAN` label only the number groups are replaced), a Cyrillic letter in a name
+  hides the name;
+- European VINs without a check digit, also behind `VIN:` or `FIN:`;
+- `ß` and `SS` in the leak check: a learned `Straße` written `STRASSE` is not flagged;
+- passwords shorter than four characters and PINs shorter than four digits behind a label.
+
 Everything the rules do not describe is passed through. See
 [Known limits](../README.md#known-limits).

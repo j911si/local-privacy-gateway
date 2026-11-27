@@ -288,7 +288,7 @@ stored token is lost.
 | `PGW_PROXY_LISTEN` | `127.0.0.1:8787` | `host:port` the proxy binds to. Any address other than `127.0.0.1`, `localhost` or `[::1]` needs an auth token, else the proxy does not start. Besides loopback only explicit private addresses are accepted (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` as used by Tailscale, `fc00::/7`); `0.0.0.0`, `[::]`, public, link-local addresses and host names need `PGW_PROXY_ALLOW_PUBLIC_BIND`. |
 | `PGW_PROXY_UPSTREAM` | `https://api.anthropic.com` | Upstream base URL. Only `https://` or `http://127.0.0.1` / `http://localhost` are accepted; anything else is a `ConfigError`. |
 | `PGW_PROXY_SESSION_STRATEGY` | `metadata` | How the vault session key is derived: `metadata`, `header` or `single`. |
-| `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Required with an OAuth login, see below. |
+| `PGW_PROXY_TRANSFORM_SYSTEM` | `1` | `0`/`false`/`no`/`off` forwards the `system` prompt unchanged. Not needed for an OAuth login, see below. |
 | `PGW_PROXY_PLACEHOLDER_NOTICE` | `1` | `0`/`false`/`no`/`off` suppresses the short notice that explains the placeholder format to the model. |
 | `PGW_PROXY_DEBUG_DIR` | unset | Directory for one JSON dump per transformed request (mode `0600` in a `0700` directory). Contains the **pseudonymized** body. |
 | `PGW_PROXY_RESCAN_BUDGET` | `10` | Seconds the rescan of one request may take; must be finite and above zero. Past it the request fails with 503 and nothing is sent. |
@@ -578,7 +578,7 @@ It copies **every `PGW_*` variable that is set in the installing shell** into th
 installing shell is therefore the configuration of the service:
 
 ```bash
-PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd
+PGW_PROXY_AUTH_TOKEN_FILE=~/.config/privacy-gateway/proxy-auth-token uv run pgw-proxy install-launchd
 ```
 
 The command prints the variables it took over. Re-run it after changing one — the plist is
@@ -617,8 +617,6 @@ RestartSec=2
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
 Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
-# Uncomment when the client logs in with OAuth instead of an API key:
-# Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
 # Auth token (mode 0600 file, never the token itself in this unit):
 # Environment=PGW_PROXY_AUTH_TOKEN_FILE=%h/.config/privacy-gateway/proxy-auth-token
 
@@ -672,7 +670,7 @@ claude-private() {
 ```
 
 Note that `PGW_*` variables belong to the **proxy process**, not to the client. Putting
-`PGW_PROXY_TRANSFORM_SYSTEM=0` into this function has no effect on a proxy that launchd or systemd
+`PGW_PROXY_UNCHECKED_FIELDS=allow` into this function has no effect on a proxy that launchd or systemd
 already started; it belongs in the service environment (see above).
 
 ### What is transformed
@@ -853,44 +851,40 @@ is visible to the model as ordinary conversation content, counts as one more fie
 line, and never goes into `system` — it sits in the messages because an OAuth client's system
 prompt cannot be changed (see below). Disable it with `PGW_PROXY_PLACEHOLDER_NOTICE=0`.
 
-### OAuth / Claude subscription: `PGW_PROXY_TRANSFORM_SYSTEM=0`
+### OAuth / Claude subscription
 
-A client logged in with OAuth (a Claude Pro/Max subscription instead of an API key) gets
-`429 rate_limit_error` with the body `"Error"` and **without** any `anthropic-ratelimit-*` header
-for every request whose `system` prompt the proxy had changed, while an otherwise identical
-passthrough request answers with 200.
+A client logged in with OAuth (a Claude Pro/Max subscription instead of an API key) works with the
+default `PGW_PROXY_TRANSFORM_SYSTEM=1`, so the system prompt is pseudonymized like the messages.
+Tested on 2026-11-27 with Claude Code 2.1.332 and a subscription login, in `claude -p` and in an
+interactive session with tool calls, against an isolated proxy.
 
-```bash
-export PGW_PROXY_TRANSFORM_SYSTEM=0   # 0/false/no/off; default 1
-```
+Claude Code sends a billing line as the first system block
+(`x-anthropic-billing-header: cc_version=...; cc_entrypoint=...;`). The proxy forwards exactly this
+line unchanged; it holds only the client version and entry point. Before 0.2.0 the proxy replaced
+it, and the upstream answered every subscription request with `429 rate_limit_error`. That is why
+older versions of this README recommended `PGW_PROXY_TRANSFORM_SYSTEM=0`. Anything else in the first
+system block is transformed as usual. The billing line is Claude Code behaviour, not documented
+Anthropic behaviour, so a later client version may need another check.
 
-With the switch the `system` field — string or block list — reaches the upstream byte for byte, is
-not counted in `fields`, and the audit line carries `system_transformed: false`. The `messages` are
-pseudonymized as before.
+In an interactive session Claude Code also sends a top-level `safeguards` list whose
+`classifier_context` carries the working directory and other context for Anthropic's safety
+classifier. The proxy pseudonymizes that context like tool input, so the classifier sees the same
+view as the model.
 
-The explanation — Anthropic checks the Claude Code system prompt against a fingerprint on OAuth
-requests, so one changed byte is enough — is a **hypothesis**, verified empirically on 2026-09-23,
-not documented Anthropic behaviour. Treat the switch as a workaround, not as a supported feature.
+At the start of an interactive session Claude Code sends a small probe request (`max_tokens: 1`,
+no system prompt). In the test above it got 429 in each of three sessions while every following
+request got 200; the session was not affected. Whether the same probe gets 429 without the proxy
+was not checked.
 
-**Consequence, and it matters:** everything the system prompt carries — project instruction files,
-memory files, skill descriptions, tool documentation — leaves the machine unchanged. Only the
-conversation content is protected. With an API key the switch is not needed and you get the full
-protection.
+`PGW_PROXY_TRANSFORM_SYSTEM=0` still forwards the `system` field byte for byte. The audit line then
+carries `system_transformed: false`, and everything the system prompt carries (project instruction
+files, memory paths, skill descriptions) leaves the machine unchanged. With the default
+`PGW_PROXY_UNCHECKED_FIELDS=block` the untransformed system prompt is rescanned, and a path such as
+`/home/<name>/…` (the working directory or the auto-memory path) is a `PERSON_USERNAME` finding that
+blocks every request with 422.
 
-With the default `PGW_PROXY_UNCHECKED_FIELDS=block` an untransformed system prompt is still
-rescanned, and a finding of a [blocking class](#unchecked-fields-blocking-classes) blocks the
-request with 422 `privacy_gateway_leak`. A Claude Code system prompt names the working directory,
-so a path such as `/home/<name>/…` or `/Users/<name>/…` is a `PERSON_USERNAME` finding and blocks
-every request of that login (`/home/user/` and other generic account names are not). Such a setup
-works only with `PGW_PROXY_UNCHECKED_FIELDS=allow`, which sends those values upstream in clear
-text. The billing line Claude Code sends as the first system block does not block, see the
-exceptions below.
-
-**Upgrade note (OAuth login, `PGW_PROXY_TRANSFORM_SYSTEM=0`):** after the update, check today's
-request log. If requests end in 422 with a `system[…]` path in `outgoing.rescan.findings`, either
-start Claude Code from a directory whose path holds no personal user name, or set
-`PGW_PROXY_UNCHECKED_FIELDS=allow` in the environment of the proxy process and accept that the
-system prompt, including that user name, goes out unchanged as before.
+**Upgrade note (OAuth login with `PGW_PROXY_TRANSFORM_SYSTEM=0` from 0.1.0):** remove the setting
+from the environment of the proxy process and restart the proxy.
 
 ### Unchecked fields: blocking classes
 
@@ -1366,6 +1360,14 @@ Supporting properties:
   `redact` class; everything else comes back with `<CLASS_REDACTED>`.
 - **`ß`/`SS` case folding** is not covered by the leak check, so a value written `Straße` in the
   input and `STRASSE` in the output would not be flagged.
+- **Availability of the proxy.** Detection runs on the proxy's event loop, so one large request
+  holds every other request and `/health` until it is done (1 MiB of prose about 29 s, measured
+  with a cold vault). Requests that wait longer than the 10 s connect timeout meanwhile fail with
+  502 (11 of 14 in a test with four 256 KiB and ten small requests). Nothing is forwarded in
+  clear text because of it. There is no admission limit and no time budget for the
+  pseudonymization itself (the rescan stops after 10 s with 503), memory grows by about 220 MiB
+  per MiB of input, and a request whose client has disconnected is still sent upstream.
+  Resource limits and parallel requests are the focus of 0.2.1 ([roadmap](ROADMAP.md)).
 - **VIN without a check digit.** A VIN is found only when its check digit (position 9) is valid.
   Many European VINs do not use one (`WVWZZZ1JZXW000001`) and go out unchanged.
 - **Look-alike characters.** Fullwidth letters and digits are folded to ASCII and invisible
@@ -1496,11 +1498,11 @@ again every ten seconds.
 
 ### HTTP 429 with an empty body and no rate-limit headers
 
-You are logged in with OAuth (Pro/Max subscription) and the proxy changed the system prompt. Set
-`PGW_PROXY_TRANSFORM_SYSTEM=0` in the environment of the **proxy process** — for a launchd service
-that means re-running `PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd`, for systemd
-it means adding the `Environment=` line and `systemctl --user restart`. A real rate limit looks
-different: it carries `anthropic-ratelimit-*` headers and a JSON error body.
+With an OAuth login, check that the proxy is 0.2.0 or later: older versions replaced Claude Code's
+billing line in the system prompt, and the upstream answers such requests with 429 (see
+[OAuth / Claude subscription](#oauth--claude-subscription)). A single 429 on the small probe at the
+start of an interactive session does not stop the session. A real rate limit carries
+`anthropic-ratelimit-*` headers and a JSON error body.
 
 ### Claude Code compacts the conversation over and over
 
@@ -1565,10 +1567,8 @@ ASSUMPTIONS AND DEFAULTS (use these, do not ask):
 - Model default for the shell function: sonnet[1m]. The [1m] suffix is required, never drop it.
 - OS detection: `uname -s` -> "Darwin" means macOS (use launchd), "Linux" means Linux (use a
   systemd user unit). Anything else: skip the service step and report it.
-- Login type: if the environment variable ANTHROPIC_API_KEY is set and non-empty, the user has an
-  API key, so leave PGW_PROXY_TRANSFORM_SYSTEM unset (full protection). If it is empty or unset,
-  assume an OAuth/subscription login and set PGW_PROXY_TRANSFORM_SYSTEM=0, because Anthropic
-  answers OAuth requests with a modified system prompt with HTTP 429.
+- Login type: API key and OAuth/subscription login both work with the defaults. Do not set
+  PGW_PROXY_TRANSFORM_SYSTEM.
 - Do not modify any existing shell configuration except appending one clearly marked block to the
   user's shell rc file (~/.zshrc for zsh, ~/.bashrc for bash). Never edit or reorder existing lines.
 - If any step fails, stop, do not improvise a workaround, and report exactly what failed with the
@@ -1637,8 +1637,7 @@ STEPS:
 
 7. Install the background service.
    macOS: from the install directory run
-     `PGW_PROXY_TRANSFORM_SYSTEM=0 uv run pgw-proxy install-launchd`
-     (omit the PGW_PROXY_TRANSFORM_SYSTEM prefix if ANTHROPIC_API_KEY was set, see assumptions).
+     `uv run pgw-proxy install-launchd`
      Expected output: "installed /Users/<you>/Library/LaunchAgents/com.privacy-gateway.proxy.plist",
      a list of the PGW_* variables taken over, the log directory, and a line
      "export ANTHROPIC_BASE_URL=http://127.0.0.1:8787".
@@ -1659,12 +1658,11 @@ STEPS:
        Environment=PATH=<dirname of uv>:/usr/local/bin:/usr/bin:/bin
        Environment=PGW_PROXY_LISTEN=127.0.0.1:8787
        Environment=PGW_PROXY_UPSTREAM=https://api.anthropic.com
-       Environment=PGW_PROXY_TRANSFORM_SYSTEM=0
 
        [Install]
        WantedBy=default.target
 
-     Omit the PGW_PROXY_TRANSFORM_SYSTEM line if ANTHROPIC_API_KEY was set. Then run
+     Then run
      `systemctl --user daemon-reload` and `systemctl --user enable --now privacy-gateway.service`.
    If neither service manager is available, skip this step, and in the report tell the user to run
    `uv run pgw-proxy serve --listen 127.0.0.1:8787` in the foreground instead.
@@ -1709,7 +1707,6 @@ STEPS:
 11. Final report. Print, in this order:
     - Installed version and commit hash (`git -C <install dir> rev-parse --short HEAD`).
     - The install directory, the config file, the vault database path and the vault key path.
-    - Whether PGW_PROXY_TRANSFORM_SYSTEM=0 was set, and the one-sentence reason.
     - The result of every smoke test with its actual status code.
     - How to use it: open a new shell and run `claude-private`.
     - Where the audit logs are: `~/.local/share/privacy-gateway/audit.jsonl` (events, watch it with

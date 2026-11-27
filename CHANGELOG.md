@@ -124,6 +124,12 @@ All notable changes to this project are documented in this file. The format foll
 - Address, organization, e-mail and FQDN patterns run in linear time.
 
 ### Fixed
+- A Claude subscription (OAuth) login works with the default `PGW_PROXY_TRANSFORM_SYSTEM=1`: the
+  proxy replaced Claude Code's billing line in the first system block, and the upstream answered
+  every such request with 429. The exact billing line is forwarded unchanged now.
+- Interactive Claude Code sessions are no longer blocked with 422: the classifier context in the
+  top-level `safeguards` list is pseudonymized like tool input, and a package version such as
+  `react@18.2.0` in a tool description is no longer taken for an e-mail address.
 - Many cases where replacing and leak checking disagreed, so that legitimate requests were
   blocked or values could pass (commits `ac22819` to `6f08560`).
 - Streaming restore across chunk boundaries and for quote-wrapped tokens, including a closing
@@ -147,10 +153,9 @@ All notable changes to this project are documented in this file. The format foll
   `umask 077; openssl rand -hex 32 > ~/.config/privacy-gateway/proxy-auth-token`, set
   `PGW_PROXY_AUTH_TOKEN_FILE` in the service and send it from each client, for example with
   `ANTHROPIC_CUSTOM_HEADERS="x-pgw-auth: <token>"`.
-- With a subscription login and `PGW_PROXY_TRANSFORM_SYSTEM=0`, a working directory under
-  `/home/<name>/` or `/Users/<name>/` puts your user name into the unchanged system prompt, and
-  every request is blocked. Either work in a directory without your user name or set
-  `PGW_PROXY_UNCHECKED_FIELDS=allow`, which sends the name in clear text as 0.1.0 did.
+- With a subscription login, remove `PGW_PROXY_TRANSFORM_SYSTEM=0` from the proxy's environment.
+  Kept at `0`, the unchanged system prompt carries your user name in the working directory and
+  the auto-memory path, and every request is blocked with 422.
 
 ## 0.1.0 – 2026-09-23
 
