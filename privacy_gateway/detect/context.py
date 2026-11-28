@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from functools import cache
 from importlib.resources import files
 from typing import TYPE_CHECKING
 
 import yaml
 
-from privacy_gateway.detect.dictionaries import DATA_PACKAGE, TrieMatcher
+from privacy_gateway.detect.dictionaries import DATA_PACKAGE, TrieMatcher, load_terms
+from privacy_gateway.detect.runs import run_finditer
+from privacy_gateway.detect.validators import date_valid
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -152,7 +155,35 @@ STOP_WORDS = frozenset(
         "im",
         "in",
         "on",
+        "admin",
+        "administrator",
+        "user",
+        "root",
+        "api",
+        "rest",
+        "http",
+        "https",
+        "sql",
+        "test",
+        "prod",
+        "dev",
+        "default",
+        "unknown",
+        "n/a",
+        "todo",
+        "tbd",
+        "example",
+        "sample",
+        "demo",
+        "local",
+        "main",
+        "master",
     }
+)
+TOKEN_SHAPED_RE = re.compile(r"[A-Z][A-Z0-9_]*_\d{3,}")
+PERSON_LABEL_RE = re.compile(
+    r"(?i)(?:kontoinhaber|inhaber|karteninhaber|patientin|versicherte|kundin|empfänger"
+    r"|ansprechpartner|mitarbeiter|account holder|cardholder)"
 )
 
 HEALTH_MARKERS = (
@@ -169,21 +200,56 @@ HEALTH_MARKERS = (
 )
 HEALTH_MARKER_WINDOW = 60
 SENTENCE_BOUNDARIES = ".\n"
+SENTENCE_BOUNDARY_RE = re.compile(r"[.\n]")
 
+MIN_SALUTATION_NAME_LENGTH = 3
 SALUTATION_RE = re.compile(
-    r"(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
+    r"(?:(?<!\s)|(?!\s))(?:Sehr geehrte[r]?|Dear|Hallo|Hi|Liebe[r]?)?\s*"
     r"\b(Frau|Herr|Herrn|Mrs\.?|Mr\.?|Ms\.?|Mx\.?)\s+"
     r"((?:(?:Dr|Prof|Dipl\.-Ing)\.\s+)*)"
     r"([A-ZÄÖÜ][\wäöüß-]+(?:\s+[A-ZÄÖÜ][\wäöüß-]+)?)"
 )
+_CAP_WORD = r"[A-ZÄÖÜ][\wäöüß'-]*[a-zäöüß]"
+_NAME_BODY = (
+    rf"({_CAP_WORD}(?:[ \t]+(?:(?:von|van|de|der|zu|zur|da|di|du|le|la)[ \t]+)?{_CAP_WORD}){{1,2}})"
+    r"(?![\w@/-])(?!\.\w)"
+)
+_LABEL_COLON = r"[ \t]*:[ \t]*"
+_LABEL_OPTIONAL = r"(?:[ \t]*:[ \t]*|[ \t]+)"
+LABEL_NAME_RE = re.compile(
+    r"(?<![\w-])(?i:"
+    r"(?:(?P<generic>name)|full name|vor- und nachname|kunde|customer|patient)" + _LABEL_COLON + r"|"
+    r"(?:kontoinhaber(?:in)?|inhaber(?:in)?|karteninhaber(?:in)?|patientin|versicherte[r]?"
+    r"|kundin|empfänger(?:in)?|ansprechpartner(?:in)?|mitarbeiter(?:in)?"
+    r"|account holder|cardholder)" + _LABEL_OPTIONAL + r")" + _NAME_BODY
+)
+LABEL_PART_RE = re.compile(
+    r"(?<![\w-])((?i:vorname|nachname))" + _LABEL_COLON + r"([A-ZÄÖÜ][\wäöüß'-]*[a-zäöüß])"
+    r"(?![\w@/-])(?!\.\w)"
+)
+NAME_DENY_WORDS = frozenset(
+    {
+        "local", "privacy", "gateway", "docker", "compose", "service", "server", "client",
+        "project", "projekt", "runner", "proxy", "config", "system", "default", "new",
+        "shared", "team", "support", "kunde", "kundin", "patient", "patientin", "name",
+        "unbekannt", "bekannt", "company", "firma", "consulting", "services", "solutions",
+        "group", "gruppe", "bank", "versicherung", "insurance", "hospital", "klinik",
+        "test", "tester", "user", "benutzer", "nutzer",
+    }
+)
+BIRTH_DATE_AFTER_RE = re.compile(
+    r"(?<![\d./-])(\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{4}-\d{2}-\d{2})(?!\d)"
+    r"(?:[ \t]+[^\W\d_]+){0,3}[ \t]+(?i:geboren|geb\.|born)(?!\w)"
+)
 MARKER_TAIL = (
-    r"\s*((?:[:#=]|-?\s*nr\.?|no\.?|number|nummer)?\s*[:#=]?)\s*"
+    r"\s*+((?:[:#=]|-?\s*+nr\.?|no\.?|number|nummer)?\s*+[:#=]?)\s*+"
     r"([A-Za-z0-9][A-Za-z0-9_\-./]{2,})"
 )
 MARKER_SUFFIX = r"(?:[-\s]?(?:nummer|nr\.?|number|no\.?|id))?(?!\w)"
 MARKER_TRAILING = ".,;:)]\"'"
 DEPARTMENT_RE = re.compile(
-    r"(?i)\b(?:Abteilung|Department|Dept\.?)\s*[:=]?\s*([A-ZÄÖÜ][\w&/ -]{2,40})"
+    r"\b(?i:(?:Abteilung|Department)\b|Dept\b\.?)(?:\s*[:=]\s*|\s+)"
+    r"([A-ZÄÖÜ]\w+(?:[&/-]\w+)*(?:(?: [&/])? [A-ZÄÖÜ]\w*(?:[&/-]\w+)*){0,2})"
 )
 JOB_TITLE_RE = re.compile(
     r"\b(CEO|CTO|CFO|CISO|Geschäftsführer(?:in)?|Leiter(?:in)?|Head of [A-Z][a-z]+"
@@ -195,7 +261,7 @@ ADDRESS_RE = re.compile(
     r"|Street|St\.|Road|Rd\.|Avenue|Ave\.|Lane))"
     r"\s+(\d{1,4}[a-zA-Z]?)\s*,?\s*(\d{4,5})\s+([A-ZÄÖÜ][\wäöüß -]+)"
 )
-POSTAL_CODE_RE = re.compile(r"(?i)\b(?:PLZ|Postleitzahl|zip)\s*[:=]?\s*(\d{4,5})")
+POSTAL_CODE_RE = re.compile(r"(?i)\b(?:PLZ|Postleitzahl|zip)\s*+[:=]?+\s*+(\d{4,5})")
 PLACE_OF_BIRTH_RE = re.compile(
     r"(?i)\b(?:(?:geboren|geb\.|born)(?:\s+(?:am|on))?\s+(?:\d[\d./-]{5,}\s+)?in"
     r"|Geburtsort[:=]?)\s+([A-ZÄÖÜ][\wäöüß -]+)"
@@ -205,8 +271,11 @@ ORGANIZATION_RE = re.compile(
     r"(GmbH & Co\. KG|GmbH|AG|SE|KGaA|KG|OHG|e\.V\.|eG|Ltd\.?|LLC|Inc\.?|Corp\.?|PLC"
     r"|S\.A\.|B\.V\.|N\.V\.|S\.r\.l\.|Oy|AB|AS)(?![\w-])"
 )
+UPPER_START_RE = re.compile(r"[A-ZÄÖÜ]")
+ADDRESS_RUN_RE = re.compile(r"[\wäöüß.-]+")
+ORGANIZATION_RUN_RE = re.compile(r"[\wäöüß&.-]+")
 INITIALS_RE = re.compile(r"\b([A-ZÄÖÜ]\.\s?[A-ZÄÖÜ]\.)")
-HANDLE_RE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{3,30}\b")
+HANDLE_RE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{3,30}\b(?![-/])")
 IDENTIFIER_PREFIX = r"(?<![-_./:\w])"
 MESSENGER_RE = re.compile(
     r"(?i)" + IDENTIFIER_PREFIX + r"(?:telegram|signal|whatsapp|teams|slack)"
@@ -230,6 +299,25 @@ def _country_matcher() -> TrieMatcher:
     return TrieMatcher((country, "COUNTRY") for country in COUNTRIES)
 
 
+@cache
+def _cities() -> frozenset[str]:
+    return frozenset(term.lower() for term in load_terms("cities_de_en.txt"))
+
+
+@cache
+def _common_name_words() -> frozenset[str]:
+    return frozenset(term.lower() for term in load_terms("common_name_words.txt"))
+
+
+@cache
+def _first_names() -> frozenset[str]:
+    return frozenset(term.lower() for term in load_terms("first_names_de_en.txt"))
+
+
+def _has_first_name(name: str) -> bool:
+    return any(word.lower() in _first_names() for word in re.split(r"[\s-]+", name))
+
+
 def _trimmed_span(text: str, start: int, end: int) -> Span:
     while end > start and text[end - 1].isspace():
         end -= 1
@@ -250,14 +338,45 @@ def _marker_value_span(text: str, match: re.Match[str]) -> Span:
     return Span(span.start, end)
 
 
-def _sentence_fragment(text: str, start: int, end: int) -> Span:
-    left = start
-    while left > 0 and text[left - 1] not in SENTENCE_BOUNDARIES:
-        left -= 1
-    right = end
-    while right < len(text) and text[right] not in SENTENCE_BOUNDARIES:
-        right += 1
-    return _trimmed_span(text, left, right)
+def _is_boundary(text: str, index: int) -> bool:
+    char = text[index]
+    if char not in SENTENCE_BOUNDARIES:
+        return False
+    inside_number = char == "." and 0 < index < len(text) - 1
+    return not (inside_number and text[index - 1].isdigit() and text[index + 1].isdigit())
+
+
+class _Sentences:
+    """The sentence boundaries of one text, found once."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._bounds = [
+            match.start()
+            for match in SENTENCE_BOUNDARY_RE.finditer(text)
+            if _is_boundary(text, match.start())
+        ]
+
+    def fragment(self, start: int, end: int) -> Span:
+        """The trimmed text between the boundary before `start` and the one from `end` on."""
+        before = bisect_left(self._bounds, start)
+        after = bisect_left(self._bounds, end)
+        left = self._bounds[before - 1] + 1 if before else 0
+        right = self._bounds[after] if after < len(self._bounds) else len(self._text)
+        return _trimmed_span(self._text, left, right)
+
+
+def _last_date_end(dates: list[tuple[int, int]], span: Span, limit: int) -> int | None:
+    """The largest end of a (end, start) date inside `span` that ends by `limit`."""
+    index = bisect_right(dates, limit, key=lambda date: date[0])
+    while index > 0:
+        index -= 1
+        end, start = dates[index]
+        if end < span.start:
+            return None
+        if start >= span.start:
+            return end
+    return None
 
 
 class ContextStage:
@@ -272,13 +391,15 @@ class ContextStage:
         self._name_pairs(text, config, findings, out)
         self._markers(text, config, out)
         self._roles(text, config, out)
+        self._label_names(text, config, out)
         self._addresses(text, config, out)
         self._place_of_birth(text, config, out)
+        self._birth_dates(text, config, out)
         self._health(text, config, findings, out)
         self._initials(text, config, out)
         self._handles(text, config, out)
         self._countries(text, config, out)
-        return self._deduplicate(out)
+        return self._deduplicate([f for f in out if not _token_shaped(text, f.span, config)])
 
     def _emit(
         self,
@@ -342,6 +463,8 @@ class ContextStage:
                 )
             name_span = _group_span(text, match, 3)
             name = text[name_span.start : name_span.end]
+            if len(name) < MIN_SALUTATION_NAME_LENGTH:
+                continue
             data_class = "PERSON_FULL_NAME" if " " in name else "PERSON_LAST_NAME"
             self._emit(config, out, name_span, data_class, 0.95, attributes)
 
@@ -400,13 +523,47 @@ class ContextStage:
             self._emit(config, out, _group_span(text, match, 1), "DEPARTMENT", 0.8)
         for match in JOB_TITLE_RE.finditer(text):
             self._emit(config, out, _group_span(text, match, 1), "JOB_TITLE", 0.8)
-        for match in ORGANIZATION_RE.finditer(text):
+        for match in run_finditer(ORGANIZATION_RE, text, ORGANIZATION_RUN_RE, UPPER_START_RE):
             span = _trimmed_span(text, match.start(), match.end())
             self._emit(config, out, span, "ORGANIZATION_NAME", 0.85)
 
+    def _label_names(self, text: str, config: Config, out: list[Finding]) -> None:
+        organizations = [f.span for f in out if f.data_class == "ORGANIZATION_NAME"]
+        for match in LABEL_NAME_RE.finditer(text):
+            span = _group_span(text, match, 2)
+            if any(span.overlaps(org) for org in organizations):
+                continue
+            if match.group("generic") and not _has_first_name(text[span.start : span.end]):
+                continue
+            person_label = PERSON_LABEL_RE.match(text, match.start()) is not None
+            if self._label_name_allowed(text[span.start : span.end], person_label):
+                self._emit(config, out, span, "PERSON_FULL_NAME", 0.9, {"source": "label"})
+        for match in LABEL_PART_RE.finditer(text):
+            span = _group_span(text, match, 2)
+            if not self._label_name_allowed(text[span.start : span.end]):
+                continue
+            data_class = "PERSON_FIRST_NAME" if match.group(1).lower() == "vorname" else (
+                "PERSON_LAST_NAME"
+            )
+            self._emit(config, out, span, data_class, 0.9, {"source": "label"})
+
+    @staticmethod
+    def _label_name_allowed(name: str, person_label: bool = False) -> bool:
+        words = [word.lower() for word in re.split(r"[\s-]+", name) if word[:1].isupper()]
+        blocked = STOP_WORDS | NAME_DENY_WORDS
+        if not (person_label and len(words) >= 2):
+            # ponytail: after an account-holder label `Max Mustermann` is a person, after `Name:`
+            # or alone an ambiguous word may be a product or a common noun.
+            blocked = blocked | _common_name_words()
+        if any(word in blocked for word in words):
+            return False
+        if name.isupper() or len(name) < MIN_SALUTATION_NAME_LENGTH:
+            return False
+        return not _country_matcher().find(name) and name.lower() not in _cities()
+
     def _addresses(self, text: str, config: Config, out: list[Finding]) -> None:
         components = ("STREET", "HOUSE_NUMBER", "POSTAL_CODE", "CITY")
-        for match in ADDRESS_RE.finditer(text):
+        for match in run_finditer(ADDRESS_RE, text, ADDRESS_RUN_RE, UPPER_START_RE):
             children = [
                 child
                 for index, name in enumerate(components, start=1)
@@ -421,9 +578,19 @@ class ContextStage:
         for match in PLACE_OF_BIRTH_RE.finditer(text):
             self._emit(config, out, _group_span(text, match, 1), "PLACE_OF_BIRTH", 0.85)
 
+    def _birth_dates(self, text: str, config: Config, out: list[Finding]) -> None:
+        for match in BIRTH_DATE_AFTER_RE.finditer(text):
+            span = _group_span(text, match, 1)
+            if date_valid(text[span.start : span.end]):
+                self._emit(config, out, span, "DATE_OF_BIRTH", 0.95)
+
     def _health(
         self, text: str, config: Config, findings: list[Finding], out: list[Finding]
     ) -> None:
+        sentences: _Sentences | None = None
+        dates = sorted(
+            (f.span.end, f.span.start) for f in (*findings, *out) if f.data_class == "DATE_OF_BIRTH"
+        )
         for finding in findings:
             if finding.data_class != "MEDICAL_INFORMATION":
                 continue
@@ -432,7 +599,12 @@ class ContextStage:
             window = text[max(0, finding.span.start - HEALTH_MARKER_WINDOW) : finding.span.start]
             if not any(marker in window.lower() for marker in HEALTH_MARKERS):
                 continue
-            span = _sentence_fragment(text, finding.span.start, finding.span.end)
+            if sentences is None:
+                sentences = _Sentences(text)
+            span = sentences.fragment(finding.span.start, finding.span.end)
+            last = _last_date_end(dates, span, min(span.end, finding.span.start))
+            if last is not None:
+                span = _trimmed_span(text, last, span.end)
             self._emit(config, out, span, "HEALTH_INFORMATION", 0.95)
 
     def _initials(self, text: str, config: Config, out: list[Finding]) -> None:
@@ -457,3 +629,17 @@ class ContextStage:
     def _countries(self, text: str, config: Config, out: list[Finding]) -> None:
         for span, data_class in _country_matcher().find(text):
             self._emit(config, out, span, data_class, 0.8)
+
+
+def _token_shaped(text: str, span: Span, config: Config) -> bool:
+    """True for a value shaped like an issued token: a known class name plus `_` and digits."""
+    match = TOKEN_SHAPED_RE.fullmatch(text, span.start, span.end)
+    if match is None:
+        return False
+    label = text[span.start : span.end].rsplit("_", 1)[0]
+    return label in _token_labels(config)
+
+
+def _token_labels(config: Config) -> frozenset[str]:
+    """Every label an issued numbered token can carry (`PERSON`, `IBAN`, `HOSTNAME`, ...)."""
+    return frozenset(config.registry.label_for(data_class.name) for data_class in config.registry)

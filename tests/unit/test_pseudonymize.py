@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from privacy_gateway.api import Gateway
 from privacy_gateway.classes import ClassRegistry, Policy
 from privacy_gateway.config import Config
 from privacy_gateway.model import DetectionReport, Entity, Finding, Span
@@ -280,3 +281,170 @@ def test_gendered_token_literal_reserves_the_person_counter(default_config: Conf
     result = pseudonymize_text(text, report, default_config)
 
     assert result.text == "<PERSON_FEMALE_001> schrieb an <PERSON_FEMALE_002>"
+
+
+def test_home_directory_user_matching_a_known_name_passes_the_leak_check(
+    default_config: Config,
+) -> None:
+    text = "Brief an Anna Müller, Vault /Users/anna/Notes, Backup /home/anna/b, Frau Müller dankt."
+    with Gateway(default_config) as gateway:
+        result = gateway.pseudonymize(text)
+    assert "/Users/anna/" not in result.text
+    assert "/home/anna/" not in result.text
+    assert "anna" not in result.text.lower()
+
+
+def test_session_text_that_quotes_a_token_literally_is_not_blocked(
+    default_config: Config,
+) -> None:
+    text = "Die Doku zeigt <IBAN_007> und <EMAIL_003> als Beispiele."
+    with Gateway(default_config) as gateway:
+        session = gateway.session("literal")
+        output, findings = session.pseudonymize_report(text)
+
+    assert output == text
+    assert findings == []
+
+
+def test_a_value_learned_later_does_not_block_an_earlier_text_with_its_plural(
+    default_config: Config,
+) -> None:
+    texts = ["We fixed the paths and the shell PATH here.", "Environment=PATH is set."]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("later")
+        results = session.pseudonymize_report_many(texts)
+
+    assert "PATH" not in results[0][0]
+    assert "paths" in results[0][0]
+
+
+def test_a_known_user_name_before_a_host_does_not_create_a_handle_leak(
+    default_config: Config,
+) -> None:
+    texts = ["Pfad /Users/anna/Notes liegt dort.", "ssh -o BatchMode=yes anna@mac true"]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("host")
+        results = session.pseudonymize_report_many(texts)
+        assert "anna" not in results[1][0].lower().replace("<", "").replace(">", "")
+        assert session.rescan(results[1][0]) == []
+
+
+def test_a_known_handle_inside_user_at_host_does_not_block_the_text(
+    default_config: Config,
+) -> None:
+    texts = [
+        "Hallo @mac, schau mal.",
+        "Pfad /Users/anna/Notes liegt dort.",
+        'testen mit "ssh -o BatchMode=yes anna@mac true" im Skript',
+    ]
+    with Gateway(default_config) as gateway:
+        session = gateway.session("hostpart")
+        results = session.pseudonymize_report_many(texts)
+
+    assert "anna" not in results[2][0].lower().replace("<", "").replace(">", "")
+
+
+def test_a_known_value_in_another_spelling_of_the_same_text_is_replaced(
+    default_config: Config,
+) -> None:
+    text = (
+        "Brief an Anna Müller. Pfad /Users/anna/Notes, Memory-Ordner /Users/anna/.claude/"
+        "projects/-Users-anna-Work/x, Home ~anna/docs, Datei anna_notes.md."
+    )
+    with Gateway(default_config) as gateway:
+        session = gateway.session("spelling")
+        output = session.pseudonymize(text)
+        assert "anna" not in output.lower().replace("<", "").replace(">", "")
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_known_short_number_inside_a_word_is_replaced_and_restored(
+    default_config: Config,
+) -> None:
+    text = 'Konto 4711 ist offen.\ncheck("AB4711CD").'
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "4711" not in output
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_known_phone_number_with_a_00_country_prefix_is_replaced_and_restored(
+    default_config: Config,
+) -> None:
+    text = "Tel. +49 30 12345678 und im Skript 0049 30 12345678 sowie 004930 12345678."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "12345678" not in output
+        assert session.restore(output, "strict").text.count("12345678") == 3
+
+
+def test_the_digits_of_a_known_url_scattered_over_other_words_are_no_match(
+    default_config: Config,
+) -> None:
+    intro = "Siehe https://git.beispiel-firma.de/r1?id=ab123cd456 fuer Details."
+    later = "Zeile 1 und Seite 1, dann Kapitel 2 mit 3 Punkten, 4 oder 5 und Stufe 6."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        assert session.pseudonymize(later) == later
+
+
+def test_a_known_name_is_replaced_whatever_the_whitespace_between_its_words(
+    default_config: Config,
+) -> None:
+    intro = "Brief an Frau Anna  Müller."
+    later = "Zeile: anna müller, ANNA   MÜLLER und Anna\nMüller."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        output = session.pseudonymize(later)
+        assert "müller" not in output.lower().replace("<", "").replace(">", "")
+
+
+def test_a_longer_number_that_starts_like_a_known_phone_is_another_number(
+    default_config: Config,
+) -> None:
+    intro = "Tel. +49 211 1234567"
+    later = 'assert phone_valid("+49 211 12345678901234") is False'
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        session.pseudonymize(intro)
+        assert session.pseudonymize(later) == later
+
+
+def test_a_token_name_is_no_context_word_for_the_numbers_next_to_it(
+    default_config: Config,
+) -> None:
+    text = "Karte, CVV 123." + "\nZeile ohne Bedeutung" * 3 + "\n  123\t)\n  456\tx"
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "123" not in output
+        assert "456" in output
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_context_word_that_comes_into_range_after_replacing_does_not_block(
+    default_config: Config,
+) -> None:
+    long_phone = "+49 171 2345 6789 01"
+    text = f"Phone: {long_phone}; {'x' * 15} 5551234"
+    assert text.index("5551234") - text.index("Phone") > 40
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "5551234" not in output
+        assert session.restore(output, "strict").text == text
+
+
+def test_a_short_name_glued_to_a_number_does_not_block_once_the_number_is_a_token(
+    default_config: Config,
+) -> None:
+    text = "Konto 4711, Herr Li.\nKennung 4711Li und id_4711Li."
+    with Gateway(default_config) as gateway:
+        session = gateway.session()
+        output = session.pseudonymize(text)
+        assert "4711" not in output
+        assert session.restore(output, "strict").text == text

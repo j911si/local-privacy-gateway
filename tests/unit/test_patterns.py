@@ -304,3 +304,34 @@ def test_quoted_password_covers_the_whole_quoted_value(default_config: Config) -
     text = 'password="a b c"'
     finding = only(run_stage(text, default_config), "PASSWORD")
     assert value_of(text, finding) == "a b c"
+
+
+@pytest.mark.parametrize(
+    ("text", "user"),
+    [
+        ("Vault: /Users/anna.beispiel/Obsidian/Notes/", "anna.beispiel"),
+        ("cd /home/bwagner/projekte && ls", "bwagner"),
+        ("C:\\Users\\Beispiel Anna\\Documents\\x.txt", "Beispiel Anna"),
+        ("c:/Users/abeispiel/AppData", "abeispiel"),
+    ],
+)
+def test_home_directory_user_is_a_username(default_config: Config, text: str, user: str) -> None:
+    finding = only(run_stage(text, default_config), "PERSON_USERNAME")
+    assert value_of(text, finding) == user
+
+
+def test_home_directory_pattern_ignores_other_paths(default_config: Config) -> None:
+    text = "Pfade /usr/home/x, /var/Users und /Users selbst, /homework/a"
+    assert "PERSON_USERNAME" not in classes_of(run_stage(text, default_config))
+
+
+def test_azure_secret_needs_a_digit_so_a_long_identifier_next_to_azure_is_no_secret(
+    default_config: Config,
+) -> None:
+    text = "AZURE_CLIENT_SECRET is set\n\ndef test_anthropic_api_key_is_detected(): pass"
+    assert "AZURE_SECRET" not in classes_of(run_stage(text, default_config))
+
+
+def test_a_token_name_is_not_a_context_word(default_config: Config) -> None:
+    findings = run_stage("<CVV_001>\n   456\t)", default_config)
+    assert "CVV" not in classes_of(findings)

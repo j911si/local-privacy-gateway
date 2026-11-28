@@ -125,6 +125,43 @@ def test_genitive_form_of_a_value_is_a_leak(default_config: Config) -> None:
         check_leakage("Nikkis Quelle", entries, _empty_scan, default_config.registry)
 
 
+def test_plural_of_a_non_name_value_is_not_a_leak(default_config: Config) -> None:
+    entries = {"<ENVIRONMENT_NAME_001>": _entry("PATH", "ENVIRONMENT_NAME")}
+
+    assert (
+        check_leakage("all the paths are long", entries, _empty_scan, default_config.registry)
+        is None
+    )
+    with pytest.raises(LeakageError):
+        check_leakage("the PATH is long", entries, _empty_scan, default_config.registry)
+
+
+def test_a_host_part_glued_to_a_token_is_not_a_handle_leak(default_config: Config) -> None:
+    entries = {"<PERSON_001>": _entry("Anna", "PERSON_FIRST_NAME")}
+    scan = _scan_for("@mac", "SOCIAL_MEDIA_HANDLE")
+
+    assert check_leakage("ssh <PERSON_001>@mac true", entries, scan, default_config.registry) is None
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage("write to @mac and <PERSON_001>", entries, scan, default_config.registry)
+    assert excinfo.value.leaks[0].kind == "residual_finding"
+
+
+def test_a_known_handle_behind_a_word_or_token_is_a_host_part_not_a_leak(
+    default_config: Config,
+) -> None:
+    entries = {
+        "<SOCIAL_MEDIA_HANDLE_001>": _entry("@mac", "SOCIAL_MEDIA_HANDLE"),
+        "<PERSON_001>": _entry("Anna", "PERSON_FIRST_NAME"),
+    }
+    registry = default_config.registry
+
+    assert check_leakage("ssh bob@mac true", entries, _empty_scan, registry) is None
+    assert check_leakage("ssh <PERSON_001>@mac true", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage("ping @mac now", entries, _empty_scan, registry)
+    assert excinfo.value.leaks[0].kind == "original_value"
+
+
 def test_numeric_value_inside_a_word_is_a_leak(default_config: Config) -> None:
     entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
 
@@ -185,6 +222,26 @@ def test_unknown_token_is_a_leak(default_config: Config) -> None:
     assert leak.data_class == ""
 
 
+def test_a_token_listed_as_literal_input_is_not_a_leak(default_config: Config) -> None:
+    literal = frozenset({"<FOO_009>"})
+
+    assert (
+        check_leakage(
+            "see <FOO_009> here", {}, _empty_scan, default_config.registry, literal_tokens=literal
+        )
+        is None
+    )
+    with pytest.raises(LeakageError) as excinfo:
+        check_leakage(
+            "see <FOO_009> and <BAR_001>",
+            {},
+            _empty_scan,
+            default_config.registry,
+            literal_tokens=literal,
+        )
+    assert [leak.kind for leak in excinfo.value.leaks] == ["unknown_token"]
+
+
 def test_redacted_token_is_not_an_unknown_token(default_config: Config) -> None:
     assert check_leakage("see <JWT_REDACTED>", {}, _empty_scan, default_config.registry) is None
 
@@ -234,3 +291,96 @@ def test_finding_inside_a_four_digit_token_is_not_a_leak(default_config: Config)
     scan = _scan_for("1000", "ACCOUNT_ID")
 
     assert check_leakage("v <ACCOUNT_ID_1000> x", entries, scan, default_config.registry) is None
+
+
+def test_a_short_number_inside_a_longer_number_is_no_leak(default_config: Config) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
+    registry = default_config.registry
+
+    assert check_leakage("id 14711 und 47112", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage("id 4711 und AB4711", entries, _empty_scan, registry)
+
+
+def test_a_short_mixed_value_inside_a_longer_word_is_no_leak(default_config: Config) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("B2C4", "ACCOUNT_ID")}
+    registry = default_config.registry
+
+    assert check_leakage("id XB2C4D6 und B2C4D", entries, _empty_scan, registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage("id B2C4 und XB2C4D6", entries, _empty_scan, registry)
+
+
+def test_a_known_value_that_equals_a_token_name_is_no_leak_inside_that_token(
+    default_config: Config,
+) -> None:
+    entries = {
+        "<HOST_001>": _entry("HOST_001", "HOSTNAME"),
+        "<ACCOUNT_ID_001>": _entry("ACCOUNT_ID_001", "TICKET_ID"),
+    }
+    registry = default_config.registry
+
+    inside = "Hosts: <HOST_001> und <ACCOUNT_ID_001> sind Platzhalter."
+    assert check_leakage(inside, entries, _empty_scan, registry, frozenset()) is None
+    with pytest.raises(LeakageError):
+        check_leakage("Host HOST_001 steht offen.", entries, _empty_scan, registry)
+
+
+@pytest.mark.parametrize("literal", ["<HOST_001>", "<X_HOST_001_001>"])
+def test_a_known_value_inside_a_token_shaped_literal_is_a_leak(
+    default_config: Config, literal: str
+) -> None:
+    entries = {"<HOSTNAME_001>": _entry("HOST_001", "HOSTNAME")}
+    text = f"Host {literal} steht offen."
+
+    with pytest.raises(LeakageError):
+        check_leakage(text, entries, _empty_scan, default_config.registry, frozenset([literal]))
+
+
+def test_a_known_value_inside_a_redaction_marker_is_no_leak(default_config: Config) -> None:
+    entries = {"<PERSON_001>": _entry("PASSWORD", "PERSON_LAST_NAME")}
+
+    text = "Kennwort <PASSWORD_REDACTED> gesetzt."
+    assert check_leakage(text, entries, _empty_scan, default_config.registry) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["id <ACCOUNT_ID_001>Li, <ACCOUNT_ID_001>", "id Li<ACCOUNT_ID_001>", "id <ACCOUNT_ID_001> Li"],
+)
+def test_a_complete_short_value_glued_to_a_token_is_a_leak(
+    default_config: Config, text: str
+) -> None:
+    entries = {
+        "<PERSON_001>": _entry("Li", "PERSON_LAST_NAME"),
+        "<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID"),
+    }
+
+    with pytest.raises(LeakageError):
+        check_leakage(text, entries, _empty_scan, default_config.registry)
+
+
+@pytest.mark.parametrize(
+    "text", ["id <ACCOUNT_ID_001>Li, x", "id <ACCOUNT_ID_001>Lix", "id xLi<ACCOUNT_ID_001>"]
+)
+def test_a_short_residual_finding_next_to_a_token_is_no_leak(
+    default_config: Config, text: str
+) -> None:
+    entries = {"<ACCOUNT_ID_001>": _entry("4711", "ACCOUNT_ID")}
+    scan = _scan_for("Li", "PERSON_LAST_NAME")
+
+    assert check_leakage(text, entries, scan, default_config.registry) is None
+
+
+def test_a_residual_finding_of_only_a_marker_and_punctuation_is_no_leak(
+    default_config: Config,
+) -> None:
+    registry = default_config.registry
+    marker = '<PASSWORD_REDACTED>", '
+    text = f"DB_PASSWORD={marker}x"
+    assert check_leakage(text, {}, _scan_for(marker, "PASSWORD"), registry) is None
+    with pytest.raises(LeakageError):
+        check_leakage(
+            "DB_PASSWORD=<PASSWORD_REDACTED>x1", {}, _scan_for("<PASSWORD_REDACTED>x1", "PASSWORD"),
+            registry,
+        )

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from privacy_gateway.classes import PERSON_LABEL, ClassRegistry, Policy
 from privacy_gateway.config import Config
@@ -14,8 +14,9 @@ from privacy_gateway.model import DetectionReport, Finding, Span
 GENDER_SUFFIXES = ("female", "male")
 REUSED_ATTRIBUTE = "reused"
 
-_WHITESPACE = re.compile(r"\s+")
-_TOKEN_LITERAL = re.compile(r"<(?P<label>[A-Z][A-Z_]*?)_(?P<number>\d{3,})>")
+TOKEN_NAME = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<label>[A-Z][A-Z0-9_]*?)_(?P<number>\d{3,})(?![A-Za-z0-9_])"
+)
 _GENDER_LABELS = tuple(f"{PERSON_LABEL}_{suffix.upper()}" for suffix in GENDER_SUFFIXES)
 
 
@@ -38,10 +39,6 @@ class PseudonymizedText:
     assignments: list[TokenAssignment]
 
 
-def _normalize(value: str) -> str:
-    return _WHITESPACE.sub(" ", unicodedata.normalize("NFKC", value).casefold()).strip()
-
-
 def _attributes_for(finding: Finding, report: DetectionReport) -> dict[str, str]:
     attributes = dict(finding.attributes)
     if finding.entity_id is not None:
@@ -52,9 +49,13 @@ def _attributes_for(finding: Finding, report: DetectionReport) -> dict[str, str]
 
 
 def _reserved_numbers(text: str) -> dict[str, set[int]]:
-    """Token numbers the text already carries as literals, keyed by counter base."""
+    """Token numbers the text already carries, with or without brackets, keyed by counter base.
+
+    A value spelled like a token name (`HOSTNAME_001`) must not get that token, or the value
+    stays visible inside it.
+    """
     reserved: dict[str, set[int]] = {}
-    for match in _TOKEN_LITERAL.finditer(text):
+    for match in TOKEN_NAME.finditer(text):
         label = match.group("label")
         base = PERSON_LABEL if label in _GENDER_LABELS else label
         reserved.setdefault(base, set()).add(int(match.group("number")))
@@ -79,19 +80,33 @@ def _allocate_token(
     return f"<{label}_{number:03d}>"
 
 
-def _entity_key(text: str, finding: Finding) -> object:
+def _key(text: str, finding: Finding) -> tuple[str | None, str, str]:
+    """One token per entity and exact spelling, so the token restores to those exact bytes."""
+    spelling = text[finding.span.start : finding.span.end]
     if finding.entity_id is not None:
-        return finding.entity_id
-    return (finding.data_class, _normalize(text[finding.span.start : finding.span.end]))
+        return (finding.entity_id, "", spelling)
+    return (None, finding.data_class, spelling)
 
 
-def _known_tokens(text: str, report: DetectionReport) -> dict[object, str]:
-    tokens: dict[object, str] = {}
-    for finding in report.findings:
-        token = finding.attributes.get(TOKEN_ATTRIBUTE)
-        if token is not None:
-            tokens.setdefault(_entity_key(text, finding), token)
-    return tokens
+def rewrite(text: str, replacements: list[tuple[Span, str]]) -> str:
+    """Apply replacements in one pass when they are disjoint, else last start first."""
+    ordered = sorted(replacements, key=lambda item: item[0].start)
+    disjoint = all(span.start < span.end for span, _ in ordered) and all(
+        left.end <= right.start for (left, _), (right, _) in pairwise(ordered)
+    )
+    if disjoint:
+        parts: list[str] = []
+        position = 0
+        for span, replacement in ordered:
+            parts.append(text[position : span.start])
+            parts.append(replacement)
+            position = span.end
+        parts.append(text[position:])
+        return "".join(parts)
+    rewritten = text
+    for span, replacement in sorted(replacements, key=lambda item: item[0].start, reverse=True):
+        rewritten = rewritten[: span.start] + replacement + rewritten[span.end :]
+    return rewritten
 
 
 def pseudonymize_text(
@@ -104,9 +119,8 @@ def pseudonymize_text(
     """Rewrite every non-ignored finding into a token or a redaction marker."""
     registry = config.registry
     counters = {} if counters is None else counters
-    known_tokens = _known_tokens(text, report)
     reserved = _reserved_numbers(text)
-    by_key: dict[object, TokenAssignment] = {}
+    by_key: dict[tuple[str | None, str, str], TokenAssignment] = {}
     assignments: list[TokenAssignment] = []
     replacements: list[tuple[Span, str]] = []
 
@@ -118,10 +132,10 @@ def pseudonymize_text(
             replacements.append((finding.span, f"<{data_class.name}_REDACTED>"))
             continue
         attributes = _attributes_for(finding, report)
-        key = _entity_key(text, finding)
+        key = _key(text, finding)
         assignment = by_key.get(key)
         if assignment is None:
-            token = known_tokens.get(key)
+            token = finding.attributes.get(TOKEN_ATTRIBUTE)
             if token is None:
                 token = _allocate_token(
                     registry, data_class.name, attributes, counters, reserved
@@ -140,9 +154,7 @@ def pseudonymize_text(
         assignment.spans.append(finding.span)
         replacements.append((finding.span, assignment.token))
 
-    rewritten = text
-    for span, replacement in sorted(replacements, key=lambda item: item[0].start, reverse=True):
-        rewritten = rewritten[: span.start] + replacement + rewritten[span.end :]
+    rewritten = rewrite(text, replacements)
 
     for assignment in assignments:
         assignment.spans.sort()

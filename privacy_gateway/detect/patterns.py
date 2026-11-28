@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from functools import cache
+from collections.abc import Callable, Iterator
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
 from privacy_gateway.classes import DataClass
-from privacy_gateway.detect.validators import VALIDATORS, ip_scope
+from privacy_gateway.detect.runs import (
+    COLON_PATTERN,
+    FQDN_PATTERN,
+    JWT_PATTERN,
+    LINE_KEYWORD_SHAPE,
+    PASS_PW_PATTERN,
+    colon_finditer,
+    fqdn_finditer,
+    jwt_finditer,
+    line_keyword_finditer,
+    pass_pw_finditer,
+)
+from privacy_gateway.detect.validators import IBAN_LENGTHS, VALIDATORS, ip_scope
 from privacy_gateway.model import ConfigError, Finding, Span
+from privacy_gateway.tokens import NUMBERED_TOKEN
 
 if TYPE_CHECKING:
     from privacy_gateway.config import Config
@@ -22,6 +35,26 @@ MAX_CONFIDENCE = 0.99
 IP_CLASS = "IP_ADDRESS"
 IP_SCOPE_CLASSES = {"private": "PRIVATE_IP", "public": "PUBLIC_IP"}
 GENERIC_ID_CLASS = "GENERIC_ID"
+PHONE_INTERNATIONAL_CLASS = "PHONE_INTERNATIONAL"
+# Grouped values whose pattern can take a trailing word or number group (`IBAN ... EUR`, a card
+# number followed by its CVC): a failed check retries the prefixes that end before a separator.
+GROUPED_CLASSES = frozenset({"IBAN", "CREDIT_CARD", "DEBIT_CARD"})
+GROUP_SEPARATORS = " -"
+# Printed card formats a prefix must have: 4-4-4-4 (plus a short group), Amex 4-6-5, ungrouped.
+CVC_RE = re.compile(r"\d{3,4}")
+EXPIRY_MONTH_RE = re.compile(r"0[1-9]|1[0-2]")
+CARD_FORMAT_RE = re.compile(r"\d{4}(?:[ -]\d{4}){2}[ -]\d{1,4}|\d{4}[ -]\d{6}[ -]\d{5}|\d{13,19}")
+DIFF_HEADER_RE = re.compile(
+    r"^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|diff --git )", re.MULTILINE
+)
+DIFF_FILE_HEADER_RE = re.compile(r"^--- \S[^\n]*\r?\n\+\+\+ \S", re.MULTILINE)
+DIFF_LINE_RE = re.compile(r"[ +\-@\\]")
+LINEAR_FINDERS = {
+    FQDN_PATTERN: fqdn_finditer,
+    JWT_PATTERN: jwt_finditer,
+    PASS_PW_PATTERN: pass_pw_finditer,
+    COLON_PATTERN: colon_finditer,
+}
 STANDARD_PREFIXES = frozenset(
     {
         "ISO", "IEC", "RFC", "IEEE", "DIN", "EN", "SHA", "MD", "UTF", "HTTP", "TLS", "SSL",
@@ -30,6 +63,23 @@ STANDARD_PREFIXES = frozenset(
         "ECMA", "POSIX", "UTC", "GMT", "ISBN", "ISSN",
     }
 )
+
+
+def finditer(regex: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    """`regex.finditer(text)`, through a linear-time finder where one is known to be equal."""
+    finder = LINEAR_FINDERS.get(regex.pattern)
+    if finder is not None:
+        return finder(regex, text)
+    keyword = _line_keyword(regex.pattern)
+    if keyword is not None:
+        return line_keyword_finditer(regex, text, keyword)
+    return regex.finditer(text)
+
+
+@cache
+def _line_keyword(pattern: str) -> re.Pattern[str] | None:
+    shape = LINE_KEYWORD_SHAPE.match(pattern)
+    return None if shape is None else re.compile(shape.group(0), re.MULTILINE)
 
 
 @cache
@@ -65,7 +115,7 @@ def _context_re(words: tuple[str, ...]) -> re.Pattern[str]:
 def _has_context(text: str, start: int, words: tuple[str, ...]) -> bool:
     if not words:
         return False
-    window = text[max(0, start - CONTEXT_WINDOW) : start]
+    window = NUMBERED_TOKEN.sub(" ", text[max(0, start - CONTEXT_WINDOW) : start])
     return _context_re(words).search(window) is not None
 
 
@@ -73,7 +123,40 @@ def _is_standard_reference(value: str) -> bool:
     return value.split("-", 1)[0].upper() in STANDARD_PREFIXES
 
 
+@lru_cache(maxsize=8)
+def _diff_lines(text: str) -> frozenset[int]:
+    """Start offsets of the lines below a diff header, up to the first blank or non-diff line."""
+    covered: set[int] = set()
+    inside = False
+    offset = 0
+    lines = text.split("\n")
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if not line.strip():
+            inside = False
+        elif DIFF_HEADER_RE.match(line) or DIFF_FILE_HEADER_RE.match(f"{line}\n{following}"):
+            inside = True
+        elif inside and DIFF_LINE_RE.match(line):
+            covered.add(offset)
+        else:
+            inside = False
+        offset += len(raw) + 1
+    return frozenset(covered)
+
+
+def _in_diff_block(text: str, start: int) -> bool:
+    """A diff header above the line at `start`, with only diff lines and no blank line between."""
+    return text.rfind("\n", 0, start) + 1 in _diff_lines(text)
+
+
+def _at_line_start(text: str, start: int) -> bool:
+    return start == 0 or text[start - 1] in "\r\n"
+
+
 def _span_of(match: re.Match[str]) -> Span:
+    if "value" in match.re.groupindex:
+        return Span(*match.span("value"))
     if match.re.groups >= 1 and match.group(1) is not None:
         return Span(*match.span(1))
     return Span(*match.span(0))
@@ -92,7 +175,8 @@ class PatternStage:
                 continue
             validator = _validator_for(data_class)
             for regex in _compile(data_class.patterns):
-                for match in regex.finditer(text):
+                matches = finditer(regex, text)
+                for match in matches:
                     new.extend(self._for_match(text, match, data_class, validator, config))
         new.sort(key=lambda f: (f.span.start, f.span.end, f.data_class))
         return new
@@ -109,10 +193,29 @@ class PatternStage:
         value = text[span.start : span.end]
         if data_class.name == GENERIC_ID_CLASS and _is_standard_reference(value):
             return []
-        if validator is not None and not validator(value):
+        labelled = "label" in match.re.groupindex and match.group("label") is not None
+        if validator is not None and not labelled and not validator(value):
+            prefix = (
+                _valid_prefix(value, validator, data_class.name)
+                if data_class.name in GROUPED_CLASSES
+                else ""
+            )
+            if not prefix:
+                return []
+            if data_class.name != "IBAN" and not _card_tail(
+                text, span, len(prefix), _has_context(text, match.start(), data_class.context_words)
+            ):
+                return []
+            span = Span(span.start, span.start + len(prefix))
+            value = prefix
+        if (
+            data_class.name == PHONE_INTERNATIONAL_CLASS
+            and _at_line_start(text, span.start)
+            and _in_diff_block(text, span.start)
+        ):
             return []
         has_context = _has_context(text, match.start(), data_class.context_words)
-        if data_class.context_required and not has_context:
+        if data_class.context_required and not has_context and not labelled:
             return []
         confidence = VALIDATED_CONFIDENCE if validator is not None else BASE_CONFIDENCE
         if has_context:
@@ -143,3 +246,40 @@ class PatternStage:
                 attributes={"scope": scope},
             )
         ]
+
+
+def _valid_prefix(value: str, validator: Callable[[str], bool], class_name: str) -> str:
+    """The longest prefix that ends before a group separator and passes the check, or "".
+
+    An IBAN glued to a word (`...3000USD`) has no separator to cut at; it is cut at the length
+    of its country instead.
+    """
+    cut = len(value)
+    while True:
+        cut = max((value.rfind(separator, 0, cut) for separator in GROUP_SEPARATORS), default=-1)
+        if cut <= 0:
+            return _iban_of_country_length(value, validator) if class_name == "IBAN" else ""
+        prefix = value[:cut].rstrip(GROUP_SEPARATORS)
+        card_shaped = class_name == "IBAN" or CARD_FORMAT_RE.fullmatch(prefix) is not None
+        if prefix and card_shaped and validator(prefix):
+            return prefix
+
+
+def _iban_of_country_length(value: str, validator: Callable[[str], bool]) -> str:
+    expected = IBAN_LENGTHS.get(value[:2].upper())
+    count = 0
+    for index, char in enumerate(value):
+        if char not in GROUP_SEPARATORS:
+            count += 1
+        if count == expected:
+            prefix = value[: index + 1]
+            return prefix if validator(prefix) else ""
+    return ""
+
+
+def _card_tail(text: str, span: Span, prefix: int, has_context: bool) -> bool:
+    """True when what follows a card prefix reads as a CVC or expiry, or a card word is near."""
+    tail = text[span.start + prefix : span.end].strip(GROUP_SEPARATORS)
+    if has_context or CVC_RE.fullmatch(tail):
+        return True
+    return EXPIRY_MONTH_RE.fullmatch(tail) is not None and text[span.end : span.end + 1] in ("/", ".")

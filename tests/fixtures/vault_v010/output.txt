@@ -1,0 +1,3 @@
+Sehr geehrte Frau <PERSON_FEMALE_001>,
+bitte überweisen Sie auf <IBAN_001>. Rückfragen an <EMAIL_001> oder +49 30 12345678.
+Mit freundlichen Grüßen an <PERSON_FEMALE_001> BEISPIEL, IBAN <IBAN_001>.

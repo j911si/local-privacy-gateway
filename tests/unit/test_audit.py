@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+import stat
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from privacy_gateway import Gateway
-from privacy_gateway.audit import AuditLog
+from privacy_gateway import Gateway, audit
+from privacy_gateway.audit import AuditLog, RequestAuditLog, rotate
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -24,7 +25,7 @@ def test_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     (event,) = _read(path)
     assert event["event"] == "pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert "doc_sha256" not in event
     assert event["counts"] == {"IBAN": 1}
     assert event["token_count"] == 3
@@ -38,7 +39,7 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).session_pseudonymize("s1", 2, 3, "ok", 17)
     (event,) = _read(path)
     assert event["event"] == "session_pseudonymize"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["new_tokens"] == 2
     assert event["reused_tokens"] == 3
     assert event["leakage"] == "ok"
@@ -49,7 +50,6 @@ def test_session_pseudonymize_event_has_expected_keys(tmp_path: Path) -> None:
 def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     AuditLog(path).proxy_request(
-        session_key="conv-1",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -59,7 +59,6 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
         system_transformed=False,
     )
     AuditLog(path).proxy_request(
-        session_key="conv-2",
         path="/v1/messages",
         fields=4,
         tokens=2,
@@ -69,7 +68,7 @@ def test_proxy_request_event_has_expected_keys(tmp_path: Path) -> None:
     )
     event, default_event = _read(path)
     assert event["event"] == "proxy_request"
-    assert event["session_key"] == "conv-1"
+    assert "session_key" not in event
     assert event["path"] == "/v1/messages"
     assert event["fields"] == 4
     assert event["tokens"] == 2
@@ -86,7 +85,7 @@ def test_restore_event_has_expected_keys(tmp_path: Path) -> None:
     AuditLog(path).restore("s1", 4, 1, "lenient")
     (event,) = _read(path)
     assert event["event"] == "restore"
-    assert event["session_id"] == "s1"
+    assert event["audit_id"] == "s1"
     assert event["restored_count"] == 4
     assert event["unknown_token_count"] == 1
     assert event["mode"] == "lenient"
@@ -142,7 +141,7 @@ def test_disabled_log_writes_nothing(tmp_path: Path) -> None:
     log = AuditLog(None)
     log.pseudonymize("s1", {"IBAN": 1}, 3, "ok", 42)
     log.session_pseudonymize("s1", 1, 0, "ok", 1)
-    log.proxy_request("conv-1", "/v1/messages", 1, 1, "ok", False, 1)
+    log.proxy_request("/v1/messages", 1, 1, "ok", False, 1)
     log.restore("s1", 1, 0, "strict")
     log.vault_purge(1)
     log.error(exc_type="RuntimeError", stage="pattern")
@@ -172,3 +171,89 @@ def test_no_stored_value_appears_in_the_log(
     for entry in entries.values():
         for value in [entry.value, *entry.surface_forms]:
             assert value not in content, value
+
+
+NOW = datetime(2026, 11, 9, 7, 0, tzinfo=UTC)
+
+
+def _daily(directory: Path, day: str) -> Path:
+    path = directory / f"audit-{day}.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
+def test_request_log_writes_a_v2_line_into_the_utc_day_file(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    log = RequestAuditLog(directory, clock=lambda: NOW)
+    path = log.write("proxy_request", {"verdict": "ok"})
+    assert path == directory / "audit-2026-11-09.jsonl"
+    (record,) = _read(path)
+    assert list(record)[:3] == ["v", "event", "ts"]
+    assert record["v"] == 2
+    assert record["event"] == "proxy_request"
+    assert record["ts"] == "2026-11-09T07:00:00+00:00"
+    assert record["verdict"] == "ok"
+    assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_request_log_appends(tmp_path: Path) -> None:
+    log = RequestAuditLog(tmp_path / "audit", clock=lambda: NOW)
+    log.write("proxy_request", {"n": 1})
+    path = log.write("proxy_request", {"n": 2})
+    assert [record["n"] for record in _read(path)] == [1, 2]
+
+
+def test_request_log_creates_no_salt_and_has_no_value_hash(tmp_path: Path) -> None:
+    log = RequestAuditLog(tmp_path / "audit", clock=lambda: NOW)
+    log.write("proxy_request", {"verdict": "ok"})
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["audit"]
+    assert not hasattr(log, "value_hmac")
+    for name in ("load_salt", "SALT_NAME", "SALT_BYTES", "HMAC_HEX_CHARS", "NO_HMAC_CLASSES"):
+        assert not hasattr(audit, name)
+
+
+def test_an_old_salt_file_is_neither_read_nor_deleted(tmp_path: Path) -> None:
+    old = tmp_path / "audit.salt"
+    old.write_bytes(b"short")
+    RequestAuditLog(tmp_path / "audit", clock=lambda: NOW).write("proxy_request", {})
+    assert old.read_bytes() == b"short"
+
+
+def test_rotation_deletes_180_days_and_keeps_179_and_foreign_files(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    directory.mkdir()
+    today = NOW.date()
+    old = _daily(directory, (today - timedelta(days=180)).isoformat())
+    older = _daily(directory, (today - timedelta(days=400)).isoformat())
+    kept = _daily(directory, (today - timedelta(days=179)).isoformat())
+    foreign = directory / "notes.jsonl"
+    foreign.write_text("x", encoding="utf-8")
+    lookalike = directory / "audit-2020-01-01.jsonl.bak"
+    lookalike.write_text("x", encoding="utf-8")
+    RequestAuditLog(directory, clock=lambda: NOW).write("proxy_request", {})
+    assert not old.exists()
+    assert not older.exists()
+    assert kept.exists()
+    assert foreign.exists()
+    assert lookalike.exists()
+    assert (directory / "audit-2026-11-09.jsonl").exists()
+
+
+def test_rotation_runs_once_per_day_and_process(tmp_path: Path) -> None:
+    directory = tmp_path / "audit"
+    clock = [NOW]
+    log = RequestAuditLog(directory, clock=lambda: clock[0])
+    log.write("proxy_request", {})
+    stale = _daily(directory, (NOW.date() - timedelta(days=200)).isoformat())
+    log.write("proxy_request", {})
+    assert stale.exists()
+    clock[0] = NOW + timedelta(days=1)
+    log.write("proxy_request", {})
+    assert not stale.exists()
+
+
+def test_rotate_returns_what_it_removed(tmp_path: Path) -> None:
+    old = _daily(tmp_path, "2026-01-01")
+    _daily(tmp_path, "2026-11-01")
+    assert rotate(tmp_path, date(2026, 11, 9)) == [old]

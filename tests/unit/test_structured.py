@@ -305,3 +305,12 @@ def test_returns_only_new_findings(default_config: Config) -> None:
     existing = run(text, default_config)
     again = StructuredStage().run(text, default_config, existing)
     assert [f.data_class for f in again] == ["EMAIL"]
+
+
+def test_an_unparsable_url_is_kept_whole_instead_of_crashing(default_config: Config) -> None:
+    text = "see http://[::1/path and postgres://user:pw@[bad/db for details"
+    findings = run(text, default_config)
+    assert [value(text, f) for f in findings if f.data_class == "URL"] == ["http://[::1/path"]
+    assert [value(text, f) for f in findings if f.data_class == "DATABASE_CONNECTION_STRING"] == [
+        "postgres://user:pw@[bad/db"
+    ]

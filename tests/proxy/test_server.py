@@ -1,4 +1,5 @@
 import json
+import re
 import stat
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ UPSTREAM = "https://upstream.test"
 SETTINGS = ProxySettings(upstream_base_url=UPSTREAM)
 SECRET = "Frau Müller"
 TOKEN = "<PERSON_FEMALE_001>"
+DUMP_STAMP_AND_ID = r"\d{8}T\d{6}\.\d{6}-[0-9a-f]{12}"
 
 
 class StubSession:
@@ -59,7 +61,7 @@ class StubGateway:
 
 
 class StubRestorer:
-    def __init__(self, restore: Callable[[str], str]) -> None:
+    def __init__(self, restore: Callable[[str], str], tools: Any = None) -> None:
         self._restore = restore
         self.chunks: list[bytes] = []
 
@@ -122,7 +124,7 @@ def build(
 ) -> tuple[httpx.AsyncClient, StubGateway, list[StubRestorer]]:
     restorers: list[StubRestorer] = []
 
-    def factory(restore: Callable[[str], str]) -> StubRestorer:
+    def factory(restore: Callable[[str], str], tools: Any = None) -> StubRestorer:
         restorer = StubRestorer(restore)
         restorers.append(restorer)
         return restorer
@@ -142,7 +144,7 @@ def request_body(stream: bool = False) -> dict:
     body = {
         "model": "claude-x",
         "max_tokens": 16,
-        "metadata": {"user_id": "user_a_session_0b1c2d3e-1111-2222-3333-444444444444"},
+        "metadata": {"user_id": "user_a_session_0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"},
         "messages": [{"role": "user", "content": f"Hallo {SECRET}"}],
     }
     if stream:
@@ -184,13 +186,13 @@ async def test_non_streaming_request_is_pseudonymized_and_restored(
     assert response.status_code == 200
     assert response.json()["content"][0]["text"] == f"Guten Tag {SECRET}"
     assert str(seen[0].url) == f"{UPSTREAM}/v1/messages"
-    assert gateway.keys == ["0b1c2d3e-1111-2222-3333-444444444444"]
+    assert gateway.keys == ["0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"]
     event = gateway.audit.events[0]
     assert event["path"] == "/v1/messages"
     assert event["fields"] == 1
     assert event["leakage"] == "ok"
     assert event["streaming"] is False
-    assert event["session_key"] == "0b1c2d3e-1111-2222-3333-444444444444"
+    assert "session_key" not in event
     assert event["system_transformed"] is True
 
 
@@ -334,6 +336,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
                 "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
                 "user-agent": "claude-cli/2.0.0",
                 "x-unknown-header": "keep-me",
+                "x-pgw-session": "abc",
                 "accept-encoding": "gzip",
             },
         )
@@ -345,6 +348,7 @@ async def test_headers_are_filtered_for_the_upstream(monkeypatch: pytest.MonkeyP
     assert headers["anthropic-beta"] == "claude-code-20250219,oauth-2025-04-20"
     assert headers["user-agent"] == "claude-cli/2.0.0"
     assert headers["x-unknown-header"] == "keep-me"
+    assert "x-pgw-session" not in headers
     assert headers["accept-encoding"] == "identity"
     assert headers["host"] == "upstream.test"
     assert headers["content-length"] == str(len(seen[0].content))
@@ -430,7 +434,7 @@ async def test_one_session_instance_serves_a_whole_conversation(
         await client.post("/v1/messages", json=other)
 
     assert gateway.keys == [
-        "0b1c2d3e-1111-2222-3333-444444444444",
+        "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
         "99999999-1111-2222-3333-444444444444",
     ]
     assert len(gateway.sessions) == 2
@@ -469,7 +473,7 @@ async def test_the_session_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> 
             await client.post("/v1/messages", json=body)
         await client.post("/v1/messages", json=first)
 
-    assert gateway.keys.count("0b1c2d3e-1111-2222-3333-444444444444") == 2
+    assert gateway.keys.count("0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f") == 2
 
 
 @pytest.mark.asyncio
@@ -506,7 +510,8 @@ async def test_debug_dir_receives_the_transformed_body(
 
     dumps = sorted((tmp_path / "dumps").glob("*.json"))
     assert len(dumps) == 1
-    assert dumps[0].name.endswith("-0b1c2d3e-1111-2222-3333-444444444444.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"\.json", dumps[0].name)
+    assert "0b1c2d3e" not in dumps[0].name
     written = dumps[0].read_text(encoding="utf-8")
     assert json.loads(written)["messages"][0]["content"] == f"Hallo {TOKEN}"
     assert SECRET not in written
@@ -531,6 +536,7 @@ async def test_debug_dir_gets_only_the_failed_original_on_a_leak(
     dumps = list(tmp_path.glob("*.json"))
     assert len(dumps) == 1
     assert dumps[0].name.endswith("-FAILED-original.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"-FAILED-original\.json", dumps[0].name)
     assert json.loads(dumps[0].read_text(encoding="utf-8")) == request_body()
 
 
@@ -547,12 +553,27 @@ def _recording_handler(calls: list[httpx.Request]) -> Callable[[httpx.Request], 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"{not json", b'["a"]', b""])
+async def test_a_message_body_that_is_not_a_json_object_gets_400_without_upstream(
+    monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    called: list[httpx.Request] = []
+    client, gateway, _ = build(monkeypatch, _recording_handler(called))
+    async with client:
+        response = await client.post(
+            "/v1/messages", content=content, headers={"content-type": "application/json"}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert called == []
+    assert gateway.audit.events[0]["leakage"] == "rejected"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "headers"),
     [
-        ("/v1/messages", b"{not json", {"content-type": "application/json"}),
-        ("/v1/messages", b'["a"]', {"content-type": "application/json"}),
-        ("/v1/messages", b"", {"content-type": "application/json"}),
         (
             "/v1/messages",
             b'{"messages":[]}',
@@ -575,7 +596,8 @@ async def test_unparsable_message_posts_are_rejected_without_upstream(
     assert called == []
     event = gateway.audit.events[0]
     assert event["leakage"] == "rejected"
-    assert event["path"] == path
+    # Rejected requests log the shortened path: a segment may carry a value (Codex RC3 5#6).
+    assert event["path"] == server.short_path(path)
     assert event["fields"] == 0
 
 
@@ -624,11 +646,18 @@ async def test_loopback_host_headers_are_accepted(
 async def test_no_host_check_when_bound_to_a_public_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = ProxySettings(upstream_base_url=UPSTREAM, listen_host="0.0.0.0")
+    settings = ProxySettings(
+        upstream_base_url=UPSTREAM,
+        listen_host="0.0.0.0",
+        auth_token="tok-test",
+        allow_public_bind=True,
+    )
     client, _, _ = build(monkeypatch, _recording_handler([]), settings=settings)
     async with client:
         response = await client.post(
-            "/v1/messages", json=request_body(), headers={"host": "somewhere.test"}
+            "/v1/messages",
+            json=request_body(),
+            headers={"host": "somewhere.test", "x-pgw-auth": "tok-test"},
         )
 
     assert response.status_code == 200
@@ -753,4 +782,5 @@ async def test_the_original_dump_needs_the_switch(
     dumps = list(tmp_path.glob("*.json"))
     assert len(dumps) == 1
     assert dumps[0].name.endswith("-FAILED-original.json")
+    assert re.fullmatch(DUMP_STAMP_AND_ID + r"-FAILED-original\.json", dumps[0].name)
     assert stat.S_IMODE(dumps[0].stat().st_mode) == 0o600

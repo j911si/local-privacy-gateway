@@ -34,6 +34,7 @@ TOP_LEVEL_KEYS = frozenset(
         "person",
         "languages",
         "min_confidence",
+        "system_usernames",
     }
 )
 CLASS_KEYS = frozenset(
@@ -99,6 +100,7 @@ class Config:
     person: PersonConfig
     languages: list[str] = field(default_factory=lambda: ["de", "en"])
     min_confidence: float = 0.5
+    system_usernames: tuple[str, ...] = ()
 
     def hash(self) -> str:
         normalized = {
@@ -124,6 +126,7 @@ class Config:
             "person": self.person.record_gender_from_salutation,
             "languages": self.languages,
             "min_confidence": self.min_confidence,
+            "system_usernames": sorted(self.system_usernames),
         }
         payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -214,6 +217,15 @@ def _merge_dictionaries(
         if not path.is_absolute():
             path = base_dir / path
         _extend_unique(target.setdefault(key, []), _read_terms(path))
+
+
+def _merge_system_usernames(target: list[str], data: dict[str, Any]) -> None:
+    names = data.get("system_usernames")
+    if names is None:
+        return
+    if not isinstance(names, list):
+        raise ConfigError("'system_usernames' must be a list of names")
+    _extend_unique(target, [str(name) for name in names])
 
 
 def _extend_unique(target: list[str], terms: list[str]) -> None:
@@ -307,6 +319,7 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
     restore_raw: dict[str, Any] = {}
     person_raw: dict[str, Any] = {}
     scalars: dict[str, Any] = {}
+    system_usernames: list[str] = []
 
     for layer_path in _layer_paths(path, env):
         data = _read_yaml(layer_path)
@@ -316,6 +329,7 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
         _merge_section(audit_raw, data, "audit", AUDIT_KEYS)
         _merge_section(restore_raw, data, "restore", RESTORE_KEYS)
         _merge_section(person_raw, data, "person", PERSON_KEYS)
+        _merge_system_usernames(system_usernames, data)
         for key in ("languages", "min_confidence"):
             if key in data:
                 scalars[key] = data[key]
@@ -362,4 +376,5 @@ def load_config(path: str | Path | None = None, *, env: Mapping[str, str] | None
         ),
         languages=[str(item) for item in languages],
         min_confidence=float(min_confidence),
+        system_usernames=tuple(system_usernames),
     )

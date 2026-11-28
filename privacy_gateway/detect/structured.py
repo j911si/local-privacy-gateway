@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import re
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from privacy_gateway.detect.runs import run_finditer
 from privacy_gateway.model import Finding, Span
 
 if TYPE_CHECKING:
@@ -18,7 +21,12 @@ CONFIDENCE = 0.98
 JWT_CONFIDENCE = 0.99
 
 URL_RE = re.compile(r"(?:https?|wss?|ftp)://[^\s>\"')]+")
+URL_TRAILING_PUNCTUATION = ".,;:!?"
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+EMAIL_RUN_RE = re.compile(r"[\w.+-]+")
+# `react@18.2.0`: a lowercase package name with two or three ASCII number groups is a version.
+PACKAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+VERSION_DOMAIN_RE = re.compile(r"[0-9]+(?:\.[0-9]+){1,2}")
 JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_.\-])"
 )
@@ -27,16 +35,32 @@ PEM_RE = re.compile(
     r"[\s\S]*?"
     r"-----END \1PRIVATE KEY(?: BLOCK)?-----"
 )
+PEM_BEGIN_RE = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
+PEM_END_RE = re.compile(r"-----END ([A-Z ]*)PRIVATE KEY(?: BLOCK)?-----")
 DB_URI_RE = re.compile(
     r"(?:postgresql|postgres|mysql|mongodb\+srv|mongodb|redis|amqp|mssql)://[^\s>\"')]+"
 )
 ADO_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=[^;\n]*(?:;[ \t]*[A-Za-z][A-Za-z ]{1,24}=[^;\n]*)+")
-HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
+ADO_KEY_RE = re.compile(r"[A-Za-z][A-Za-z ]{1,24}=")
+ADO_NEXT_RE = re.compile(r";[ \t]*[A-Za-z][A-Za-z ]{1,24}=")
+HEADER_RE = re.compile(r"^([ \t]*)([A-Za-z][A-Za-z-]*):[ \t]*(.+)$", re.MULTILINE)
 AUTH_RE = re.compile(r"(?i)^(?:bearer|basic)\s+(\S+)")
-DOC_SEP_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
-K8S_SECRET_RE = re.compile(r"^kind:[ \t]*Secret[ \t]*$", re.MULTILINE)
-K8S_DATA_RE = re.compile(r"^([ \t]*)data:[ \t]*$", re.MULTILINE)
-K8S_ENTRY_RE = re.compile(r"^([ \t]+)[\w.\-]+:[ \t]*(\S+)[ \t]*$")
+INLINE_BASIC_RE = re.compile(
+    r"(?i)(?<![\w-])(?:proxy-)?authorization:[ \t]*basic[ \t]+"
+    r"([A-Za-z0-9+/]{2,}={0,2})(?![\w+/=-])"
+)
+DOC_SEP_RE = re.compile(r"^---[ \t]*\r?$", re.MULTILINE)
+K8S_SECRET_RE = re.compile(
+    r"^[\"']?kind[\"']?:[ \t]*[\"']?Secret[\"']?[ \t]*(?:#.*)?\r?$", re.MULTILINE
+)
+K8S_DATA_RE = re.compile(
+    r"^([ \t]*)[\"']?(?:data|stringData)[\"']?:[ \t]*(?:#.*)?\r?$", re.MULTILINE
+)
+K8S_ENTRY_RE = re.compile(
+    r"^([ \t]+)(?:[\w.\-]+|\"[^\"\r\n]*\"|'[^'\r\n]*'):[ \t]*"
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^']|'')*)'|([|>](?:[-+]?\d?|\d[-+]))(?:[ \t]+#.*)?"
+    r"|(\S(?:.*\S)?))?[ \t]*\r?$"
+)
 
 INTERNAL_SUFFIXES = (".local", ".internal", ".corp", ".lan")
 SIGNATURE_KEYS = frozenset({"sig", "signature", "x-amz-signature", "x-goog-signature"})
@@ -44,8 +68,11 @@ TOKEN_KEYS = frozenset({"token", "access_token"})
 API_KEY_KEYS = frozenset({"api_key", "apikey", "key"})
 SESSION_COOKIES = frozenset({"sessionid", "jsessionid", "phpsessid", "connect.sid", "sid"})
 AUTH_COOKIES = frozenset({"auth", "token", "access_token", "id_token"})
-CSRF_COOKIES = frozenset({"csrf", "xsrf", "_csrf"})
+CSRF_COOKIES = frozenset(
+    {"csrf", "xsrf", "_csrf", "csrftoken", "csrf-token", "xsrf-token", "csrfmiddlewaretoken"}
+)
 SKIPPED_X_HEADERS = frozenset({"x-request-id"})
+AUTH_HEADERS = frozenset({"authorization", "proxy-authorization"})
 ADO_HOST_KEYS = frozenset({"server", "data source", "host", "addr", "address"})
 ADO_KEY_CLASSES = {
     "server": "DATABASE_HOST",
@@ -152,9 +179,7 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
             children.append(_finding(offset, offset + len(user), "PERSON_USERNAME"))
         if separator and password:
             password_start = offset + len(user) + 1
-            children.append(
-                _finding(password_start, password_start + len(password), "PASSWORD")
-            )
+            children.append(_finding(password_start, password_start + len(password), "PASSWORD"))
     host = host_part
     if host.startswith("["):
         host = host[: host.find("]") + 1] if "]" in host else host
@@ -169,8 +194,15 @@ def _netloc_children(netloc: str, offset: int, config: Config, host_default: str
 def _parse_urls(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in URL_RE.finditer(text):
-        raw = match.group(0)
-        parts = urlsplit(raw)
+        raw = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
+        end = match.start() + len(raw)
+        if not raw.partition("://")[2]:
+            continue
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), end, "URL"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         host = parts.hostname or ""
         children = _netloc_children(
@@ -187,14 +219,16 @@ def _parse_urls(text: str, config: Config) -> list[Finding]:
             if override is not None:
                 data_class = override
         children.sort(key=lambda child: child.span.start)
-        findings.append(_finding(match.start(), match.end(), data_class, children))
+        findings.append(_finding(match.start(), end, data_class, children))
     return findings
 
 
 def _parse_emails(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in EMAIL_RE.finditer(text):
+    for match in run_finditer(EMAIL_RE, text, EMAIL_RUN_RE):
         local, _, domain = match.group(0).partition("@")
+        if PACKAGE_NAME_RE.fullmatch(local) and VERSION_DOMAIN_RE.fullmatch(domain):
+            continue
         domain_start = match.start() + len(local) + 1
         children = [
             _finding(match.start(), match.start() + len(local), "PERSON_USERNAME"),
@@ -225,9 +259,39 @@ def _parse_jwts(text: str, config: Config) -> list[Finding]:
     return findings
 
 
+def _all_starts(pattern: re.Pattern[str], text: str) -> Iterator[re.Match[str]]:
+    position = 0
+    while (match := pattern.search(text, position)) is not None:
+        yield match
+        position = match.start() + 1
+
+
+def pem_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `PEM_RE.finditer(text)` yields, in linear time.
+
+    The END lines are collected once per label; a BEGIN is only handed to PEM_RE.match when an
+    END with its label follows. Plain `finditer` scans to the end of the text from every BEGIN
+    without an END, which is quadratic on many such lines.
+    """
+    ends: dict[str, list[int]] = {}
+    for end in _all_starts(PEM_END_RE, text):
+        ends.setdefault(end.group(1), []).append(end.start())
+    position = 0
+    for begin in _all_starts(PEM_BEGIN_RE, text):
+        if begin.start() < position:
+            continue
+        starts = ends.get(begin.group(1), [])
+        if bisect.bisect_left(starts, begin.end()) == len(starts):
+            continue
+        match = PEM_RE.match(text, begin.start())
+        if match is not None:
+            yield match
+            position = match.end()
+
+
 def _parse_pem_blocks(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
-    for match in PEM_RE.finditer(text):
+    for match in pem_finditer(text):
         label = match.group(1)
         if "OPENSSH" in label:
             data_class = "SSH_PRIVATE_KEY"
@@ -243,7 +307,11 @@ def _parse_connection_strings(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in DB_URI_RE.finditer(text):
         raw = match.group(0)
-        parts = urlsplit(raw)
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            findings.append(_finding(match.start(), match.end(), "DATABASE_CONNECTION_STRING"))
+            continue
         netloc_offset = match.start() + len(parts.scheme) + 3
         children = _netloc_children(parts.netloc, netloc_offset, config, "DATABASE_HOST")
         children = [
@@ -272,9 +340,30 @@ def _force_host_class(child: Finding) -> Finding:
     return child
 
 
+def ado_finditer(text: str) -> Iterator[re.Match[str]]:
+    """Yield exactly what `ADO_RE.finditer(text)` yields, in linear time.
+
+    A value runs to the next `;` or newline, so a match needs a key right after the `;` that
+    ends the segment it starts in. Only the first key of such a segment is tried; plain
+    `finditer` rescans the rest of the line from every start, which is quadratic on `aA=aA=`.
+    """
+    position = 0
+    while (semicolon := text.find(";", position)) != -1:
+        newline = text.rfind("\n", position, semicolon)
+        start = position if newline == -1 else newline + 1
+        key = ADO_KEY_RE.search(text, start, semicolon)
+        if key is not None and ADO_NEXT_RE.match(text, semicolon) is not None:
+            match = ADO_RE.match(text, key.start())
+            if match is not None:
+                yield match
+                position = match.end()
+                continue
+        position = semicolon + 1
+
+
 def _parse_ado_strings(text: str) -> list[Finding]:
     findings: list[Finding] = []
-    for match in ADO_RE.finditer(text):
+    for match in ado_finditer(text):
         pairs = _split_pairs(match.group(0), match.start(), ";")
         keys = {name.strip().lower() for name, _, _, _ in pairs}
         if not keys & ADO_HOST_KEYS or not keys & {"database", "user id", "password", "pwd"}:
@@ -321,16 +410,16 @@ def _cookie_children(value: str, offset: int, only_first: bool) -> list[Finding]
 def _parse_headers(text: str, config: Config) -> list[Finding]:
     findings: list[Finding] = []
     for match in HEADER_RE.finditer(text):
-        name = match.group(1).lower()
-        value = match.group(2)
-        value_offset = match.start(2)
-        if name == "authorization":
+        name = match.group(2).lower()
+        value = match.group(3)
+        value_offset = match.start(3)
+        if match.group(1) and name not in AUTH_HEADERS:
+            continue
+        if name in AUTH_HEADERS:
             credential = AUTH_RE.match(value)
             if credential is not None:
                 start = value_offset + credential.start(1)
-                findings.append(
-                    _finding(start, start + len(credential.group(1)), "ACCESS_TOKEN")
-                )
+                findings.append(_finding(start, start + len(credential.group(1)), "ACCESS_TOKEN"))
         elif name in ("cookie", "set-cookie"):
             children = _cookie_children(value, value_offset, name == "set-cookie")
             if children:
@@ -340,7 +429,19 @@ def _parse_headers(text: str, config: Config) -> list[Finding]:
                 continue
             child = _finding(value_offset, value_offset + len(value), "HEADER_VALUE")
             findings.append(_finding(match.start(), match.end(), "CUSTOM_HEADER", [child]))
+    for match in INLINE_BASIC_RE.finditer(text):
+        if _is_basic_credential(match.group(1)):
+            findings.append(_finding(match.start(1), match.end(1), "ACCESS_TOKEN"))
     return findings
+
+
+def _is_basic_credential(value: str) -> bool:
+    stripped = value.rstrip("=")
+    try:
+        decoded = base64.b64decode(stripped + "=" * (-len(stripped) % 4), validate=True)
+    except ValueError:
+        return False
+    return b":" in decoded
 
 
 def _documents(text: str) -> list[tuple[int, int]]:
@@ -359,22 +460,37 @@ def _parse_kubernetes_secrets(text: str, config: Config) -> list[Finding]:
         block = text[doc_start:doc_end]
         if K8S_SECRET_RE.search(block) is None:
             continue
+        scanned = 0
         for data_match in K8S_DATA_RE.finditer(block):
+            if data_match.start() < scanned:
+                # ponytail: a nested `data:` line was read as part of the section above.
+                continue
             indent = len(data_match.group(1))
+            scalar_indent: int | None = None
             position = data_match.end() + 1
             while position < len(block):
                 newline = block.find("\n", position)
                 line_end = len(block) if newline == -1 else newline
                 line = block[position:line_end]
-                if line.strip():
+                stripped = line.strip()
+                lead = len(line) - len(line.lstrip(" \t"))
+                if stripped and scalar_indent is not None and lead > scalar_indent:
+                    start = doc_start + position + lead
+                    findings.append(_finding(start, start + len(stripped), "KUBERNETES_SECRET"))
+                elif stripped.startswith("#"):
+                    pass
+                elif stripped:
                     entry = K8S_ENTRY_RE.match(line)
                     if entry is None or len(entry.group(1)) <= indent:
                         break
-                    start = doc_start + position + entry.start(2)
-                    findings.append(
-                        _finding(start, start + len(entry.group(2)), "KUBERNETES_SECRET")
-                    )
+                    scalar_indent = len(entry.group(1)) if entry.group(4) else None
+                    group = next((g for g in (2, 3, 5) if entry.group(g)), None)
+                    if group is not None:
+                        start = doc_start + position + entry.start(group)
+                        end = doc_start + position + entry.end(group)
+                        findings.append(_finding(start, end, "KUBERNETES_SECRET"))
                 position = line_end + 1
+            scanned = max(scanned, position)
     return findings
 
 
@@ -389,6 +505,28 @@ PARSERS = (
 )
 
 
+def uncontained(candidates: list[Finding]) -> list[Finding]:
+    """Candidates in order, without those inside the span of an earlier kept one."""
+    starts = sorted({candidate.span.start for candidate in candidates})
+    tree = [-1] * (len(starts) + 1)
+    kept: list[Finding] = []
+    for candidate in candidates:
+        span = candidate.span
+        index = bisect.bisect_right(starts, span.start)
+        widest = -1
+        while index > 0:
+            widest = max(widest, tree[index])
+            index -= index & -index
+        if widest >= span.end:
+            continue
+        kept.append(candidate)
+        index = bisect.bisect_left(starts, span.start) + 1
+        while index < len(tree):
+            tree[index] = max(tree[index], span.end)
+            index += index & -index
+    return kept
+
+
 class StructuredStage:
     """Parses structured formats and classifies their components."""
 
@@ -396,10 +534,7 @@ class StructuredStage:
 
     def run(self, text: str, config: Config, findings: list[Finding]) -> list[Finding]:
         """Return new parent findings whose components are attached as children."""
-        new: list[Finding] = []
-        for parser in PARSERS:
-            for candidate in parser(text, config):
-                if not any(kept.span.contains(candidate.span) for kept in new):
-                    new.append(candidate)
+        candidates = [candidate for parser in PARSERS for candidate in parser(text, config)]
+        new = uncontained(candidates)
         new.sort(key=lambda finding: (finding.span.start, -len(finding.span)))
         return new

@@ -28,7 +28,7 @@ IBAN_TOKEN = "<IBAN_001>"
 CONFIG = f"dictionaries:\n  CUSTOMER_NAME: [{CUSTOMER}]\n"
 UPSTREAM = "https://upstream.test"
 SETTINGS = ProxySettings(upstream_base_url=UPSTREAM)
-CONVERSATION = "0b1c2d3e-1111-2222-3333-444444444444"
+CONVERSATION = "0b1c2d3e-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 OTHER_CONVERSATION = "9f8e7d6c-5555-6666-7777-888888888888"
 LETTER = (
     f"Sehr geehrte Frau {LAST_NAME}, die {CUSTOMER} bucht von IBAN {IBAN} ab."
@@ -170,12 +170,12 @@ async def test_non_streaming_roundtrip_hides_values_and_restores_the_answer(
     assert response.status_code == 200
     blocks = response.json()["content"]
     assert blocks[0]["text"] == f"Notiz zu {LAST_NAME} und {CUSTOMER} und {IBAN}."
-    assert blocks[1]["input"]["content"] == f"Kunde {CUSTOMER}"
+    assert blocks[1]["input"]["content"] == f"Kunde {CUSTOMER_TOKEN}"
     assert TOKEN_PATTERN.findall(sent_text(seen[0])) == [PERSON_TOKEN, CUSTOMER_TOKEN, IBAN_TOKEN]
 
     (event,) = audit_events(audit_log, "proxy_request")
     assert event["path"] == "/v1/messages"
-    assert event["session_key"] == CONVERSATION
+    assert "session_key" not in event
     assert event["leakage"] == "ok"
     assert event["streaming"] is False
     assert event["fields"] == 3
@@ -407,3 +407,26 @@ async def test_a_text_document_block_is_pseudonymized_and_restored(gateway: Gate
     document = json.loads(seen[0].content)["messages"][0]["content"][-1]
     assert document["source"]["data"] == f"IBAN {IBAN_TOKEN}"
     assert response.json()["content"][0]["text"] == IBAN
+
+
+@pytest.mark.asyncio
+async def test_a_learned_user_name_does_not_hide_the_last_name_glued_to_a_first_name(
+    gateway: Gateway,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+    client = build(gateway, handler)
+    async with client:
+        first = await client.post(
+            "/v1/messages", json=request_body("Herr Wendland, Pfad /home/awendland/notes.txt")
+        )
+        second = await client.post("/v1/messages", json=request_body("Gruss AnnikaWendland"))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "wendland" not in seen[0].content.decode("utf-8").lower()
+    assert "Wendland" not in sent_text(seen[-1])
